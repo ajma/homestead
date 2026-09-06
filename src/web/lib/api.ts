@@ -2,16 +2,23 @@
  * The one HTTP error the app throws. `code` is the server's machine-readable
  * `{ error }` string — "operation_in_progress", "forbidden" — which callers
  * branch on; `status` is what decides retry and redirect policy.
+ *
+ * `detail` is the server's human-readable half of the same body. It is the
+ * only thing that says *which* operation is already running behind a 409, so
+ * dropping it left the user with "an operation is already running" and no way
+ * to know what.
  */
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly detail?: string;
 
-  constructor(status: number, code?: string) {
+  constructor(status: number, code?: string, detail?: string) {
     super(code ? `${status} ${code}` : `HTTP ${status}`);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -30,10 +37,10 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-function errorCode(body: unknown): string | undefined {
+function stringField(body: unknown, field: "error" | "detail") {
   if (typeof body !== "object" || body === null) return undefined;
-  const { error } = body as { error?: unknown };
-  return typeof error === "string" ? error : undefined;
+  const value = (body as Record<string, unknown>)[field];
+  return typeof value === "string" ? value : undefined;
 }
 
 /**
@@ -66,12 +73,16 @@ export async function apiFetch<T>(
   });
 
   if (!response.ok) {
-    const code = errorCode(await readJson(response));
+    const body = await readJson(response);
     // Handled once, here, rather than in every caller. A 403 is deliberately
     // not included: the user is signed in, they simply lack the permission,
     // and bouncing them to /login would loop.
     if (response.status === 401) window.location.assign("/login");
-    throw new ApiError(response.status, code);
+    throw new ApiError(
+      response.status,
+      stringField(body, "error"),
+      stringField(body, "detail"),
+    );
   }
 
   return (await readJson(response)) as T | null;

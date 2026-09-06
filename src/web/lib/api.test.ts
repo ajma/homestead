@@ -39,6 +39,29 @@ describe("apiFetch", () => {
     });
   });
 
+  it("keeps the server's human-readable detail alongside the code", async () => {
+    // The 409 from POST /api/projects/:slug/:verb carries `{error, detail}`,
+    // and `detail` is the only half that names the operation in the way.
+    mockFetch(409, {
+      error: "operation_in_progress",
+      detail: 'an operation is already running for project "jellyfin"',
+    });
+    await expect(
+      apiFetch("/api/projects/jellyfin/up", { method: "POST" }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "operation_in_progress",
+      detail: 'an operation is already running for project "jellyfin"',
+    });
+  });
+
+  it("leaves detail undefined when the server sent none", async () => {
+    mockFetch(500, { error: "internal_error" });
+    await expect(apiFetch("/api/projects")).rejects.toMatchObject({
+      detail: undefined,
+    });
+  });
+
   it("throws ApiError for a 403 rather than resolving", async () => {
     mockFetch(403, { error: "forbidden" });
     await expect(apiFetch("/api/projects")).rejects.toBeInstanceOf(ApiError);
