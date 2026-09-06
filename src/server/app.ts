@@ -2,7 +2,9 @@ import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Auth } from "./auth/index.js";
 import { authPlugin } from "./auth/plugin.js";
 import type { Db } from "./db/client.js";
+import { createRegistry } from "./ops/registry.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
+import { operationRoutes } from "./routes/operations.js";
 import { projectRoutes } from "./routes/projects.js";
 import { statusRoutes } from "./routes/status.js";
 
@@ -41,6 +43,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     projectsDir: deps.projectsDir,
     projectsHostDir: deps.projectsHostDir,
     dataDir: deps.dataDir,
+  });
+  const registry = createRegistry(deps.db);
+  await app.register(operationRoutes, {
+    projectsDir: deps.projectsDir,
+    projectsHostDir: deps.projectsHostDir,
+    dataDir: deps.dataDir,
+    registry,
   });
   app.get("/api/health", async () => ({ status: "ok" }));
   return app;
