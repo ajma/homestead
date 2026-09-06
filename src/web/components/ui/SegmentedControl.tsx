@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 interface SegmentedControlItem {
   id: string;
   label: string;
@@ -14,7 +16,11 @@ export function SegmentedControl({
   value,
   onChange,
 }: SegmentedControlProps) {
-  const groupName = `segmented-control-${Math.random().toString(36).slice(2)}`;
+  // `useId`, not `Math.random()`: the name has to be the same string on every
+  // render and on both of StrictMode's paired renders, or the radio group and
+  // its `htmlFor` links are rebuilt from under the user each time the parent
+  // re-renders.
+  const groupName = `segmented-control-${useId()}`;
 
   return (
     <div

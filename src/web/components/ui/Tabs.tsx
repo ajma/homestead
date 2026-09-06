@@ -15,8 +15,27 @@ interface TabsProps {
 export function Tabs({ items, activeId }: TabsProps) {
   const tabsRef = useRef<Map<string, HTMLAnchorElement>>(new Map());
 
+  /**
+   * Where an arrow key walks *from*: the focused tab, not the active one.
+   *
+   * These tabs use manual activation — moving focus does not navigate — so
+   * focus and `activeId` diverge the instant the first arrow is pressed.
+   * Computing the origin from `activeId` made every press start from the same
+   * place: a second ArrowRight from Overview left focus on Edit forever, so
+   * Logs was unreachable by keyboard, and ArrowLeft from a focused Edit went
+   * to Logs because `(0 - 1 + 3) % 3` is 2.
+   *
+   * The keydown target is the tab that has focus. Falling back to `activeId`
+   * covers a key pressed while the tablist itself holds focus.
+   */
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    const currentIndex = items.findIndex((item) => item.id === activeId);
+    const focusedIndex = items.findIndex(
+      (item) => tabsRef.current.get(item.id) === e.target,
+    );
+    const currentIndex =
+      focusedIndex === -1
+        ? items.findIndex((item) => item.id === activeId)
+        : focusedIndex;
     let targetIndex: number | null = null;
 
     switch (e.key) {
