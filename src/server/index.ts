@@ -3,6 +3,7 @@ import { createAuth } from "./auth/index.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { ensureSecretKey } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
+import { dockerChecks } from "./docker/preflight.js";
 import { dataDirChecks, runChecks } from "./preflight.js";
 
 async function main(): Promise<void> {
@@ -11,7 +12,10 @@ async function main(): Promise<void> {
   // The data directory is created by the data_dir_writable preflight check, not
   // here: an unwritable parent must surface as a clean FAIL line rather than a
   // raw EACCES stack from a mkdir that runs before the checks.
-  const results = await runChecks(dataDirChecks(config));
+  const results = await runChecks([
+    ...dataDirChecks(config),
+    ...dockerChecks(),
+  ]);
   for (const r of results) {
     console.log(
       `${r.ok ? "ok  " : "FAIL"}  ${r.label}${r.detail ? ` — ${r.detail}` : ""}`,
