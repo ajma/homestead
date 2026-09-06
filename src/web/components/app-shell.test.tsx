@@ -72,6 +72,22 @@ describe("AppShell sign-out", () => {
     ).not.toBeInTheDocument();
     expect(client.getQueryData(["projects"])).toEqual(["media-server"]);
   });
+
+  it("does not carry a stale error into the next attempt", async () => {
+    signOut.mockResolvedValue({
+      data: null,
+      error: { message: "Network down" },
+    });
+    renderShell(new QueryClient());
+
+    await openAccountMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Network down");
+
+    await userEvent.keyboard("{Escape}");
+    await openAccountMenu();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("AppShell account menu", () => {

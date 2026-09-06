@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { signOut, useSession } from "../lib/auth-client.js";
 import { useMenu } from "../lib/use-menu.js";
@@ -70,6 +70,12 @@ export function AppShell() {
   const emailId = useId();
   const [signOutError, setSignOutError] = useState<string | null>(null);
 
+  // A closed menu takes its error with it, however it was closed: a retry must
+  // not open onto the previous attempt's message.
+  useEffect(() => {
+    if (!menu.open) setSignOutError(null);
+  }, [menu.open]);
+
   async function handleSignOut() {
     setSignOutError(null);
     // Better-Auth resolves with { error } rather than throwing. Navigating on a
@@ -129,7 +135,7 @@ export function AppShell() {
                 aria-controls={menu.open ? menuId : undefined}
                 onClick={() => menu.setOpen(!menu.open)}
                 onKeyDown={menu.onTriggerKeyDown}
-                className="min-w-11 px-3"
+                className="min-w-11"
               >
                 <Glyph>
                   <circle cx="12" cy="8" r="3.5" />
