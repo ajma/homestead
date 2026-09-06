@@ -42,9 +42,15 @@ export function useMenu() {
     if (focusTrigger) triggerRef.current?.focus();
   }, []);
 
+  /** Which end of the menu the next open should land on (ArrowUp opens at the end). */
+  const openAt = useRef<"first" | "last">("first");
+
   useEffect(() => {
     if (!open) return;
-    items()[0]?.focus();
+    const els = items();
+    const target = openAt.current === "last" ? els[els.length - 1] : els[0];
+    openAt.current = "first";
+    target?.focus();
   }, [open, items]);
 
   useEffect(() => {
@@ -62,7 +68,19 @@ export function useMenu() {
         !popoverRef.current.contains(target) &&
         !triggerRef.current.contains(target)
       ) {
+        const hadFocus = popoverRef.current.contains(document.activeElement);
         close(false);
+        // The browser applies mousedown's own focus after this handler runs, so
+        // reclaim focus once the stack unwinds — and only if the click left it
+        // nowhere, rather than stealing it from whatever was clicked.
+        if (hadFocus)
+          queueMicrotask(() => {
+            if (
+              !document.activeElement ||
+              document.activeElement === document.body
+            )
+              triggerRef.current?.focus();
+          });
       }
     }
 
@@ -74,10 +92,11 @@ export function useMenu() {
     };
   }, [open, close]);
 
-  /** ArrowDown/ArrowUp on a closed menu button opens it (focus follows on open). */
+  /** ArrowDown opens on the first item, ArrowUp on the last — the menu pattern. */
   function onTriggerKeyDown(e: ReactKeyboardEvent<HTMLButtonElement>) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
+      openAt.current = e.key === "ArrowUp" ? "last" : "first";
       setOpen(true);
     }
   }

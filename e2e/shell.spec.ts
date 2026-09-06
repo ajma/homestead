@@ -4,7 +4,14 @@ import { SIGNED_OUT_STORAGE_STATE, signInAsAdmin } from "./support/auth.js";
 const PHONE = { width: 390, height: 844 };
 const TOUCH_MIN = 44;
 
-async function box(locator: Locator) {
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+async function box(locator: Locator): Promise<Box> {
   const b = await locator.boundingBox();
   if (!b) throw new Error("expected the element to have a bounding box");
   return b;
@@ -57,17 +64,43 @@ test("the header fits a phone viewport with usable touch targets", async ({
   ).toBeLessThanOrEqual(PHONE.width);
 
   const controls = [
-    page.getByRole("link", { name: "Dashboard" }),
-    page.getByRole("link", { name: "Projects" }),
-    page.getByRole("button", { name: /theme/i }),
-    page.getByRole("button", { name: /account/i }),
-  ];
-  for (const control of controls) {
+    ["Dashboard", page.getByRole("link", { name: "Dashboard" })],
+    ["Projects", page.getByRole("link", { name: "Projects" })],
+    ["Theme", page.getByRole("button", { name: /theme/i })],
+    ["Account", page.getByRole("button", { name: /account/i })],
+  ] as const;
+
+  const measured: { name: string; b: Box }[] = [];
+  for (const [name, control] of controls) {
     const b = await box(control);
-    expect(b.x).toBeGreaterThanOrEqual(0);
-    expect(b.x + b.width).toBeLessThanOrEqual(PHONE.width);
-    expect(b.height).toBeGreaterThanOrEqual(TOUCH_MIN);
+    expect(b.x, `${name} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+    expect(b.x + b.width, `${name} ends inside the viewport`).toBeLessThanOrEqual(
+      PHONE.width,
+    );
+    expect(b.height, `${name} clears the touch minimum`).toBeGreaterThanOrEqual(
+      TOUCH_MIN,
+    );
+    measured.push({ name, b });
   }
+
+  // Containment alone cannot see controls stacked on top of each other: drop
+  // the responsive collapse and every box still fits inside 390px while Theme
+  // sits on top of Projects. Overlap is the invariant that actually breaks.
+  const overlaps: string[] = [];
+  for (let i = 0; i < measured.length; i++) {
+    for (let j = i + 1; j < measured.length; j++) {
+      const a = measured[i] as { name: string; b: Box };
+      const z = measured[j] as { name: string; b: Box };
+      if (
+        a.b.x < z.b.x + z.b.width &&
+        z.b.x < a.b.x + a.b.width &&
+        a.b.y < z.b.y + z.b.height &&
+        z.b.y < a.b.y + a.b.height
+      )
+        overlaps.push(`${a.name} overlaps ${z.name}`);
+    }
+  }
+  expect(overlaps).toEqual([]);
 
   // The account menu is the only route to Sign out; its items must be tappable.
   await page.getByRole("button", { name: /account/i }).click();
