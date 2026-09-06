@@ -530,10 +530,21 @@ step commits to SQLite as it completes, so a refresh resumes.
 
 **Step 2 is the first-run vulnerability.** An unauthenticated "create first
 admin" endpoint that is only hidden in the UI hands the box — and the Docker
-socket — to whoever reaches it first. Two independent guards: the route checks
-`count(users) == 0` *inside the same transaction* that inserts, so simultaneous
-requests cannot both succeed; and it is driven by that count rather than the
-`onboarding_completed` flag, so a corrupted settings row cannot reopen it.
+socket — to whoever reaches it first.
+
+The guard is an **atomic single-winner claim**: an `INSERT … ON CONFLICT DO
+NOTHING` of a unique sentinel key, whose `RETURNING` row count tells exactly one
+concurrent caller that it won. That caller creates the admin; everyone else gets
+`409`. If admin creation then fails, the claim is released so a legitimate retry
+can proceed.
+
+A claim is used rather than "count users inside the inserting transaction"
+because Better-Auth performs the user insert through its own adapter and cannot
+be enrolled in an application-level transaction. The claim gives the same
+guarantee without wrapping a third-party call.
+
+The claim is also independent of the `onboarding_completed` flag, so a corrupted
+or hand-edited settings row cannot reopen the endpoint.
 
 ---
 
