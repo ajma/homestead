@@ -83,6 +83,10 @@ export function OperationPanel({
   const { items, state } = useEventStream<OperationFrame>(
     `/api/operations/${encodeURIComponent(operationId)}/stream`,
     {
+      // The registry replays its whole buffer to every new subscriber, so the
+      // first frame after a reconnect is the start of that replay and must
+      // replace what is on screen rather than double it.
+      onReopen: "replace",
       onEnd: (frame) => {
         setEnded(true);
         setOperation("end" in frame ? frame.operation : null);

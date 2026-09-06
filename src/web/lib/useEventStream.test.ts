@@ -1,11 +1,17 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeEventSource } from "../test-support/fake-event-source.js";
-import { REPLAY_WINDOW_MS, useEventStream } from "./useEventStream.js";
+import { useEventStream } from "./useEventStream.js";
 
 type Frame = { chunk?: string; end?: true };
 
 const URL = "/api/operations/op-1/stream";
+
+/**
+ * Both of this app's endpoints restart a reconnected subscriber from the
+ * beginning, so `replace` is what every real caller passes.
+ */
+const REPLAY = { onReopen: "replace" } as const;
 
 beforeEach(() => {
   FakeEventSource.reset();
@@ -33,7 +39,7 @@ function emit(fn: (es: FakeEventSource) => void) {
 
 describe("useEventStream", () => {
   it("accumulates parsed events", () => {
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     expect(source().url).toBe(URL);
     emit((es) => {
@@ -53,7 +59,7 @@ describe("useEventStream", () => {
     // Plan 2's registry replays its entire buffer to every new subscriber, so
     // appending after a reconnect duplicates the whole log. On a phone moving
     // between networks this is not a rare path.
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     emit((es) => {
       es.emitOpen();
@@ -77,7 +83,7 @@ describe("useEventStream", () => {
     // finds no entry and ends the stream immediately, with zero chunks. A
     // naive reset-on-open blanks the panel at exactly that moment, and the
     // person watching a failure loses the failure.
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     emit((es) => {
       es.emitOpen();
@@ -96,41 +102,16 @@ describe("useEventStream", () => {
     expect(result.current.state).toBe("closed");
   });
 
-  it("appends a line that arrives long after the reconnect", () => {
-    // Whether a reconnect replays anything is the server's business, and it
-    // differs per endpoint: a log stream has no buffer to replay and can sit
-    // silent for minutes before its first line. Holding the reset open until
-    // "the next frame with content, whenever that is" lets that line delete
-    // everything before it.
+  it("replaces with the first frame after a reopen, however late it is", () => {
+    // This used to be a one-second stopwatch, on the theory that a replay
+    // shares the connection's first read. `/logs` disproves it: the route
+    // writes its headers and `: connected` immediately and only then spawns
+    // compose, so `onopen` fires at request accept and the whole cold start
+    // sits inside any window you pick. On a NAS the first `--tail=N` line can
+    // arrive well after it, and appending that duplicates N lines. The flag is
+    // spent by a frame, never by a clock.
     vi.useFakeTimers();
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
-
-    emit((es) => {
-      es.emitOpen();
-      es.emitMessage({ chunk: "before the drop\n" });
-    });
-
-    emit((es) => {
-      es.emitDrop();
-      es.emitOpen();
-    });
-    // Nothing replayed. Much later, the stream produces its first live line.
-    act(() => {
-      vi.advanceTimersByTime(REPLAY_WINDOW_MS + 1);
-    });
-    emit((es) => es.emitMessage({ chunk: "a live line\n" }));
-
-    expect(result.current.items).toEqual([
-      { chunk: "before the drop\n" },
-      { chunk: "a live line\n" },
-    ]);
-  });
-
-  it("still replaces a replay that arrives with the connection", () => {
-    // The other half of the same rule: inside the window, content is the
-    // server saying it all again, and appending it doubles the log.
-    vi.useFakeTimers();
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     emit((es) => {
       es.emitOpen();
@@ -142,11 +123,99 @@ describe("useEventStream", () => {
       es.emitOpen();
     });
     act(() => {
-      vi.advanceTimersByTime(REPLAY_WINDOW_MS - 1);
+      vi.advanceTimersByTime(60_000);
     });
-    emit((es) => es.emitMessage({ chunk: "one\n" }));
+    emit((es) => {
+      es.emitMessage({ chunk: "one\n" });
+      es.emitMessage({ chunk: "two\n" });
+    });
 
-    expect(result.current.items).toEqual([{ chunk: "one\n" }]);
+    // Frame 1 replaced; frame 2 appended onto it. What is on screen is exactly
+    // what the server just sent, neither doubled nor truncated.
+    expect(result.current.items).toEqual([
+      { chunk: "one\n" },
+      { chunk: "two\n" },
+    ]);
+  });
+
+  it("replaces once and then appends, however fast the frames arrive", () => {
+    // The other direction, and the one a re-introduced window would break the
+    // other way: only the *first* frame after a reopen is the replay's start.
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
+
+    emit((es) => {
+      es.emitOpen();
+      es.emitMessage({ chunk: "one\n" });
+    });
+
+    emit((es) => {
+      es.emitDrop();
+      es.emitOpen();
+      es.emitMessage({ chunk: "one\n" });
+      es.emitMessage({ chunk: "two\n" });
+      es.emitMessage({ chunk: "three\n" });
+    });
+
+    expect(result.current.items).toEqual([
+      { chunk: "one\n" },
+      { chunk: "two\n" },
+      { chunk: "three\n" },
+    ]);
+  });
+
+  it("appends across a reopen when the consumer says append", () => {
+    // A consumer whose endpoint carries on where it left off. Only the caller
+    // knows which it is, which is why the policy is required rather than
+    // defaulted — getting it wrong is silent in both directions.
+    const { result } = renderHook(() =>
+      useEventStream<Frame>(URL, { onReopen: "append" }),
+    );
+
+    emit((es) => {
+      es.emitOpen();
+      es.emitMessage({ chunk: "before\n" });
+    });
+
+    emit((es) => {
+      es.emitDrop();
+      es.emitOpen();
+      es.emitMessage({ chunk: "after\n" });
+    });
+
+    expect(result.current.items).toEqual([
+      { chunk: "before\n" },
+      { chunk: "after\n" },
+    ]);
+  });
+
+  it("counts reopens, so a lossy reconnect can be reported", () => {
+    // `/logs` has no scrollback on the server: the reconnect is handed the
+    // last N lines and everything older is gone. A viewer that redraws in
+    // silence has quietly destroyed the reader's history.
+    const { result, rerender } = renderHook(
+      ({ url }: { url: string }) => useEventStream<Frame>(url, REPLAY),
+      { initialProps: { url: URL } },
+    );
+
+    emit((es) => es.emitOpen());
+    expect(result.current.reopens).toBe(0);
+
+    emit((es) => {
+      es.emitDrop();
+      es.emitOpen();
+    });
+    expect(result.current.reopens).toBe(1);
+
+    emit((es) => {
+      es.emitDrop();
+      es.emitOpen();
+    });
+    expect(result.current.reopens).toBe(2);
+
+    // A new url is a new stream, not a reconnect to the old one.
+    rerender({ url: "/api/operations/op-2/stream" });
+    emit((es) => es.emitOpen());
+    expect(result.current.reopens).toBe(0);
   });
 
   it("ignores everything that arrives after the terminal frame", () => {
@@ -155,7 +224,9 @@ describe("useEventStream", () => {
     // still lands. Appending it would add content to a finished log, and a
     // second terminal frame would invalidate the caller's queries twice.
     const onEnd = vi.fn();
-    const { result } = renderHook(() => useEventStream<Frame>(URL, { onEnd }));
+    const { result } = renderHook(() =>
+      useEventStream<Frame>(URL, { ...REPLAY, onEnd }),
+    );
 
     emit((es) => {
       es.emitOpen();
@@ -174,7 +245,7 @@ describe("useEventStream", () => {
 
   it("marks the stream errored without throwing", () => {
     // `readyState` CLOSED: the browser has given up and will not reconnect.
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     emit((es) => {
       es.emitOpen();
@@ -188,7 +259,7 @@ describe("useEventStream", () => {
     // A phone changing networks is a blink. Reporting it the same way as a
     // session that expired mid-operation means a caller must either alarm the
     // user on every Wi-Fi handoff or promise a retry that will never come.
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     emit((es) => {
       es.emitOpen();
@@ -203,7 +274,9 @@ describe("useEventStream", () => {
 
   it("hands the terminal payload to onEnd and stops listening", () => {
     const onEnd = vi.fn();
-    const { result } = renderHook(() => useEventStream<Frame>(URL, { onEnd }));
+    const { result } = renderHook(() =>
+      useEventStream<Frame>(URL, { ...REPLAY, onEnd }),
+    );
 
     emit((es) => {
       es.emitOpen();
@@ -221,7 +294,7 @@ describe("useEventStream", () => {
   });
 
   it("closes the EventSource on unmount", () => {
-    const { unmount } = renderHook(() => useEventStream<Frame>(URL));
+    const { unmount } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
     const es = source();
     expect(es.closeCount).toBe(0);
 
@@ -231,7 +304,7 @@ describe("useEventStream", () => {
   });
 
   it("does nothing when the url is null", () => {
-    const { result } = renderHook(() => useEventStream<Frame>(null));
+    const { result } = renderHook(() => useEventStream<Frame>(null, REPLAY));
 
     expect(FakeEventSource.instances).toHaveLength(0);
     expect(result.current.state).toBe("idle");
@@ -240,7 +313,7 @@ describe("useEventStream", () => {
 
   it("abandons the old stream, and its output, when the url changes", () => {
     const { result, rerender } = renderHook(
-      ({ url }: { url: string }) => useEventStream<Frame>(url),
+      ({ url }: { url: string }) => useEventStream<Frame>(url, REPLAY),
       { initialProps: { url: URL } },
     );
     const first = source();
@@ -259,7 +332,7 @@ describe("useEventStream", () => {
   });
 
   it("survives a frame that is not JSON", () => {
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
 
     emit((es) => {
       es.emitOpen();
@@ -275,7 +348,7 @@ describe("useEventStream", () => {
     // Server-side rendering and jsdom both lack it; a hook that assumes it
     // takes the whole page down with a ReferenceError.
     vi.stubGlobal("EventSource", undefined);
-    const { result } = renderHook(() => useEventStream<Frame>(URL));
+    const { result } = renderHook(() => useEventStream<Frame>(URL, REPLAY));
     expect(result.current.state).toBe("idle");
   });
 });

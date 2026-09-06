@@ -25,6 +25,7 @@ import {
   useProject,
   useProjectOperations,
 } from "../lib/queries.js";
+import { Logs } from "./project/Logs.js";
 import { Overview } from "./project/Overview.js";
 import { projectStatus } from "./project/status.js";
 
@@ -99,13 +100,6 @@ function ComposeEditorRoute() {
     <Placeholder title="Compose editor">
       Editing the compose file is not available yet.
     </Placeholder>
-  );
-}
-
-/** Replaced by the log viewer in Task 9. */
-function LogsRoute() {
-  return (
-    <Placeholder title="Logs">Streaming logs is not available yet.</Placeholder>
   );
 }
 
@@ -433,6 +427,6 @@ export const projectDetailRoute = (
     <Route index element={<Navigate to="overview" replace />} />
     <Route path="overview" element={<OverviewRoute />} />
     <Route path="edit" element={<ComposeEditorRoute />} />
-    <Route path="logs" element={<LogsRoute />} />
+    <Route path="logs" element={<Logs />} />
   </Route>
 );

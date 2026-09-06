@@ -19,7 +19,37 @@ export type EventStreamState =
   | "closed"
   | "error";
 
-export type EventStream<T> = { items: T[]; state: EventStreamState };
+/**
+ * What the first frame after a **reopen** means, which only the consumer knows.
+ *
+ * - `replace` — the server starts a reconnected subscriber from the beginning:
+ *   Plan 2's operation registry replays its whole buffer, and `/logs` re-issues
+ *   `--tail=N`. Appending that duplicates everything already on screen, so the
+ *   first frame after the reopen replaces what is there and frames 2..N append
+ *   onto it, reconstructing exactly what the server just sent.
+ * - `append` — the reconnected stream carries on from where it left off, and
+ *   nothing already on screen is about to be repeated.
+ *
+ * It is a required option rather than a default because getting it wrong is
+ * silent in both directions — a doubled log, or a deleted one — and the hook
+ * cannot tell which endpoint it is pointed at.
+ */
+export type ReopenPolicy = "replace" | "append";
+
+export type EventStream<T> = {
+  items: T[];
+  state: EventStreamState;
+  /**
+   * How many times the browser has re-established this connection since the
+   * url last changed.
+   *
+   * Exposed because for some endpoints a reconnect is lossy and the user has
+   * to be told. `/logs` has no scrollback on the server: the reconnect is
+   * handed the last N lines and everything older is simply gone, so a viewer
+   * that redraws in silence has quietly destroyed the reader's history.
+   */
+  reopens: number;
+};
 
 /**
  * `EventSource.CLOSED`, read as a literal.
@@ -28,16 +58,6 @@ export type EventStream<T> = { items: T[]; state: EventStreamState };
  * statics, and the value is fixed by the spec.
  */
 const CLOSED = 2;
-
-/**
- * How long after `open` a frame may still be part of the server's replay.
- *
- * A replay is written synchronously as the subscription is accepted, so it
- * shares the connection's first read; a second is three orders of magnitude
- * more room than that needs. Past it, what arrives is live output and is
- * appended. See {@link useEventStream} for why the arm must expire at all.
- */
-export const REPLAY_WINDOW_MS = 1_000;
 
 /** The server's terminal frame, whatever else `T` carries. */
 function isEnd(payload: unknown): boolean {
@@ -52,44 +72,47 @@ function isEnd(payload: unknown): boolean {
  * Reads one `text/event-stream` endpoint into an array of parsed frames.
  *
  * **Reconnects, and the replay behind them.** `EventSource` reconnects by
- * itself, and Plan 2's operation registry replays its entire buffer to every
- * new subscriber. Appending on reconnect therefore duplicates the whole log —
- * a phone changing networks mid-`pull` would show every line twice. So a
- * reopen is treated as "the server is about to tell me everything again", and
- * the frames it sends replace what came before rather than adding to it.
+ * itself, and both of this app's stream endpoints restart a reconnected
+ * subscriber from the beginning — the operation registry replays its buffer,
+ * `/logs` re-issues `--tail=N`. Appending on reconnect therefore duplicates
+ * everything on screen: a phone changing networks mid-`pull` would show every
+ * line twice. So a reopen sets a flag, and the first frame that follows it
+ * *replaces* rather than appends. Frames 2..N append onto that one, so what
+ * ends up on screen is exactly what the server just sent.
  *
- * **But the replay is not guaranteed.** It only happens while the operation is
- * still in the registry's `live` map. Once it has finished and been evicted —
- * or the server has restarted — `subscribe` finds no entry and ends the stream
- * immediately, with zero chunks. A reset performed eagerly on `open` blanks
- * the panel at exactly that moment, so the person who reconnected to read why
- * their stack failed is left with an empty log and a terminal status.
+ * **The flag is consumed by a frame, never by a clock.** This was a one-second
+ * stopwatch, on the theory that a replay is written synchronously as the
+ * subscription is accepted and so shares the connection's first read. It is
+ * not true of `/logs`: the route writes its headers and `: connected`
+ * immediately and only then spawns compose, so `onopen` fires at request
+ * accept and the whole compose cold start sits inside any window you pick.
+ * Both directions then fail on timing alone — a fast reconnect deletes a
+ * reader's scrollback, a slow one on a NAS appends the entire `--tail=N` twice
+ * — and no window is right for both. The consumer states the policy instead.
  *
- * The reset is therefore *armed* on open and *applied* by the first frame that
- * actually has something to put in its place. A reconnect that produces
- * nothing changes nothing.
- *
- * **And the arm expires.** Whether a reconnect replays at all is the server's
- * business, and it is about to differ per endpoint: a log stream has no buffer
- * to replay and can sit silent for minutes before its first line. An arm held
- * open until "the next frame with content, whenever that is" would let that
- * line delete everything before it — an invariant borrowed from one endpoint
- * that no other endpoint owes us. So the arm is bounded by
- * {@link REPLAY_WINDOW_MS} as well as consumed by content: replace what
- * arrives with the connection, append what arrives after it.
+ * **A reopen that produces nothing changes nothing.** The flag is only spent
+ * by a content frame. The operation registry replays only while the operation
+ * is still in its `live` map; once it has finished and been evicted, or the
+ * server has restarted, `subscribe` finds no entry and ends the stream
+ * immediately with zero chunks. Resetting eagerly on `open` would blank the
+ * panel at exactly that moment, leaving the person who reconnected to read why
+ * their stack failed with an empty log and a terminal status.
  */
 export function useEventStream<T>(
   url: string | null,
-  opts: { onEnd?: (payload: T) => void } = {},
+  opts: { onReopen: ReopenPolicy; onEnd?: (payload: T) => void },
 ): EventStream<T> {
   const [items, setItems] = useState<T[]>([]);
   const [state, setState] = useState<EventStreamState>("idle");
+  const [reopens, setReopens] = useState(0);
 
-  // Through a ref so a caller may pass an inline closure: putting `onEnd` in
-  // the dependency list would tear down and reopen the stream — and re-trigger
-  // the server's whole replay — on every render of the component above.
+  // Through refs so a caller may pass an inline closure: putting these in the
+  // dependency list would tear down and reopen the stream — and re-trigger the
+  // server's whole replay — on every render of the component above.
   const onEndRef = useRef(opts.onEnd);
   onEndRef.current = opts.onEnd;
+  const policyRef = useRef(opts.onReopen);
+  policyRef.current = opts.onReopen;
 
   useEffect(() => {
     if (url === null) {
@@ -108,6 +131,7 @@ export function useEventStream<T>(
     // this one's history. Unlike a reconnect, nothing will replay it.
     setItems([]);
     setState("connecting");
+    setReopens(0);
 
     const source = new Source(url);
     /**
@@ -120,22 +144,21 @@ export function useEventStream<T>(
      * twice.
      */
     let done = false;
-    let armed = false;
-    let disarm: ReturnType<typeof setTimeout> | undefined;
-
-    /** Stops treating what arrives as the server's replay. */
-    const disarmNow = () => {
-      armed = false;
-      clearTimeout(disarm);
-      disarm = undefined;
-    };
+    /** False until the browser has opened this connection once. */
+    let opened = false;
+    /** The next content frame replaces what is on screen. */
+    let replaceNext = false;
 
     source.onopen = () => {
       if (done) return;
       setState("open");
-      armed = true;
-      clearTimeout(disarm);
-      disarm = setTimeout(disarmNow, REPLAY_WINDOW_MS);
+      // The first `open` is not a reopen: there is nothing on screen for a
+      // replay to duplicate, and nothing has been lost.
+      if (opened) {
+        replaceNext = policyRef.current === "replace";
+        setReopens((n) => n + 1);
+      }
+      opened = true;
     };
 
     source.onmessage = (event: MessageEvent<string>) => {
@@ -150,14 +173,13 @@ export function useEventStream<T>(
       }
       if (isEnd(payload)) {
         done = true;
-        disarmNow();
         setState("closed");
         source.close();
         onEndRef.current?.(payload);
         return;
       }
-      const replaces = armed;
-      disarmNow();
+      const replaces = replaceNext;
+      replaceNext = false;
       setItems((prev) => (replaces ? [payload] : [...prev, payload]));
     };
 
@@ -170,7 +192,6 @@ export function useEventStream<T>(
     };
 
     return () => {
-      disarmNow();
       source.onopen = null;
       source.onmessage = null;
       source.onerror = null;
@@ -178,5 +199,5 @@ export function useEventStream<T>(
     };
   }, [url]);
 
-  return { items, state };
+  return { items, state, reopens };
 }
