@@ -8,6 +8,7 @@ import {
   useMatch,
   useParams,
 } from "react-router-dom";
+import { OperationPanel } from "../components/OperationPanel.js";
 import {
   Button,
   EmptyState,
@@ -127,11 +128,16 @@ export function ProjectDetail() {
   const operations = useProjectOperations(slug);
   const lifecycle = useLifecycle(slug);
 
-  // Local, not global and not cache: the id belongs to this project's page for
-  // the lifetime of that page. Task 8's OperationPanel takes it as a prop.
-  const [activeOperationId, setActiveOperationId] = useState<string | null>(
-    null,
-  );
+  // Local, not global and not cache: this belongs to this project's page for
+  // the lifetime of that page. OperationPanel takes it as props.
+  //
+  // The verb travels with the id in one piece of state rather than two,
+  // because they are one fact — a panel labelled `pull` while streaming a
+  // `down` is worse than an unlabelled one — and two states can drift.
+  const [activeOperation, setActiveOperation] = useState<{
+    id: string;
+    kind: OperationKind;
+  } | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(true);
   const [confirmingDown, setConfirmingDown] = useState(false);
   const overviewId = useId();
@@ -161,7 +167,9 @@ export function ProjectDetail() {
   }, [confirmingDown]);
 
   const run = (verb: OperationKind) =>
-    lifecycle.mutate(verb, { onSuccess: setActiveOperationId });
+    lifecycle.mutate(verb, {
+      onSuccess: (id) => setActiveOperation({ id, kind: verb }),
+    });
 
   /** Dismissing a confirmation returns focus to what opened it. */
   const cancelDown = () => {
@@ -330,24 +338,22 @@ export function ProjectDetail() {
           </Panel>
         )}
 
-        {activeOperationId && (
-          <Panel
-            title="Operation"
-            role="region"
-            aria-label="Operation"
-            data-operation-id={activeOperationId}
-            actions={
-              <Button onClick={() => setActiveOperationId(null)}>
-                Dismiss
-              </Button>
-            }
-          >
-            {/* Task 8 replaces this body with OperationPanel, which streams
-                the operation's output over SSE. */}
-            <p className="text-sm text-muted">
-              Started. Live output arrives with the operation panel.
-            </p>
-          </Panel>
+        {/* Docked directly above the tab bar, so the live output sits between
+            the controls that started it and the tabs — and, at phone width, is
+            the screen. Deliberately in the flow rather than a fixed overlay:
+            an overlay would cover the lifecycle controls at exactly the moment
+            someone wants to stop what they just started.
+
+            Keyed on the id so a second operation starts from a clean panel
+            rather than inheriting the previous one's log and terminal state. */}
+        {activeOperation && (
+          <OperationPanel
+            key={activeOperation.id}
+            operationId={activeOperation.id}
+            slug={slug}
+            kind={activeOperation.kind}
+            onDismiss={() => setActiveOperation(null)}
+          />
         )}
 
         <Tabs
@@ -407,11 +413,11 @@ export function ProjectDetail() {
 
 /**
  * `key={slug}` so React remounts rather than reusing state across projects.
- * `activeOperationId` belongs to one project's page; without the key,
+ * `activeOperation` belongs to one project's page; without the key,
  * navigating from one project to another would carry the previous project's
- * operation — and, once Task 8 streams into that slot, its live output —
- * into the new page. Nothing links project-to-project today; it is one link
- * away from being a live bug, and the fix costs one attribute.
+ * operation — and the SSE connection streaming its output — into the new
+ * page. Nothing links project-to-project today; it is one link away from
+ * being a live bug, and the fix costs one attribute.
  */
 function KeyedProjectDetail() {
   const { slug = "" } = useParams();
