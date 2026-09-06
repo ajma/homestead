@@ -29,6 +29,16 @@ export type EventStream<T> = { items: T[]; state: EventStreamState };
  */
 const CLOSED = 2;
 
+/**
+ * How long after `open` a frame may still be part of the server's replay.
+ *
+ * A replay is written synchronously as the subscription is accepted, so it
+ * shares the connection's first read; a second is three orders of magnitude
+ * more room than that needs. Past it, what arrives is live output and is
+ * appended. See {@link useEventStream} for why the arm must expire at all.
+ */
+export const REPLAY_WINDOW_MS = 1_000;
+
 /** The server's terminal frame, whatever else `T` carries. */
 function isEnd(payload: unknown): boolean {
   return (
@@ -58,6 +68,15 @@ function isEnd(payload: unknown): boolean {
  * The reset is therefore *armed* on open and *applied* by the first frame that
  * actually has something to put in its place. A reconnect that produces
  * nothing changes nothing.
+ *
+ * **And the arm expires.** Whether a reconnect replays at all is the server's
+ * business, and it is about to differ per endpoint: a log stream has no buffer
+ * to replay and can sit silent for minutes before its first line. An arm held
+ * open until "the next frame with content, whenever that is" would let that
+ * line delete everything before it — an invariant borrowed from one endpoint
+ * that no other endpoint owes us. So the arm is bounded by
+ * {@link REPLAY_WINDOW_MS} as well as consumed by content: replace what
+ * arrives with the connection, append what arrives after it.
  */
 export function useEventStream<T>(
   url: string | null,
@@ -91,14 +110,36 @@ export function useEventStream<T>(
     setState("connecting");
 
     const source = new Source(url);
+    /**
+     * Set by the terminal frame, and never unset.
+     *
+     * `close()` stops the connection; it does not cancel dispatch tasks the
+     * browser has already queued. Without this, a frame that was in flight
+     * when the end arrived appends to a finished log, and a duplicated
+     * terminal frame calls `onEnd` — and so invalidates the caller's queries —
+     * twice.
+     */
+    let done = false;
     let armed = false;
+    let disarm: ReturnType<typeof setTimeout> | undefined;
+
+    /** Stops treating what arrives as the server's replay. */
+    const disarmNow = () => {
+      armed = false;
+      clearTimeout(disarm);
+      disarm = undefined;
+    };
 
     source.onopen = () => {
+      if (done) return;
       setState("open");
       armed = true;
+      clearTimeout(disarm);
+      disarm = setTimeout(disarmNow, REPLAY_WINDOW_MS);
     };
 
     source.onmessage = (event: MessageEvent<string>) => {
+      if (done) return;
       let payload: T;
       try {
         payload = JSON.parse(event.data) as T;
@@ -108,17 +149,20 @@ export function useEventStream<T>(
         return;
       }
       if (isEnd(payload)) {
+        done = true;
+        disarmNow();
         setState("closed");
         source.close();
         onEndRef.current?.(payload);
         return;
       }
       const replaces = armed;
-      armed = false;
+      disarmNow();
       setItems((prev) => (replaces ? [payload] : [...prev, payload]));
     };
 
     source.onerror = () => {
+      if (done) return;
       // `CLOSED` is the browser saying it has given up — an expired session
       // answering 401, a 403, a refused origin. It will not try again, and a
       // caller told "retrying" would show a spinner that can never stop.
@@ -126,6 +170,7 @@ export function useEventStream<T>(
     };
 
     return () => {
+      disarmNow();
       source.onopen = null;
       source.onmessage = null;
       source.onerror = null;

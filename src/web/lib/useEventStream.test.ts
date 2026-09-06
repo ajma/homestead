@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeEventSource } from "../test-support/fake-event-source.js";
-import { useEventStream } from "./useEventStream.js";
+import { REPLAY_WINDOW_MS, useEventStream } from "./useEventStream.js";
 
 type Frame = { chunk?: string; end?: true };
 
@@ -14,6 +14,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 /** The one instance the hook should have constructed. */
@@ -92,6 +93,82 @@ describe("useEventStream", () => {
     expect(result.current.items).toEqual([
       { chunk: "ERROR: port is already allocated\n" },
     ]);
+    expect(result.current.state).toBe("closed");
+  });
+
+  it("appends a line that arrives long after the reconnect", () => {
+    // Whether a reconnect replays anything is the server's business, and it
+    // differs per endpoint: a log stream has no buffer to replay and can sit
+    // silent for minutes before its first line. Holding the reset open until
+    // "the next frame with content, whenever that is" lets that line delete
+    // everything before it.
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useEventStream<Frame>(URL));
+
+    emit((es) => {
+      es.emitOpen();
+      es.emitMessage({ chunk: "before the drop\n" });
+    });
+
+    emit((es) => {
+      es.emitDrop();
+      es.emitOpen();
+    });
+    // Nothing replayed. Much later, the stream produces its first live line.
+    act(() => {
+      vi.advanceTimersByTime(REPLAY_WINDOW_MS + 1);
+    });
+    emit((es) => es.emitMessage({ chunk: "a live line\n" }));
+
+    expect(result.current.items).toEqual([
+      { chunk: "before the drop\n" },
+      { chunk: "a live line\n" },
+    ]);
+  });
+
+  it("still replaces a replay that arrives with the connection", () => {
+    // The other half of the same rule: inside the window, content is the
+    // server saying it all again, and appending it doubles the log.
+    vi.useFakeTimers();
+    const { result } = renderHook(() => useEventStream<Frame>(URL));
+
+    emit((es) => {
+      es.emitOpen();
+      es.emitMessage({ chunk: "one\n" });
+    });
+
+    emit((es) => {
+      es.emitDrop();
+      es.emitOpen();
+    });
+    act(() => {
+      vi.advanceTimersByTime(REPLAY_WINDOW_MS - 1);
+    });
+    emit((es) => es.emitMessage({ chunk: "one\n" }));
+
+    expect(result.current.items).toEqual([{ chunk: "one\n" }]);
+  });
+
+  it("ignores everything that arrives after the terminal frame", () => {
+    // `close()` stops the connection; it does not cancel dispatch tasks the
+    // browser has already queued, so a frame in flight when the end arrived
+    // still lands. Appending it would add content to a finished log, and a
+    // second terminal frame would invalidate the caller's queries twice.
+    const onEnd = vi.fn();
+    const { result } = renderHook(() => useEventStream<Frame>(URL, { onEnd }));
+
+    emit((es) => {
+      es.emitOpen();
+      es.emitMessage({ chunk: "done\n" });
+      es.emitMessage({ end: true });
+      es.emitMessage({ chunk: "a straggler\n" });
+      es.emitMessage({ end: true });
+      es.emitOpen();
+      es.emitFatal();
+    });
+
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    expect(result.current.items).toEqual([{ chunk: "done\n" }]);
     expect(result.current.state).toBe("closed");
   });
 
