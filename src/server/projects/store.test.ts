@@ -1,14 +1,13 @@
 import {
   mkdir,
-  mkdtemp,
   readFile as read,
   readdir,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { tempDir } from "../test-support/tmp.js";
 import {
   isValidSlug,
   listSnapshots,
@@ -22,7 +21,7 @@ import {
 let root: string;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "hs-store-"));
+  root = await tempDir("hs-store-");
   await mkdir(join(root, "jellyfin"), { recursive: true });
   await writeFile(
     join(root, "jellyfin", "docker-compose.yml"),
@@ -129,6 +128,14 @@ describe("readProjectFile", () => {
   it("returns null for a missing .env rather than throwing", async () => {
     expect(await readProjectFile(root, "paperless", "env")).toBeNull();
   });
+
+  it("throws rather than reporting an unreadable file as absent", async () => {
+    // A directory where a file is expected stands in for the NAS case: an
+    // ACL'd share yields EACCES, and "not found" would send the operator
+    // hunting for the wrong problem. Only ENOENT may become null.
+    await mkdir(join(root, "notes", ".env"), { recursive: true });
+    await expect(readProjectFile(root, "notes", "env")).rejects.toThrow();
+  });
 });
 
 describe("slug safety", () => {
@@ -199,6 +206,53 @@ describe("writeProjectFile", () => {
       "utf8",
     );
     expect(newest).toBe(`rev-${SNAPSHOT_RETENTION + 3}\n`);
+  });
+
+  it("retains snapshots per file, so editing .env cannot evict compose history", async () => {
+    // The regression: retention took slice(SNAPSHOT_RETENTION) of the combined
+    // listing, so a handful of password tweaks silently destroyed every
+    // snapshot of the compose file — the undo this feature exists to provide.
+    await writeProjectFile(root, "jellyfin", "compose", "compose-rev-1\n");
+    await writeProjectFile(root, "jellyfin", "compose", "compose-rev-2\n");
+    for (let i = 0; i < SNAPSHOT_RETENTION; i++) {
+      await writeProjectFile(root, "jellyfin", "env", `TZ=zone-${i}\n`);
+    }
+
+    const snaps = await listSnapshots(root, "jellyfin");
+    const composeSnaps = snaps.filter((n) => n.endsWith("docker-compose.yml"));
+    const envSnaps = snaps.filter((n) => n.endsWith(".env"));
+
+    expect(composeSnaps).toHaveLength(2);
+    expect(envSnaps).toHaveLength(SNAPSHOT_RETENTION);
+    const contents = await Promise.all(
+      composeSnaps.map((n) =>
+        read(join(root, "jellyfin", ".snapshots", n), "utf8"),
+      ),
+    );
+    expect(contents.sort()).toEqual(["compose-rev-1\n", "services: {}\n"]);
+  });
+
+  it("prunes each file's own history independently", async () => {
+    for (let i = 0; i < SNAPSHOT_RETENTION + 3; i++) {
+      await writeProjectFile(root, "jellyfin", "env", `TZ=zone-${i}\n`);
+      await writeProjectFile(root, "jellyfin", "compose", `compose-${i}\n`);
+    }
+    const snaps = await listSnapshots(root, "jellyfin");
+    expect(snaps.filter((n) => n.endsWith("docker-compose.yml"))).toHaveLength(
+      SNAPSHOT_RETENTION,
+    );
+    expect(snaps.filter((n) => n.endsWith(".env"))).toHaveLength(
+      SNAPSHOT_RETENTION,
+    );
+  });
+
+  it("leaves foreign files in .snapshots alone", async () => {
+    await mkdir(join(root, "jellyfin", ".snapshots"), { recursive: true });
+    await writeFile(join(root, "jellyfin", ".snapshots", "README"), "keep me");
+    for (let i = 0; i < SNAPSHOT_RETENTION + 3; i++) {
+      await writeProjectFile(root, "jellyfin", "compose", `rev-${i}\n`);
+    }
+    expect(await listSnapshots(root, "jellyfin")).toContain("README");
   });
 
   it("leaves no temp files behind", async () => {

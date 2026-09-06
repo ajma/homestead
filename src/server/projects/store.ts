@@ -98,6 +98,11 @@ export async function scanProjects(projectsDir: string): Promise<ScanEntry[]> {
   );
 }
 
+/**
+ * `null` means the file genuinely is not there. Anything else — EACCES on an
+ * ACL'd NAS share, EISDIR, EIO — is thrown, because reporting a permissions
+ * problem as "not found" sends the operator looking for the wrong bug.
+ */
 export async function readProjectFile(
   projectsDir: string,
   slug: string,
@@ -106,9 +111,15 @@ export async function readProjectFile(
   const dir = projectPath(projectsDir, slug);
   const name = file === "env" ? ".env" : await findComposeFile(dir);
   if (name === null) return null;
-  return readFile(join(dir, name), "utf8").catch(() => null);
+  try {
+    return await readFile(join(dir, name), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
 }
 
+/** Per base filename, not across all of them — see {@link pruneSnapshots}. */
 export const SNAPSHOT_RETENTION = 10;
 
 /** Sortable, filesystem-safe, and monotonic within a process. */
@@ -119,6 +130,14 @@ function snapshotName(base: string): string {
   return `${stamp}-${seq}-${base}`;
 }
 
+/** `<iso-stamp>-<seq>-<base>` → `<base>`, or null for a name we did not write. */
+const SNAPSHOT_NAME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-\d{4,}-(.+)$/;
+
+export function snapshotBase(name: string): string | null {
+  return SNAPSHOT_NAME.exec(name)?.[1] ?? null;
+}
+
 export async function listSnapshots(
   projectsDir: string,
   slug: string,
@@ -126,6 +145,31 @@ export async function listSnapshots(
   const dir = join(projectPath(projectsDir, slug), ".snapshots");
   const names = await readdir(dir).catch(() => [] as string[]);
   return names.sort().reverse();
+}
+
+/**
+ * Retains the newest {@link SNAPSHOT_RETENTION} snapshots *per base filename*.
+ *
+ * A combined cap silently destroys the thing snapshots exist for: ten edits to
+ * `.env` would evict every compose snapshot, so the undo for a wrong edit to a
+ * stack holding family photos disappears because someone retyped a password.
+ * Names we did not generate are left alone rather than counted or deleted.
+ */
+async function pruneSnapshots(snapDir: string, names: string[]): Promise<void> {
+  const byBase = new Map<string, string[]>();
+  for (const name of names) {
+    const base = snapshotBase(name);
+    if (base === null) continue;
+    const group = byBase.get(base);
+    if (group) group.push(name);
+    else byBase.set(base, [name]);
+  }
+  for (const group of byBase.values()) {
+    // `names` arrives newest-first from listSnapshots, so the group is too.
+    for (const stale of group.slice(SNAPSHOT_RETENTION)) {
+      await rm(join(snapDir, stale), { force: true });
+    }
+  }
 }
 
 export async function writeProjectFile(
@@ -149,10 +193,7 @@ export async function writeProjectFile(
     const snapDir = join(dir, ".snapshots");
     await mkdir(snapDir, { recursive: true });
     await copyFile(target, join(snapDir, snapshotName(name)));
-    const snaps = await listSnapshots(projectsDir, slug);
-    for (const stale of snaps.slice(SNAPSHOT_RETENTION)) {
-      await rm(join(snapDir, stale), { force: true });
-    }
+    await pruneSnapshots(snapDir, await listSnapshots(projectsDir, slug));
   }
 
   const tmp = `${target}.tmp-${process.pid}-${snapshotCounter++}`;

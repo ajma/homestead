@@ -1,9 +1,7 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
+import { tempDir } from "../test-support/tmp.js";
 import { type Auth, createAuth } from "./index.js";
 
 // C1: Better-Auth validates the browser's Origin header against baseURL plus
@@ -27,7 +25,7 @@ async function bootAt(baseURL: string): Promise<void> {
     secret: "test-secret-value-at-least-32-chars",
     baseURL,
   });
-  const tmpDir = await mkdtemp(join(tmpdir(), "hs-test-"));
+  const tmpDir = await tempDir("hs-test-");
   app = await buildApp({
     db,
     auth,

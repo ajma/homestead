@@ -1,0 +1,1 @@
+CREATE INDEX `operations_project_slug_started_at_idx` ON `operations` (`project_slug`,`started_at`);

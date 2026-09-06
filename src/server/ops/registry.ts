@@ -1,35 +1,34 @@
 import { randomUUID } from "node:crypto";
+import type {
+  Operation,
+  OperationKind,
+  OperationStatus,
+} from "@shared/projects.js";
 import { desc, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { operations } from "../db/schema.js";
 
-export type OperationKind = "up" | "down" | "restart" | "pull";
-export type OperationStatus = "running" | "succeeded" | "failed";
-
-export type Operation = {
-  id: string;
-  slug: string;
-  kind: OperationKind;
-  status: OperationStatus;
-  exitCode: number | null;
-  startedAt: number;
-  finishedAt: number | null;
-};
+export type { Operation, OperationKind, OperationStatus };
 
 type Subscriber = { onChunk: (chunk: string) => void; onEnd: () => void };
 
 type Live = {
   op: Operation;
   buffer: string[];
+  bufferBytes: number;
   subscribers: Set<Subscriber>;
   done: Promise<void>;
   truncated: boolean;
 };
 
-/** Caps a runaway `pull` from exhausting memory; the tail is what matters. */
-const MAX_BUFFERED_CHUNKS = 5000;
-const TRIM_OVERSHOOT = 500;
-const MAX_FINISHED_RETENTION = 50;
+/**
+ * Caps a runaway `pull` from exhausting memory; the tail is what matters.
+ *
+ * Bounded in *bytes*, not chunks: a chunk is whatever the pipe handed us, up to
+ * the 64 KB stream high-water mark, so a chunk cap is a memory cap multiplied
+ * by an unknown. This process is expected to stay up for months.
+ */
+const MAX_BUFFER_BYTES = 1024 * 1024;
 
 export function createRegistry(db: Db) {
   const live = new Map<string, Live>();
@@ -58,6 +57,7 @@ export function createRegistry(db: Db) {
     const entry: Live = {
       op,
       buffer: [],
+      bufferBytes: 0,
       subscribers: new Set(),
       done: Promise.resolve(),
       truncated: false,
@@ -66,9 +66,22 @@ export function createRegistry(db: Db) {
 
     const emit = (chunk: string) => {
       entry.buffer.push(chunk);
-      if (entry.buffer.length > MAX_BUFFERED_CHUNKS + TRIM_OVERSHOOT) {
-        const excess = entry.buffer.length - MAX_BUFFERED_CHUNKS;
-        entry.buffer.splice(0, excess);
+      entry.bufferBytes += Buffer.byteLength(chunk, "utf8");
+      // Drop whole chunks from the head until we are back under the cap, so the
+      // tail — the part that says why the operation failed — always survives.
+      while (entry.bufferBytes > MAX_BUFFER_BYTES && entry.buffer.length > 1) {
+        const dropped = entry.buffer.shift() as string;
+        entry.bufferBytes -= Buffer.byteLength(dropped, "utf8");
+        entry.truncated = true;
+      }
+      // A single chunk larger than the whole cap: keep its tail by bytes.
+      if (entry.bufferBytes > MAX_BUFFER_BYTES) {
+        const only = entry.buffer[0] ?? "";
+        const tail = Buffer.from(only, "utf8")
+          .subarray(-MAX_BUFFER_BYTES)
+          .toString("utf8");
+        entry.buffer[0] = tail;
+        entry.bufferBytes = Buffer.byteLength(tail, "utf8");
         entry.truncated = true;
       }
       for (const sub of entry.subscribers) sub.onChunk(chunk);
@@ -86,28 +99,47 @@ export function createRegistry(db: Db) {
         op.status = code === 0 ? "succeeded" : "failed";
         op.finishedAt = Date.now();
         busy.delete(slug);
-        for (const sub of entry.subscribers) sub.onEnd();
-        entry.subscribers.clear();
         const output = entry.truncated
           ? `[earlier output truncated]\n${entry.buffer.join("")}`
           : entry.buffer.join("");
-        await db.insert(operations).values({
-          id: op.id,
-          projectSlug: slug,
-          kind,
-          status: op.status,
-          exitCode: op.exitCode,
-          actorUserId,
-          startedAt: op.startedAt,
-          finishedAt: op.finishedAt,
-          output,
-        });
-        evictOldFinished();
+        // History row first, fan-out second: a client told "done" must never
+        // then fail to find the operation it was just told about.
+        //
+        // But the fan-out is unconditional. SQLITE_FULL on a NAS, SQLITE_BUSY,
+        // or a read-only data directory would otherwise leave every open
+        // `/api/operations/:id/stream` hanging forever, each retaining its
+        // `reply.raw` closure in `subscribers`, with `evictOldFinished`
+        // skipped. A missing history row is bad; stranding every subscriber
+        // and leaking the buffers is worse.
+        try {
+          await db.insert(operations).values({
+            id: op.id,
+            projectSlug: slug,
+            kind,
+            status: op.status,
+            exitCode: op.exitCode,
+            actorUserId,
+            startedAt: op.startedAt,
+            finishedAt: op.finishedAt,
+            output,
+          });
+        } catch (err) {
+          console.error(
+            `homestacks: failed to record operation ${op.id} (${kind} ${slug}):`,
+            err,
+          );
+        } finally {
+          for (const sub of entry.subscribers) sub.onEnd();
+          entry.subscribers.clear();
+          evictOldFinished();
+        }
       }
     })();
 
     return op;
   }
+
+  const MAX_FINISHED_RETENTION = 50;
 
   function evictOldFinished() {
     const finished = Array.from(live.entries())
@@ -120,9 +152,56 @@ export function createRegistry(db: Db) {
     }
   }
 
+  /** Row → the shared `Operation` shape. One concept, one shape. */
+  function toOperation(row: {
+    id: string;
+    projectSlug: string;
+    kind: string;
+    status: string;
+    exitCode: number | null;
+    startedAt: number;
+    finishedAt: number | null;
+  }): Operation {
+    return {
+      id: row.id,
+      slug: row.projectSlug,
+      kind: row.kind as OperationKind,
+      status: row.status as OperationStatus,
+      exitCode: row.exitCode,
+      startedAt: row.startedAt,
+      finishedAt: row.finishedAt,
+    };
+  }
+
+  const historyColumns = {
+    id: operations.id,
+    projectSlug: operations.projectSlug,
+    kind: operations.kind,
+    status: operations.status,
+    exitCode: operations.exitCode,
+    startedAt: operations.startedAt,
+    finishedAt: operations.finishedAt,
+  };
+
   return {
     start,
     get: (id: string) => live.get(id)?.op,
+    /**
+     * In-memory first, database second. Memory holds only the newest 50 and
+     * nothing at all after a restart, but the row outlives both — a client that
+     * reloads mid-pull must not be told the operation never existed.
+     */
+    async find(id: string): Promise<Operation | undefined> {
+      const inMemory = live.get(id)?.op;
+      if (inMemory) return inMemory;
+      const rows = await db
+        .select(historyColumns)
+        .from(operations)
+        .where(eq(operations.id, id))
+        .limit(1);
+      const row = rows[0];
+      return row ? toOperation(row) : undefined;
+    },
     wait: (id: string) => live.get(id)?.done ?? Promise.resolve(),
     subscribe(
       id: string,
@@ -144,13 +223,14 @@ export function createRegistry(db: Db) {
       entry.subscribers.add(sub);
       return () => entry.subscribers.delete(sub);
     },
-    async listForProject(slug: string) {
-      return db
-        .select()
+    async listForProject(slug: string): Promise<Operation[]> {
+      const rows = await db
+        .select(historyColumns)
         .from(operations)
         .where(eq(operations.projectSlug, slug))
         .orderBy(desc(operations.startedAt))
         .limit(50);
+      return rows.map(toOperation);
     },
   };
 }

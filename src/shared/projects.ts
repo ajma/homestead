@@ -36,3 +36,22 @@ export type ProjectModel = {
   services: ServiceModel[];
   meta: ProjectMeta;
 };
+
+export type OperationKind = "up" | "down" | "restart" | "pull";
+export type OperationStatus = "running" | "succeeded" | "failed";
+
+/**
+ * The one shape a lifecycle operation ever has, in memory or out of the
+ * database. Deliberately excludes `output` — history listings must not carry
+ * command output — and `actorUserId`, which is an audit column, not client
+ * state.
+ */
+export type Operation = {
+  id: string;
+  slug: string;
+  kind: OperationKind;
+  status: OperationStatus;
+  exitCode: number | null;
+  startedAt: number;
+  finishedAt: number | null;
+};

@@ -1,9 +1,7 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createDb, runMigrations } from "../db/client.js";
+import { tempDir } from "../test-support/tmp.js";
 import { createAuth } from "./index.js";
 
 // C2: Better-Auth only enables rate limiting when NODE_ENV === "production",
@@ -24,7 +22,7 @@ async function boot() {
   const db = createDb(":memory:");
   await runMigrations(db);
   const auth = createAuth(db, TEST_AUTH);
-  const tmpDir = await mkdtemp(join(tmpdir(), "hs-test-"));
+  const tmpDir = await tempDir("hs-test-");
   const app = await buildApp({
     db,
     auth,

@@ -1,13 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { tempDir } from "../test-support/tmp.js";
 import { decrypt, encrypt, ensureSecretKey } from "./secrets.js";
 
 let dir: string;
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "hs-secrets-"));
+  dir = await tempDir("hs-secrets-");
 });
 
 describe("ensureSecretKey", () => {

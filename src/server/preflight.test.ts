@@ -1,9 +1,9 @@
-import { access, chmod, constants, mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, chmod, constants } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import { dataDirChecks, isNetworkFilesystem, runChecks } from "./preflight.js";
+import { tempDir } from "./test-support/tmp.js";
 
 const MOUNTS = [
   "/dev/sda1 / ext4 rw,relatime 0 0",
@@ -45,7 +45,7 @@ describe("isNetworkFilesystem", () => {
 
 describe("runChecks", () => {
   it("reports a writable data dir as ok", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    const dir = await tempDir("hs-pre-");
     const config = loadConfig({
       HOMESTACKS_DATA: dir,
       HOMESTACKS_PROJECTS: dir,
@@ -58,7 +58,7 @@ describe("runChecks", () => {
     // Was /proc/nope; the check now creates the directory, and mkdir under
     // /proc blocks indefinitely on some kernels instead of returning EACCES.
     // An existing directory with the write bit cleared covers the same case.
-    const dir = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    const dir = await tempDir("hs-pre-");
     await chmod(dir, 0o500);
     try {
       const config = loadConfig({
@@ -78,7 +78,7 @@ describe("runChecks", () => {
   // parent produced a raw EACCES stack and no preflight output at all. It is
   // now part of the check, and both flavours of failure report identically.
   it("creates a missing data dir rather than failing the check", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    const parent = await tempDir("hs-pre-");
     const dir = join(parent, "nested", "homestacks");
     const config = loadConfig({
       HOMESTACKS_DATA: dir,
@@ -90,7 +90,7 @@ describe("runChecks", () => {
   });
 
   it("reports an unwritable parent as a blocking failure, not a crash", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    const parent = await tempDir("hs-pre-");
     await chmod(parent, 0o500);
     try {
       const config = loadConfig({

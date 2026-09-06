@@ -1,12 +1,10 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { count, eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { settings, user } from "../db/schema.js";
+import { tempDir } from "../test-support/tmp.js";
 
 let db: Db;
 let app: Awaited<ReturnType<typeof buildApp>>;
@@ -26,7 +24,7 @@ beforeEach(async () => {
   db = createDb(":memory:");
   await runMigrations(db);
   auth = createAuth(db, TEST_AUTH);
-  const tmpDir = await mkdtemp(join(tmpdir(), "hs-test-"));
+  const tmpDir = await tempDir("hs-test-");
   app = await buildApp({
     db,
     auth,
