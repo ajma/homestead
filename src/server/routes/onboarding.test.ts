@@ -1,3 +1,6 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { count, eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
@@ -23,7 +26,14 @@ beforeEach(async () => {
   db = createDb(":memory:");
   await runMigrations(db);
   auth = createAuth(db, TEST_AUTH);
-  app = await buildApp({ db, auth });
+  const tmpDir = await mkdtemp(join(tmpdir(), "hs-test-"));
+  app = await buildApp({
+    db,
+    auth,
+    projectsDir: tmpDir,
+    projectsHostDir: tmpDir,
+    dataDir: tmpDir,
+  });
 });
 
 describe("POST /api/onboarding/admin", () => {

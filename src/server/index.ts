@@ -35,7 +35,14 @@ async function main(): Promise<void> {
     baseURL: config.baseUrl,
     trustedOrigins: config.trustedOrigins,
   });
-  const app = await buildApp({ db, auth, logger: true });
+  const app = await buildApp({
+    db,
+    auth,
+    logger: true,
+    projectsDir: config.projectsDir,
+    projectsHostDir: config.projectsHostDir,
+    dataDir: config.dataDir,
+  });
   await app.listen({ port: config.port, host: "0.0.0.0" });
 }
 

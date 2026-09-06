@@ -1,3 +1,6 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { createAuth } from "./auth/index.js";
@@ -12,7 +15,14 @@ async function boot() {
   const db = createDb(":memory:");
   await runMigrations(db);
   const auth = createAuth(db, TEST_AUTH);
-  return buildApp({ db, auth });
+  const tmpDir = await mkdtemp(join(tmpdir(), "hs-test-"));
+  return buildApp({
+    db,
+    auth,
+    projectsDir: tmpDir,
+    projectsHostDir: tmpDir,
+    dataDir: tmpDir,
+  });
 }
 
 describe("app", () => {
@@ -28,8 +38,22 @@ describe("app", () => {
     const db = createDb(":memory:");
     await runMigrations(db);
     const auth = createAuth(db, TEST_AUTH);
-    const quiet = await buildApp({ db, auth });
-    const loud = await buildApp({ db, auth, logger: true });
+    const tmpDir = await mkdtemp(join(tmpdir(), "hs-test-"));
+    const quiet = await buildApp({
+      db,
+      auth,
+      projectsDir: tmpDir,
+      projectsHostDir: tmpDir,
+      dataDir: tmpDir,
+    });
+    const loud = await buildApp({
+      db,
+      auth,
+      logger: true,
+      projectsDir: tmpDir,
+      projectsHostDir: tmpDir,
+      dataDir: tmpDir,
+    });
     // With logging disabled Fastify installs an abstract no-op logger, which
     // has no level and silently discards every error we record. A real Pino
     // instance reports one.

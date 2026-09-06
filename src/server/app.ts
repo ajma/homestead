@@ -3,6 +3,7 @@ import type { Auth } from "./auth/index.js";
 import { authPlugin } from "./auth/plugin.js";
 import type { Db } from "./db/client.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
+import { projectRoutes } from "./routes/projects.js";
 import { statusRoutes } from "./routes/status.js";
 
 export type AppDeps = {
@@ -14,6 +15,9 @@ export type AppDeps = {
    * server-side error is written nowhere.
    */
   logger?: boolean;
+  projectsDir: string;
+  projectsHostDir: string;
+  dataDir: string;
 };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -33,6 +37,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(authPlugin, { auth: deps.auth });
   await app.register(onboardingRoutes, { db: deps.db, auth: deps.auth });
   await app.register(statusRoutes, { db: deps.db });
+  await app.register(projectRoutes, {
+    projectsDir: deps.projectsDir,
+    projectsHostDir: deps.projectsHostDir,
+    dataDir: deps.dataDir,
+  });
   app.get("/api/health", async () => ({ status: "ok" }));
   return app;
 }
