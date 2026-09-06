@@ -47,6 +47,9 @@ describe("sign-in rate limiting", () => {
     expect(ctx.rateLimit).toMatchObject({ enabled: true, window: 60, max: 60 });
     expect(ctx.rateLimit.customRules).toMatchObject({
       "/sign-in/email": { window: 60, max: 5 },
+      // Bounded, not disabled: `false` would switch the limiter off for this
+      // path entirely, and a runaway client could then spin the server.
+      "/get-session": { window: 60, max: 600 },
     });
     // No client-supplied header may be used as the rate-limit key.
     expect(ctx.options.advanced?.ipAddress?.ipAddressHeaders).toEqual([]);
@@ -74,5 +77,25 @@ describe("sign-in rate limiting", () => {
     // Five attempts are answered on their merits, the sixth is refused.
     expect(statuses.slice(0, 5)).not.toContain(429);
     expect(statuses[5]).toBe(429);
+  });
+
+  // Safe to spend attempts alongside the test above: Better-Auth keys the
+  // limiter on `ip:path`, so `/get-session` has its own bucket and cannot
+  // starve `/sign-in/email`.
+  it("does not throttle reading the session at the sign-in budget", async () => {
+    // Every client shares one bucket, because `ipAddressHeaders` is empty.
+    // Under the previous 60/minute global that made a hundred page loads a
+    // minute — one busy household, or this project's own e2e suite run at two
+    // viewports — indistinguishable from an attack, and the 429 reaches the
+    // browser as a signed-out session.
+    const { app } = await boot();
+    const statuses: number[] = [];
+    for (let i = 0; i < 100; i++) {
+      statuses.push(
+        (await app.inject({ method: "GET", url: "/api/auth/get-session" }))
+          .statusCode,
+      );
+    }
+    expect(statuses).not.toContain(429);
   });
 });
