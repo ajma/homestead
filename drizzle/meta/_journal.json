@@ -8,6 +8,20 @@
       "when": 1788657413779,
       "tag": "0000_cool_daredevil",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788658278917,
+      "tag": "0001_elite_unus",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788659373407,
+      "tag": "0002_thin_hellfire_club",
+      "breakpoints": true
     }
   ]
 }
