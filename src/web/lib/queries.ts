@@ -37,6 +37,16 @@ export function projectsPollInterval(error: unknown): number | false {
 }
 
 /**
+ * Focus refetching is an independent switch from the poll interval, and an
+ * errored query has no `dataUpdatedAt`, so it is always considered stale: left
+ * at the default, a viewer who alt-tabs 200 times issues 200 requests that are
+ * all guaranteed to 403. Same rule as the poll, applied to the other trigger.
+ */
+export function refetchProjectsOnFocus(error: unknown): boolean {
+  return !isRefusal(error);
+}
+
+/**
  * The project list is a cheap directory scan — no compose parsing and no
  * Docker calls — so it is safe to poll. Anything that needs `docker compose`
  * belongs on the detail view, once, not on 30 rows every 15 seconds.
@@ -49,7 +59,7 @@ export function useProjects() {
       return body?.projects ?? [];
     },
     refetchInterval: (query) => projectsPollInterval(query.state.error),
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: (query) => refetchProjectsOnFocus(query.state.error),
     retry: retryUnlessRefused,
   });
 }

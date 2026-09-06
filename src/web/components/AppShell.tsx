@@ -88,11 +88,15 @@ export function AppShell() {
       );
       return;
     }
-    // Sign-out is a client-side transition, so every cached query would
-    // otherwise survive into the next account's session on a shared device.
-    queryClient.clear();
     menu.setOpen(false);
     navigate("/login");
+    // Sign-out is a client-side transition, so every cached query would
+    // otherwise survive into the next account's session on a shared device.
+    // Cleared *after* navigating: clearing while a data page is still mounted
+    // leaves its observer to re-fetch with the cookie the server has just
+    // revoked, and apiFetch answers that 401 with window.location.assign —
+    // a full page reload in place of the SPA transition.
+    queryClient.clear();
   }
 
   return (

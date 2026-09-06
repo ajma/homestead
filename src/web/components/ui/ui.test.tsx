@@ -54,6 +54,31 @@ describe("StatusDot", () => {
     render(<StatusDot state="exited" />);
     expect(screen.getByText("exited")).toBeInTheDocument();
   });
+
+  it.each([
+    ["running", "bg-success"],
+    ["exited", "bg-muted"],
+    ["restarting", "bg-warning"],
+    ["unknown", "bg-muted"],
+  ] as const)("tints the %s dot with %s", (state, tint) => {
+    const { container } = render(<StatusDot state={state} />);
+    const dot = container.querySelector('[aria-hidden="true"]');
+    expect(dot).not.toBeNull();
+    expect(dot?.className).toContain(tint);
+  });
+
+  it("lets its label inherit colour so a muted row stays muted", () => {
+    render(
+      <p className="text-muted">
+        <StatusDot state="unknown" label="No compose file" />
+      </p>,
+    );
+    // jsdom has no cascade, so inheritance is asserted structurally: pinning a
+    // colour on the label is what stops the "not a project" row looking muted.
+    expect(screen.getByText("No compose file").className).not.toMatch(
+      /\btext-(text|muted|accent|danger|success|warning)\b/,
+    );
+  });
 });
 
 describe("Panel and Badge and EmptyState", () => {

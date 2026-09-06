@@ -1,4 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  focusManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +11,7 @@ import {
   POLL_MS,
   projectsPollInterval,
   queryKeys,
+  refetchProjectsOnFocus,
   useProject,
   useProjects,
 } from "./queries.js";
@@ -14,7 +19,17 @@ import {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  // Undo any focus the test forced; focusManager is module-level state.
+  focusManager.setFocused(undefined);
 });
+
+/** Alt-tab away and back. */
+async function refocusWindow() {
+  await act(async () => {
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+  });
+}
 
 function json(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -61,6 +76,17 @@ describe("projectsPollInterval", () => {
   });
 });
 
+describe("refetchProjectsOnFocus", () => {
+  it("refetches on focus while healthy but not after a refusal", () => {
+    expect(refetchProjectsOnFocus(null)).toBe(true);
+    expect(refetchProjectsOnFocus(new ApiError(500, "boom"))).toBe(true);
+    expect(refetchProjectsOnFocus(new ApiError(403, "forbidden"))).toBe(false);
+    expect(refetchProjectsOnFocus(new ApiError(401, "unauthenticated"))).toBe(
+      false,
+    );
+  });
+});
+
 describe("useProjects", () => {
   it("unwraps the response envelope into the list of entries", async () => {
     vi.stubGlobal(
@@ -83,6 +109,37 @@ describe("useProjects", () => {
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.error).toBeInstanceOf(ApiError);
     expect((result.current.error as ApiError).status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("refetches when the window regains focus", async () => {
+    const fetchMock = vi.fn(async () => json(200, { projects: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useProjects(), {
+      wrapper: wrapper(testClient()),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    await refocusWindow();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not refetch on focus once the server has refused", async () => {
+    // Focus refetching is a separate switch from the poll interval, and an
+    // errored query has no dataUpdatedAt so it always counts as stale. A
+    // viewer who leaves this tab open and alt-tabs 200 times would otherwise
+    // issue 200 requests that are all guaranteed to 403.
+    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useProjects(), {
+      wrapper: wrapper(testClient()),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    await refocusWindow();
+    await refocusWindow();
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 

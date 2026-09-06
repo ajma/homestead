@@ -7,6 +7,34 @@ import { AppShell } from "./AppShell.js";
 
 const signOut = vi.fn();
 
+/** Records the order of the two teardown steps sign-out performs. */
+const teardown: string[] = [];
+
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return {
+    ...actual,
+    useNavigate: () => {
+      const navigate = actual.useNavigate();
+      return (...args: unknown[]) => {
+        teardown.push("navigate");
+        return (navigate as (...a: unknown[]) => unknown)(...args);
+      };
+    },
+  };
+});
+
+/** A client whose clear() announces itself, delegating to the real one. */
+function recordingClient(): QueryClient {
+  const client = new QueryClient();
+  const clear = client.clear.bind(client);
+  vi.spyOn(client, "clear").mockImplementation(() => {
+    teardown.push("clear");
+    clear();
+  });
+  return client;
+}
+
 vi.mock("../lib/auth-client.js", () => ({
   signOut: () => signOut(),
   useSession: () => ({ data: { user: { email: "admin@example.com" } } }),
@@ -35,6 +63,24 @@ describe("AppShell sign-out", () => {
   beforeEach(() => {
     signOut.mockReset();
     localStorage.clear();
+    teardown.length = 0;
+  });
+
+  it("navigates away before clearing the cache", async () => {
+    signOut.mockResolvedValue({ data: {}, error: null });
+    const client = recordingClient();
+    client.setQueryData(["projects"], ["media-server"]);
+    renderShell(client);
+
+    await openAccountMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+
+    // Order matters: clearing first leaves any still-mounted data page to
+    // re-fetch immediately with the cookie the server has just revoked, and
+    // apiFetch answers that 401 with window.location.assign — a full page
+    // reload in place of the SPA transition this is supposed to be.
+    expect(teardown).toEqual(["navigate", "clear"]);
+    expect(client.getQueryData(["projects"])).toBeUndefined();
   });
 
   it("clears the query cache so the next account cannot read this one's data", async () => {

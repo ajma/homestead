@@ -28,7 +28,9 @@ export function StatusDot({
         className={`w-2 h-2 rounded-full ${STATE_STYLES[state]}`}
         aria-hidden="true"
       />
-      <span className="text-text">{displayText}</span>
+      {/* No colour of its own: the dot carries the state, and the label takes
+          the colour of the row it sits in — a muted row stays muted. */}
+      <span>{displayText}</span>
     </span>
   );
 }
