@@ -62,6 +62,24 @@ export type ProjectModel = {
   meta: ProjectMeta;
 };
 
+/**
+ * One container as `docker compose ps` reports it. Part of the wire shape of
+ * `GET /api/projects/:slug`, so it lives here rather than in the server's
+ * Docker layer — the browser must never import server code.
+ *
+ * `state` is whatever the daemon says: `running`, `exited`, `restarting`,
+ * `created`, `paused`, `dead`, `removing`. It is deliberately not a union —
+ * narrowing it here would turn a new daemon state into a parse failure — so
+ * every consumer must map it totally, with a fallback.
+ */
+export type ContainerState = {
+  service: string;
+  name: string;
+  state: string;
+  health: string | null;
+  exitCode: number;
+};
+
 export type OperationKind = "up" | "down" | "restart" | "pull";
 export type OperationStatus = "running" | "succeeded" | "failed";
 

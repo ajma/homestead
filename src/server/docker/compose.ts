@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ContainerState } from "@shared/projects.js";
 import { findComposeFile, projectPath } from "../projects/store.js";
 import {
   type DockerRunner,
@@ -17,13 +18,10 @@ export type ComposeContext = {
   slug: string;
 };
 
-export type ContainerState = {
-  service: string;
-  name: string;
-  state: string;
-  health: string | null;
-  exitCode: number;
-};
+// Re-exported, not redeclared: `GET /api/projects/:slug` returns this shape to
+// the browser, so it is defined once in the shared boundary (see
+// `src/shared/projects.ts`) and a hand-copied twin cannot drift from it.
+export type { ContainerState };
 
 /**
  * Validates compose verb for safety. Uses allow-list for `down` to prevent
