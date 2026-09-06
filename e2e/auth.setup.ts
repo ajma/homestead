@@ -1,4 +1,4 @@
-import { expect, test as setup } from "@playwright/test";
+import { expect, test as setup } from "./support/fixtures.js";
 
 const authFile = "/tmp/homestead-e2e/.auth/admin.json";
 

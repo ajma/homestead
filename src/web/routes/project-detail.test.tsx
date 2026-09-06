@@ -2,7 +2,7 @@ import type { ContainerState, Operation } from "@shared/projects.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Routes, useLocation } from "react-router-dom";
+import { Link, MemoryRouter, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectDetailData } from "../lib/queries.js";
 import { projectDetailRoute } from "./ProjectDetail.js";
@@ -111,7 +111,14 @@ function stubApi(stub: Stub) {
  * renders Overview in its sidebar whether or not the URL was ever corrected.
  */
 function Path() {
-  return <p>path: {useLocation().pathname}</p>;
+  return (
+    <>
+      <p>path: {useLocation().pathname}</p>
+      {/* A second project to navigate to, so page-scoped state can be shown
+          not to survive the trip. */}
+      <Link to="/projects/paperless/overview">other project</Link>
+    </>
+  );
 }
 
 function renderDetail(path = "/projects/jellyfin/overview") {
@@ -128,7 +135,7 @@ function renderDetail(path = "/projects/jellyfin/overview") {
   );
 }
 
-const LIFECYCLE = ["Start", "Stop", "Restart", "Pull"] as const;
+const LIFECYCLE = ["Start", "Stop & remove", "Restart", "Pull"] as const;
 
 describe("ProjectDetail header", () => {
   it("names the project, shows its status and carries all four controls", async () => {
@@ -208,6 +215,27 @@ describe("ProjectDetail routing", () => {
     expect(screen.getByRole("tab", { name: "Edit" })).toHaveAttribute(
       "aria-selected",
       "true",
+    );
+  });
+});
+
+describe("the collapsible overview rail", () => {
+  it("says the overview is hidden rather than leaving the page blank", async () => {
+    // At lg+ the rail owns the left column and the content column is empty on
+    // this tab; collapsing the rail would otherwise leave half a wide screen
+    // blank with no explanation and no way back.
+    stubApi({});
+    renderDetail();
+    const user = userEvent.setup();
+
+    await user.click(
+      await screen.findByRole("button", { name: /hide overview/i }),
+    );
+    expect(screen.getByText(/overview is hidden/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /show overview/i }));
+    await waitFor(() =>
+      expect(screen.queryByText(/overview is hidden/i)).not.toBeInTheDocument(),
     );
   });
 });
@@ -305,6 +333,16 @@ describe("a project whose compose file will not parse", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the parse error out of the collapsible aside", async () => {
+    // The aside is `hidden` below `lg` on any tab but Overview, and the Edit
+    // tab is exactly where someone goes to fix the file.
+    stubApi({ detail: broken });
+    renderDetail("/projects/jellyfin/edit");
+    const error = await screen.findByRole("region", { name: "Compose error" });
+    const aside = screen.getByRole("complementary", { name: "Overview" });
+    expect(aside).not.toContainElement(error);
+  });
+
   it("still renders what the response does provide", async () => {
     stubApi({ detail: broken });
     renderDetail();
@@ -368,6 +406,10 @@ describe("lifecycle controls", () => {
   });
 
   it("disables every control while an operation is already in flight", async () => {
+    // A shape the server really produces: `listForProject` prepends the live
+    // running operation to the history rows, which is what lets this page see
+    // an operation another tab or another admin started. See the registry's
+    // "lists the operation that is running now" test.
     stubApi({
       operations: () =>
         json(200, {
@@ -382,5 +424,131 @@ describe("lifecycle controls", () => {
       await waitFor(() =>
         expect(screen.getByRole("button", { name })).toBeDisabled(),
       );
+    // A disabled control that does not say why reads as broken.
+    expect(
+      screen.getByText(/operation is running for this project/i),
+    ).toBeInTheDocument();
+  });
+
+  it("names the destructive verb for what it does", async () => {
+    // `docker compose down` removes containers and networks. "Stop" invites a
+    // tap meant as "pause this for a minute" and destroys anything the stack
+    // did not write to a named volume.
+    stubApi({});
+    renderDetail();
+    expect(
+      await screen.findByRole("button", { name: "Stop & remove" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Stop" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("asks before removing containers, and posts nothing until confirmed", async () => {
+    const fetchMock = stubApi({});
+    renderDetail();
+    const user = userEvent.setup();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Stop & remove" }),
+    );
+    const confirm = await screen.findByRole("alertdialog");
+    expect(confirm).toHaveTextContent(/deletes its containers and networks/i);
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+    // Focus starts on Cancel: a stray Enter must not perform the very action
+    // the confirmation exists to prevent.
+    expect(
+      within(confirm).getByRole("button", { name: "Cancel" }),
+    ).toHaveFocus();
+
+    await user.click(
+      within(confirm).getByRole("button", { name: /yes, stop and remove/i }),
+    );
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1),
+    );
+    expect(
+      fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[0],
+    ).toBe("/api/projects/jellyfin/down");
+  });
+
+  it("cancels without posting and hands focus back", async () => {
+    const fetchMock = stubApi({});
+    renderDetail();
+    const user = userEvent.setup();
+
+    const down = await screen.findByRole("button", { name: "Stop & remove" });
+    await user.click(down);
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+    expect(down).toHaveFocus();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+  });
+
+  it("escape cancels the confirmation", async () => {
+    stubApi({});
+    renderDetail();
+    const user = userEvent.setup();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Stop & remove" }),
+    );
+    await screen.findByRole("alertdialog");
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("leaves the other three verbs at one tap", async () => {
+    // Restarting from a phone is the primary mobile job; it must not grow a
+    // confirmation step.
+    const fetchMock = stubApi({});
+    renderDetail();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Restart" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+      ).toHaveLength(1),
+    );
+  });
+
+  it("does not carry one project's operation into the next", async () => {
+    stubApi({ post: () => json(202, { operationId: "op-42" }) });
+    renderDetail();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Restart" }));
+    expect(
+      await screen.findByRole("region", { name: "Operation" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("link", { name: "other project" }));
+    expect(
+      await screen.findByText("path: /projects/paperless/overview"),
+    ).toBeInTheDocument();
+    // Same route, different param: without a key on the slug React reuses the
+    // component and its state, and this page would open showing the previous
+    // project's operation.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Operation" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

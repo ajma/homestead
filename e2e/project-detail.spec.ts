@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./support/fixtures.js";
 
 /** Matches HOMESTEAD_PROJECTS in playwright.config.ts. */
 const PROJECTS_ROOT = "/tmp/homestead-e2e/stacks";
@@ -17,36 +18,7 @@ const suffix = randomUUID().slice(0, 8);
 const STACK = `e2e-detail-${suffix}`;
 const BROKEN = `e2e-broken-${suffix}`;
 
-const LIFECYCLE = ["Start", "Stop", "Restart", "Pull"] as const;
-
-/**
- * A RegExp, not a glob. Playwright's URL globs understand `*`, `**`, `?` and
- * `{a,b}` — they do **not** understand shell extglob `@(a|b)`, which matches
- * nothing and turns this guard into a no-op that silently lets the request
- * through. That was not hypothetical: it happened while writing this file.
- */
-const VERB_ROUTE = /\/api\/projects\/[^/]+\/(up|down|restart|pull)(\?|$)/;
-
-/**
- * No test in this file may start a real container.
- *
- * `POST /api/projects/:slug/up` runs `docker compose up -d` against the real
- * daemon this suite shares with the developer's machine, and compose reconciles
- * by project-name label — a stray `up` can adopt or clobber a stack that is not
- * ours. An earlier plan's suite left containers running for exactly this
- * reason. So every lifecycle request is answered by the browser, and this guard
- * makes reaching the server impossible rather than merely unlikely: a test that
- * forgets its own `page.route` fails on this body instead of spawning docker.
- */
-async function blockRealLifecycleCalls(page: Page): Promise<void> {
-  await page.route(VERB_ROUTE, (route) =>
-    route.fulfill({
-      status: 503,
-      contentType: "application/json",
-      body: JSON.stringify({ error: "e2e_lifecycle_guard" }),
-    }),
-  );
-}
+const LIFECYCLE = ["Start", "Stop & remove", "Restart", "Pull"] as const;
 
 test.beforeAll(async () => {
   await mkdir(join(PROJECTS_ROOT, STACK), { recursive: true });
@@ -81,10 +53,6 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   for (const dir of [STACK, BROKEN])
     await rm(join(PROJECTS_ROOT, dir), { recursive: true, force: true });
-});
-
-test.beforeEach(async ({ page }) => {
-  await blockRealLifecycleCalls(page);
 });
 
 test("the header names the project and shows its status", async ({ page }) => {
@@ -161,8 +129,9 @@ test("a malformed compose file still renders, with its parse error", async ({
 test("starting a stack opens the operation slot and dismissing closes it", async ({
   page,
 }) => {
-  // Answered in the browser: see blockRealLifecycleCalls. Registered after the
-  // guard, so this more specific handler wins.
+  // Answered in the browser. A page route beats the shared context-level
+  // guard in e2e/support/fixtures.ts, so this handler wins and the server is
+  // still never reached.
   let posted = 0;
   await page.route(`**/api/projects/${STACK}/restart`, (route) => {
     posted++;
@@ -185,6 +154,45 @@ test("starting a stack opens the operation slot and dismissing closes it", async
   await expect(panel).toBeHidden();
 });
 
+test("removing containers asks first, and cancelling posts nothing", async ({
+  page,
+}) => {
+  let posted = 0;
+  await page.route(`**/api/projects/${STACK}/down`, (route) => {
+    posted++;
+    return route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ operationId: "e2e-op-down" }),
+    });
+  });
+
+  await page.goto(`/projects/${STACK}/overview`);
+  // The label says what `docker compose down` does, so the tap is informed.
+  await expect(
+    page.getByRole("button", { name: "Stop", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Stop & remove" }).click();
+
+  const confirm = page.getByRole("alertdialog");
+  await expect(confirm).toContainText(/deletes its containers and networks/i);
+  expect(posted, "nothing is posted before confirming").toBe(0);
+
+  await confirm.getByRole("button", { name: "Cancel" }).click();
+  await expect(confirm).toBeHidden();
+  expect(posted, "cancelling posts nothing").toBe(0);
+
+  await page.getByRole("button", { name: "Stop & remove" }).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: /yes, stop and remove/i })
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Operation", exact: true }),
+  ).toBeVisible();
+  expect(posted).toBe(1);
+});
+
 test("a 409 from another tab is reported, not swallowed", async ({ page }) => {
   await page.route(`**/api/projects/${STACK}/up`, (route) =>
     route.fulfill({
@@ -203,27 +211,76 @@ test("a 409 from another tab is reported, not swallowed", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText(/already running/i);
 });
 
-test("the lifecycle controls are reachable on a phone", async ({ page }) => {
+/**
+ * Every visible control, not a hand-written list.
+ *
+ * The previous version measured only the four lifecycle buttons, and so said
+ * nothing about the operation panel's Dismiss — which shipped at 36px and
+ * renders at 390px. A sweep cannot forget a control that was added later.
+ */
+async function tapTargetOffenders(page: Page): Promise<string[]> {
+  const controls = page.locator(
+    "button:visible, a[href]:visible, [role=tab]:visible",
+  );
+  const offenders: string[] = [];
+  for (let i = 0; i < (await controls.count()); i++) {
+    const control = controls.nth(i);
+    const name = (
+      await control.evaluate(
+        (el) => el.getAttribute("aria-label") ?? el.textContent ?? "",
+      )
+    )
+      .trim()
+      .slice(0, 40);
+    const box = await control.boundingBox();
+    if (!box) {
+      offenders.push(`${name}: no bounding box`);
+      continue;
+    }
+    if (box.height < TOUCH_MIN)
+      offenders.push(`${name}: ${Math.round(box.height)}px tall`);
+    if (box.x < 0 || box.x + box.width > PHONE.width)
+      offenders.push(`${name}: outside the viewport`);
+  }
+  return offenders;
+}
+
+test("every control on the page is tappable at phone width", async ({
+  page,
+}) => {
+  await page.route(`**/api/projects/${STACK}/restart`, (route) =>
+    route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({ operationId: "e2e-op-tap" }),
+    }),
+  );
   await page.setViewportSize(PHONE);
   await page.goto(`/projects/${STACK}/overview`);
-  await expect(page.getByRole("heading", { name: STACK, level: 1 })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: STACK, level: 1 }),
+  ).toBeVisible();
 
-  for (const name of LIFECYCLE) {
-    const button = page.getByRole("button", { name, exact: true });
-    await expect(button).toBeVisible();
-    const box = await button.boundingBox();
-    if (!box) throw new Error(`expected ${name} to have a bounding box`);
-    expect(box.height, `${name} clears the touch minimum`).toBeGreaterThanOrEqual(
-      TOUCH_MIN,
-    );
-    expect(box.x, `${name} starts inside the viewport`).toBeGreaterThanOrEqual(0);
-    expect(
-      box.x + box.width,
-      `${name} ends inside the viewport`,
-    ).toBeLessThanOrEqual(PHONE.width);
-  }
+  // The four lifecycle controls are present at phone width, by name.
+  for (const name of LIFECYCLE)
+    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
 
+  expect(await tapTargetOffenders(page), "the page at rest").toEqual([]);
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(PHONE.width);
+
+  // …with the operation panel open, which is where Dismiss lives.
+  await page.getByRole("button", { name: "Restart", exact: true }).click();
+  await expect(
+    page.getByRole("region", { name: "Operation", exact: true }),
+  ).toBeVisible();
+  expect(await tapTargetOffenders(page), "with an operation open").toEqual([]);
+
+  // …and with the remove confirmation open, which is the other pair.
+  await page.getByRole("button", { name: "Stop & remove" }).click();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  expect(await tapTargetOffenders(page), "with the confirmation open").toEqual(
+    [],
+  );
 });

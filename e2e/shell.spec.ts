@@ -1,4 +1,5 @@
-import { expect, type Locator, test } from "@playwright/test";
+import type { Locator } from "@playwright/test";
+import { expect, test } from "./support/fixtures.js";
 import { SIGNED_OUT_STORAGE_STATE, signInAsAdmin } from "./support/auth.js";
 
 const PHONE = { width: 390, height: 844 };

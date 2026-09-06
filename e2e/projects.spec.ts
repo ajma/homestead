@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./support/fixtures.js";
 
 /** Matches HOMESTEAD_PROJECTS in playwright.config.ts. */
 const PROJECTS_ROOT = "/tmp/homestead-e2e/stacks";

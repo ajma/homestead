@@ -1,5 +1,5 @@
 import type { OperationKind } from "@shared/projects.js";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   Link,
   Navigate,
@@ -35,18 +35,29 @@ const TABS = [
 
 /**
  * The four verbs the server accepts, in the order a person reaches for them.
- * `down` is `danger`-toned because it removes containers.
+ *
+ * `down` is labelled for what `docker compose down` does — it deletes the
+ * containers and networks — and is the only one that asks first. "Stop" was a
+ * lie: a tap meant as "pause this for a minute", made on a phone, destroyed
+ * everything the stack had not written to a named volume. The other three stay
+ * one tap, because restarting from a phone is the primary mobile job and must
+ * not grow friction.
  */
 const VERBS: {
   verb: OperationKind;
   label: string;
   variant: "primary" | "secondary" | "danger";
+  confirm: boolean;
 }[] = [
-  { verb: "up", label: "Start", variant: "primary" },
-  { verb: "down", label: "Stop", variant: "danger" },
-  { verb: "restart", label: "Restart", variant: "secondary" },
-  { verb: "pull", label: "Pull", variant: "secondary" },
+  { verb: "up", label: "Start", variant: "primary", confirm: false },
+  { verb: "down", label: "Stop & remove", variant: "danger", confirm: true },
+  { verb: "restart", label: "Restart", variant: "secondary", confirm: false },
+  { verb: "pull", label: "Pull", variant: "secondary", confirm: false },
 ];
+
+/** Why the controls are disabled — said out loud, not left to be inferred. */
+const BUSY_REASON =
+  "An operation is running for this project. The controls return when it finishes.";
 
 function BackLink() {
   return (
@@ -122,7 +133,28 @@ export function ProjectDetail() {
     null,
   );
   const [overviewOpen, setOverviewOpen] = useState(true);
+  const [confirmingDown, setConfirmingDown] = useState(false);
   const overviewId = useId();
+  const confirmId = useId();
+  const busyId = useId();
+  const downRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  // Focus lands on Cancel, never on the destructive button: opening a
+  // confirmation with the "yes" already focused turns a stray Enter into the
+  // very action the confirmation exists to prevent.
+  useEffect(() => {
+    if (confirmingDown) cancelRef.current?.focus();
+  }, [confirmingDown]);
+
+  const run = (verb: OperationKind) =>
+    lifecycle.mutate(verb, { onSuccess: setActiveOperationId });
+
+  /** Dismissing a confirmation returns focus to what opened it. */
+  const cancelDown = () => {
+    setConfirmingDown(false);
+    downRef.current?.focus();
+  };
 
   if (detail.isPending)
     return (
@@ -194,20 +226,61 @@ export function ProjectDetail() {
         </div>
         {/* Outside the collapsible Overview, and present at every width:
             restarting a stack from a phone is the primary mobile job. */}
-        <div className="mt-3 flex flex-wrap gap-2">
-          {VERBS.map(({ verb, label, variant }) => (
+        <div
+          role="toolbar"
+          aria-label="Lifecycle controls"
+          className="mt-3 flex flex-wrap gap-2"
+        >
+          {VERBS.map(({ verb, label, variant, confirm }) => (
             <Button
               key={verb}
+              ref={confirm ? downRef : undefined}
               variant={variant}
               disabled={busy}
-              onClick={() =>
-                lifecycle.mutate(verb, { onSuccess: setActiveOperationId })
-              }
+              // A disabled control that does not say why reads as broken.
+              aria-describedby={busy ? busyId : undefined}
+              title={busy ? BUSY_REASON : undefined}
+              onClick={() => (confirm ? setConfirmingDown(true) : run(verb))}
             >
               {label}
             </Button>
           ))}
         </div>
+        {busy && (
+          <p id={busyId} className="mt-2 text-sm text-muted">
+            {BUSY_REASON}
+          </p>
+        )}
+        {confirmingDown && (
+          <div
+            role="alertdialog"
+            aria-labelledby={confirmId}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") cancelDown();
+            }}
+            className="mt-3 rounded-md border border-danger bg-raised p-3"
+          >
+            <p id={confirmId} className="text-sm text-text">
+              Stop and remove <strong>{slug}</strong>? This deletes its
+              containers and networks. Named volumes are kept; anything written
+              inside a container is lost.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setConfirmingDown(false);
+                  run("down");
+                }}
+              >
+                Yes, stop and remove
+              </Button>
+              <Button ref={cancelRef} onClick={cancelDown}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
         {lifecycle.isError && (
           <p role="alert" className="mt-2 text-sm text-danger">
             {lifecycleErrorMessage(lifecycle.error)}
@@ -216,6 +289,26 @@ export function ProjectDetail() {
       </div>
 
       <div className="flex flex-col gap-4 p-4 sm:p-6">
+        {/* Above the tabs, not inside the Overview aside: the aside is
+            `hidden` below `lg` on any other tab, so a phone user who opened
+            Edit to fix the file could not see what was wrong with it. */}
+        {data.parseError && (
+          <Panel
+            title="Compose file could not be parsed"
+            role="region"
+            aria-label="Compose error"
+            className="border-danger"
+          >
+            <p className="text-sm text-muted">
+              Homestead cannot read this stack until the file is valid.
+              Everything below is what it can still tell you.
+            </p>
+            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-sm text-danger">
+              {data.parseError}
+            </pre>
+          </Panel>
+        )}
+
         {activeOperationId && (
           <Panel
             title="Operation"
@@ -223,7 +316,7 @@ export function ProjectDetail() {
             aria-label="Operation"
             data-operation-id={activeOperationId}
             actions={
-              <Button size="sm" onClick={() => setActiveOperationId(null)}>
+              <Button onClick={() => setActiveOperationId(null)}>
                 Dismiss
               </Button>
             }
@@ -256,7 +349,6 @@ export function ProjectDetail() {
           >
             <div className="mb-3 hidden lg:flex">
               <Button
-                size="sm"
                 variant="ghost"
                 aria-expanded={overviewOpen}
                 aria-controls={overviewId}
@@ -269,7 +361,21 @@ export function ProjectDetail() {
               <Overview slug={slug} detail={data} />
             </div>
           </aside>
-          <div className={`min-w-0 flex-1 ${onOverview ? "hidden" : ""}`}>
+          {/* On the Overview tab the aside owns the whole row, so this column
+              is hidden — unless the rail is collapsed at `lg`+, where leaving
+              half the page blank looks like a rendering fault. The Outlet is
+              rendered either way: the index route's redirect lives in it. */}
+          <div
+            className={`min-w-0 flex-1 ${
+              onOverview ? (overviewOpen ? "hidden" : "hidden lg:block") : ""
+            }`}
+          >
+            {onOverview && !overviewOpen && (
+              <EmptyState
+                title="Overview is hidden"
+                description={`The overview sidebar is collapsed. Use "Show overview" on the left to bring it back.`}
+              />
+            )}
             <Outlet />
           </div>
         </div>
@@ -279,11 +385,24 @@ export function ProjectDetail() {
 }
 
 /**
+ * `key={slug}` so React remounts rather than reusing state across projects.
+ * `activeOperationId` belongs to one project's page; without the key,
+ * navigating from one project to another would carry the previous project's
+ * operation — and, once Task 8 streams into that slot, its live output —
+ * into the new page. Nothing links project-to-project today; it is one link
+ * away from being a live bug, and the fix costs one attribute.
+ */
+function KeyedProjectDetail() {
+  const { slug = "" } = useParams();
+  return <ProjectDetail key={slug} />;
+}
+
+/**
  * Registered from `App.tsx` so there is one definition of these paths, and the
  * unit tests exercise the same tree the app mounts.
  */
 export const projectDetailRoute = (
-  <Route path="/projects/:slug" element={<ProjectDetail />}>
+  <Route path="/projects/:slug" element={<KeyedProjectDetail />}>
     <Route index element={<Navigate to="overview" replace />} />
     <Route path="overview" element={<OverviewRoute />} />
     <Route path="edit" element={<ComposeEditorRoute />} />

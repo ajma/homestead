@@ -210,22 +210,9 @@ export function Overview({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      {detail.parseError && (
-        <Panel
-          title="Compose file could not be parsed"
-          role="region"
-          aria-label="Compose error"
-          className="border-danger"
-        >
-          <p className="text-sm text-muted">
-            Homestead cannot read this stack until the file is valid. Everything
-            below is what it can still tell you.
-          </p>
-          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-sm text-danger">
-            {detail.parseError}
-          </pre>
-        </Panel>
-      )}
+      {/* The parse error itself is rendered by ProjectDetail, above the tabs:
+          this aside is hidden below `lg` on the Edit tab, which is exactly
+          where someone goes to fix the file. */}
       <Services detail={detail} />
       <Volumes detail={detail} />
       <Snapshots detail={detail} />
