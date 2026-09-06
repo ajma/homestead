@@ -71,7 +71,16 @@ function Services({ detail }: { detail: ProjectDetailData }) {
             return (
               <li key={service.name} className="py-3 first:pt-0 last:pb-0">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-medium text-text">{service.name}</span>
+                  {/* A service name is an identity, so it wraps rather than
+                      truncating — but it is also a single unbreakable token
+                      whenever it is underscored, and a flex item's automatic
+                      minimum size is its longest word. Without `min-w-0` the
+                      row cannot shrink below that, and a name such as
+                      `media_library_transcoder_and_metadata_indexer` pushes
+                      the whole page sideways at 390px. */}
+                  <span className="min-w-0 break-words font-medium text-text">
+                    {service.name}
+                  </span>
                   {state ? (
                     <StatusDot
                       state={dockerStateToStatus(state.state)}
@@ -120,7 +129,12 @@ function Volumes({ detail }: { detail: ProjectDetailData }) {
               key={volume.key}
               className="flex flex-wrap items-center gap-2 text-sm"
             >
-              <span className="font-medium text-text">{volume.key}</span>
+              {/* Same as the service name: the compose key is the thing the
+                  reader has to match against their own file, so it wraps
+                  instead of being cut, and `min-w-0` is what lets it. */}
+              <span className="min-w-0 break-words font-medium text-text">
+                {volume.key}
+              </span>
               <span className="truncate font-mono text-xs text-muted">
                 {volume.name}
               </span>
