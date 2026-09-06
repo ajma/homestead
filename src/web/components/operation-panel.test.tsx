@@ -261,6 +261,8 @@ describe("OperationPanel", () => {
  */
 function fakeScrollGeometry(el: HTMLElement, scrollHeight: number) {
   let scrollTop = 0;
+  let height = scrollHeight;
+  let client = 200;
   Object.defineProperty(el, "scrollTop", {
     configurable: true,
     get: () => scrollTop,
@@ -270,9 +272,29 @@ function fakeScrollGeometry(el: HTMLElement, scrollHeight: number) {
   });
   Object.defineProperty(el, "scrollHeight", {
     configurable: true,
-    get: () => scrollHeight,
+    get: () => height,
   });
-  Object.defineProperty(el, "clientHeight", { configurable: true, value: 200 });
+  Object.defineProperty(el, "clientHeight", {
+    configurable: true,
+    get: () => client,
+  });
+  return {
+    /**
+     * What the browser does when the element is collapsed: the box goes away,
+     * every measurement reads 0, and `scrollTop` is reset — which fires a
+     * scroll event at the handler.
+     */
+    collapse() {
+      height = 0;
+      client = 0;
+      scrollTop = 0;
+      fireEvent.scroll(el);
+    },
+    expand() {
+      height = scrollHeight;
+      client = 200;
+    },
+  };
 }
 
 describe("following the output", () => {
@@ -298,6 +320,28 @@ describe("following the output", () => {
     fakeScrollGeometry(el, 1_000);
     el.scrollTop = 0;
     fireEvent.scroll(el);
+
+    emit((es) => es.emitMessage({ chunk: "the newest line\n" }));
+
+    expect(el.scrollTop).toBe(0);
+  });
+
+  it("does not re-arm the follow when the log is collapsed and reopened", async () => {
+    // Collapsing drops the element's box: every measurement reads 0, which
+    // reads as "at the bottom", and the scroll event the browser fires as it
+    // resets `scrollTop` would silently put the reader back on the leash they
+    // deliberately got off.
+    renderPanel();
+    emit((es) => es.emitOpen());
+    const el = log();
+    const geometry = fakeScrollGeometry(el, 1_000);
+    el.scrollTop = 0;
+    fireEvent.scroll(el);
+
+    await userEvent.click(screen.getByRole("button", { name: "Hide output" }));
+    geometry.collapse();
+    await userEvent.click(screen.getByRole("button", { name: "Show output" }));
+    geometry.expand();
 
     emit((es) => es.emitMessage({ chunk: "the newest line\n" }));
 

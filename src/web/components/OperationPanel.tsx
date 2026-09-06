@@ -233,7 +233,16 @@ export function OperationPanel({
         // that the controls above it stay in view.
         className="h-[55vh] overflow-y-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-xs text-text sm:h-72"
         onScroll={(event) => {
-          followRef.current = isAtBottom(event.currentTarget);
+          const el = event.currentTarget;
+          // Collapsing the log fires a scroll event as the browser drops its
+          // box and resets `scrollTop`, and an element with no layout measures
+          // 0/0/0 — which reads as "at the bottom". Left unguarded, hiding and
+          // re-showing the log silently re-arms auto-follow and drags a reader
+          // who had deliberately scrolled up back down, which is the one thing
+          // this whole mechanism exists to prevent. Only a laid-out element
+          // can say where anyone is.
+          if (el.clientHeight === 0) return;
+          followRef.current = isAtBottom(el);
         }}
       >
         {output === "" ? (
