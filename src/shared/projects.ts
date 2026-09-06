@@ -31,9 +31,20 @@ export type ProjectMeta = {
   system: boolean;
 };
 
+export type VolumeRef = {
+  /** The compose file's key for this volume. */
+  key: string;
+  /** The resolved Docker volume name — what `docker volume ls` shows. */
+  name: string;
+  /** True when declared external: owned elsewhere, must never be offered for deletion. */
+  external: boolean;
+};
+
 export type ProjectModel = {
   projectName: string;
   services: ServiceModel[];
+  /** Top-level named volumes this project owns, sorted by key. */
+  volumes: VolumeRef[];
   meta: ProjectMeta;
 };
 

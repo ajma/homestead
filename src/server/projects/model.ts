@@ -4,6 +4,7 @@ import type {
   ProjectModel,
   PublishedPort,
   ServiceModel,
+  VolumeRef,
 } from "@shared/projects.js";
 
 const LOOPBACK_EXACT = new Set(["::1", "localhost"]);
@@ -71,6 +72,29 @@ function parseMeta(raw: unknown): ProjectMeta {
   return meta;
 }
 
+function parseVolumes(raw: unknown): VolumeRef[] {
+  const volumes: VolumeRef[] = [];
+  const volumesObj = asRecord(raw);
+  const entries = Object.entries(volumesObj);
+
+  for (const [key, value] of entries) {
+    const vol = asRecord(value);
+    const name = typeof vol.name === "string" ? vol.name : key;
+    const external = vol.external === true;
+
+    volumes.push({
+      key,
+      name,
+      external,
+    });
+  }
+
+  // Sort by key using code-unit comparison (not localeCompare)
+  volumes.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+
+  return volumes;
+}
+
 export function parseCanonical(json: unknown): ProjectModel {
   const root = asRecord(json);
   if (typeof root.name !== "string" || root.name === "") {
@@ -96,6 +120,7 @@ export function parseCanonical(json: unknown): ProjectModel {
   return {
     projectName: root.name,
     services,
+    volumes: parseVolumes(root.volumes),
     meta: parseMeta(root["x-homestead"]),
   };
 }

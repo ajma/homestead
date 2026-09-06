@@ -243,4 +243,63 @@ describe("parseCanonical", () => {
     const port = parseCanonical(json).services[0]?.ports[0];
     expect(port?.loopbackOnly).toBe(false);
   });
+
+  describe("named volumes", () => {
+    it("extracts top-level volume keys, sorted, with resolved names", () => {
+      const json = {
+        name: "media",
+        services: {},
+        volumes: { cache: null, appdata: { driver: "local" }, backups: null },
+      };
+      expect(parseCanonical(json).volumes).toEqual([
+        { key: "appdata", name: "appdata", external: false },
+        { key: "backups", name: "backups", external: false },
+        { key: "cache", name: "cache", external: false },
+      ]);
+    });
+
+    it("returns an empty array when there are no volumes", () => {
+      expect(parseCanonical({ name: "p", services: {} }).volumes).toEqual([]);
+    });
+
+    it("ignores a volumes key that is not an object", () => {
+      expect(
+        parseCanonical({ name: "p", services: {}, volumes: "nonsense" })
+          .volumes,
+      ).toEqual([]);
+    });
+
+    it("keeps an explicit name: property instead of using the key", () => {
+      const json = {
+        name: "p",
+        services: {},
+        volumes: { mykey: { name: "custom-volume-name" } },
+      };
+      expect(parseCanonical(json).volumes).toEqual([
+        { key: "mykey", name: "custom-volume-name", external: false },
+      ]);
+    });
+
+    it("flags external: true volumes and preserves their unprefixed names", () => {
+      const json = {
+        name: "p",
+        services: {},
+        volumes: { ext: { external: true } },
+      };
+      expect(parseCanonical(json).volumes).toEqual([
+        { key: "ext", name: "ext", external: true },
+      ]);
+    });
+
+    it("handles null volume values gracefully without throwing", () => {
+      const json = {
+        name: "p",
+        services: {},
+        volumes: { pgdata: null },
+      };
+      expect(parseCanonical(json).volumes).toEqual([
+        { key: "pgdata", name: "pgdata", external: false },
+      ]);
+    });
+  });
 });
