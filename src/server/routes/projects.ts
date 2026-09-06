@@ -6,6 +6,7 @@ import {
   composeConfig,
   composePs,
 } from "../docker/compose.js";
+import { type DockerRunner, dockerRunner } from "../docker/run.js";
 import { parseCanonical } from "../projects/model.js";
 import {
   isValidSlug,
@@ -15,13 +16,25 @@ import {
   writeProjectFile,
 } from "../projects/store.js";
 
-type Opts = { projectsDir: string; projectsHostDir: string; dataDir: string };
+type Opts = {
+  projectsDir: string;
+  projectsHostDir: string;
+  dataDir: string;
+  /** Injected so route tests never need a Docker daemon. */
+  docker?: DockerRunner;
+};
 
 const fileParam = z.enum(["compose", "env"]);
 const putBody = z.object({ content: z.string().max(1024 * 1024) });
 
 export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
-  const ctxFor = (slug: string) => ({ ...opts, slug });
+  const docker = opts.docker ?? dockerRunner;
+  const ctxFor = (slug: string) => ({
+    projectsDir: opts.projectsDir,
+    projectsHostDir: opts.projectsHostDir,
+    dataDir: opts.dataDir,
+    slug,
+  });
 
   app.get(
     "/api/projects",
@@ -47,7 +60,7 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       let parseError: string | null = null;
       if (entry.hasCompose) {
         try {
-          model = parseCanonical(await composeConfig(ctxFor(slug)));
+          model = parseCanonical(await composeConfig(ctxFor(slug), docker.run));
         } catch (err) {
           parseError = err instanceof Error ? err.message : String(err);
         }
@@ -57,7 +70,7 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       let statesError: string | null = null;
       if (entry.hasCompose) {
         try {
-          states = await composePs(ctxFor(slug));
+          states = await composePs(ctxFor(slug), docker.run);
         } catch (err) {
           statesError = err instanceof Error ? err.message : String(err);
         }
@@ -87,11 +100,22 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         return reply.status(400).send({ error: "unknown_file" });
       if (!isValidSlug(request.params.slug))
         return reply.status(400).send({ error: "invalid_slug" });
-      const content = await readProjectFile(
-        opts.projectsDir,
-        request.params.slug,
-        name.data,
-      );
+      let content: string | null;
+      try {
+        content = await readProjectFile(
+          opts.projectsDir,
+          request.params.slug,
+          name.data,
+        );
+      } catch (err) {
+        // 404 is reserved for genuine absence. A share the container cannot
+        // read is a different problem and must not look like a missing file.
+        request.log.error({ err }, "project file read failed");
+        return reply.status(500).send({
+          error: "read_failed",
+          code: (err as NodeJS.ErrnoException).code ?? null,
+        });
+      }
       if (content === null)
         return reply.status(404).send({ error: "not_found" });
       return { content };
@@ -132,7 +156,7 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         return reply.status(400).send({ error: "invalid_slug" });
       try {
         const model = parseCanonical(
-          await composeConfig(ctxFor(request.params.slug)),
+          await composeConfig(ctxFor(request.params.slug), docker.run),
         );
         return { valid: true, model };
       } catch (err) {

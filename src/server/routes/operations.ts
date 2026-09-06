@@ -1,20 +1,18 @@
-import { spawn } from "node:child_process";
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import { z } from "zod";
 import { requirePermission } from "../auth/guard.js";
-import { composeExec, ensureOverride } from "../docker/compose.js";
+import { composeExec, composeLogs } from "../docker/compose.js";
+import { type DockerRunner, dockerRunner } from "../docker/run.js";
 import type { OperationKind, OperationRegistry } from "../ops/registry.js";
-import {
-  findComposeFile,
-  isValidSlug,
-  projectPath,
-  scanProjects,
-} from "../projects/store.js";
+import { isValidSlug, scanProjects } from "../projects/store.js";
 
 type Opts = {
   projectsDir: string;
   projectsHostDir: string;
   dataDir: string;
   registry: OperationRegistry;
+  /** Injected so route tests never need a Docker daemon. */
+  docker?: DockerRunner;
 };
 
 const VERBS: Record<string, { kind: OperationKind; args: string[] }> = {
@@ -23,6 +21,22 @@ const VERBS: Record<string, { kind: OperationKind; args: string[] }> = {
   restart: { kind: "restart", args: ["restart"] },
   pull: { kind: "pull", args: ["pull"] },
 };
+
+/**
+ * `String(Number(x))` sends docker the literal "NaN" for `?tail=abc`. Bound it
+ * too: `--tail 10000000` on a chatty stack is a self-inflicted memory spike.
+ */
+const tailQuery = z.coerce.number().int().min(0).max(10_000).default(200);
+
+/**
+ * A compose service name, which can never begin with `-`. The argv reaches
+ * `docker` without a shell, so this is not injection defence; it stops a
+ * caller smuggling a flag into the `logs` sub-command's argument list.
+ */
+const serviceQuery = z
+  .string()
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+  .optional();
 
 /** One SSE event. Newlines inside the payload are JSON-escaped, never emitted raw. */
 export function encodeSseData(payload: unknown): string {
@@ -40,6 +54,8 @@ function openSse(reply: FastifyReply): void {
 }
 
 export const operationRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
+  const docker = opts.docker ?? dockerRunner;
+
   const ctxFor = (slug: string) => ({
     projectsDir: opts.projectsDir,
     projectsHostDir: opts.projectsHostDir,
@@ -65,7 +81,7 @@ export const operationRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
           slug,
           verb.kind,
           request.session?.user.id ?? null,
-          (emit) => composeExec(ctxFor(slug), verb.args, emit),
+          (emit) => composeExec(ctxFor(slug), verb.args, emit, docker),
         );
         return reply.status(202).send({ operationId: op.id });
       } catch (err) {
@@ -81,7 +97,7 @@ export const operationRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     "/api/operations/:id",
     { preHandler: requirePermission({ project: ["read"] }) },
     async (request, reply) => {
-      const op = opts.registry.get(request.params.id);
+      const op = await opts.registry.find(request.params.id);
       if (!op) return reply.status(404).send({ error: "not_found" });
       return op;
     },
@@ -91,18 +107,22 @@ export const operationRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     "/api/operations/:id/stream",
     { preHandler: requirePermission({ project: ["read"] }) },
     async (request, reply) => {
+      const { id } = request.params;
       openSse(reply);
       const unsubscribe = opts.registry.subscribe(
-        request.params.id,
+        id,
         (chunk) => reply.raw.write(encodeSseData({ chunk })),
         () => {
-          reply.raw.write(
-            encodeSseData({
-              end: true,
-              operation: opts.registry.get(request.params.id),
-            }),
-          );
-          reply.raw.end();
+          // Resolved from the database when it is no longer in memory, so the
+          // terminal event never says `operation: undefined`.
+          void opts.registry
+            .find(id)
+            .then((op) => op ?? null)
+            .catch(() => null)
+            .then((operation) => {
+              reply.raw.write(encodeSseData({ end: true, operation }));
+              reply.raw.end();
+            });
         },
       );
       request.raw.on("close", unsubscribe);
@@ -132,33 +152,34 @@ export const operationRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       const { slug } = request.params;
       if (!(await exists(slug)))
         return reply.status(404).send({ error: "not_found" });
-
-      const overridePath = await ensureOverride(ctxFor(slug));
-      const dir = projectPath(opts.projectsDir, slug);
-      const composeFile = (await findComposeFile(dir)) ?? "docker-compose.yml";
-      const args = ["compose", "-f", `${dir}/${composeFile}`];
-      if (overridePath) args.push("-f", overridePath);
-      args.push(
-        "logs",
-        "--follow",
-        "--tail",
-        String(Number(request.query.tail ?? 200)),
-      );
-      if (request.query.service) args.push(request.query.service);
+      const tail = tailQuery.safeParse(request.query.tail);
+      if (!tail.success)
+        return reply.status(400).send({ error: "invalid_tail" });
+      const service = serviceQuery.safeParse(request.query.service);
+      if (!service.success)
+        return reply.status(400).send({ error: "invalid_service" });
 
       openSse(reply);
-      const child = spawn("docker", args, { cwd: dir });
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      const send = (chunk: string) => reply.raw.write(encodeSseData({ chunk }));
-      child.stdout.on("data", send);
-      child.stderr.on("data", send);
-      child.on("close", () => {
-        reply.raw.write(encodeSseData({ end: true }));
-        reply.raw.end();
-      });
-      // Without this, every closed browser tab leaks a `docker compose logs -f`.
-      request.raw.on("close", () => child.kill("SIGTERM"));
+      // Aborting kills the child: without it, every closed browser tab leaks a
+      // `docker compose logs -f`.
+      const controller = new AbortController();
+      request.raw.on("close", () => controller.abort());
+      try {
+        await composeLogs(
+          ctxFor(slug),
+          {
+            service: service.data,
+            tail: tail.data,
+            signal: controller.signal,
+          },
+          (chunk) => reply.raw.write(encodeSseData({ chunk })),
+          docker,
+        );
+      } catch (err) {
+        request.log.error({ err }, "log stream failed");
+      }
+      reply.raw.write(encodeSseData({ end: true }));
+      reply.raw.end();
       return reply;
     },
   );

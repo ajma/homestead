@@ -2,6 +2,7 @@ import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Auth } from "./auth/index.js";
 import { authPlugin } from "./auth/plugin.js";
 import type { Db } from "./db/client.js";
+import type { DockerRunner } from "./docker/run.js";
 import { createRegistry } from "./ops/registry.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
 import { operationRoutes } from "./routes/operations.js";
@@ -20,6 +21,12 @@ export type AppDeps = {
   projectsDir: string;
   projectsHostDir: string;
   dataDir: string;
+  /**
+   * The only way this app reaches `docker`. Defaults to the real one; tests
+   * pass a fake so no test outside `*.integration.test.ts` can spawn a child
+   * process, let alone reconcile a compose project on the host.
+   */
+  docker?: DockerRunner;
 };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -43,6 +50,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     projectsDir: deps.projectsDir,
     projectsHostDir: deps.projectsHostDir,
     dataDir: deps.dataDir,
+    docker: deps.docker,
   });
   const registry = createRegistry(deps.db);
   await app.register(operationRoutes, {
@@ -50,6 +58,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     projectsHostDir: deps.projectsHostDir,
     dataDir: deps.dataDir,
     registry,
+    docker: deps.docker,
   });
   app.get("/api/health", async () => ({ status: "ok" }));
   return app;

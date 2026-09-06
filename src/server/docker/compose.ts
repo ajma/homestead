@@ -1,8 +1,13 @@
-import { spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { findComposeFile, projectPath } from "../projects/store.js";
-import { type Runner, runDocker } from "./run.js";
+import {
+  type DockerRunner,
+  dockerRunner,
+  type Runner,
+  runDocker,
+} from "./run.js";
 import { buildOverride } from "./translate.js";
 
 export type ComposeContext = {
@@ -94,7 +99,7 @@ export function composeArgs(
 }
 
 /** Resolves the real compose filename — it may be compose.yaml — then delegates. */
-async function argsFor(
+export async function argsFor(
   ctx: ComposeContext,
   overridePath: string | null,
   verb: string[],
@@ -118,10 +123,18 @@ export async function composeConfig(
 /**
  * Regenerated before every invocation — the compose file may have changed
  * since the last one. Returns null when translation is inactive.
+ *
+ * The filename carries a per-invocation token and the content is written
+ * tmp-then-rename. Both matter: the override is derived state that two
+ * concurrent callers (an `up` and a `logs --follow`, say) would otherwise race
+ * on, and a reader arriving mid-write of a shared name would hand docker a
+ * truncated file. The caller owns the returned path and must delete it —
+ * {@link composeStream} does so in a `finally`.
  */
 export async function ensureOverride(
   ctx: ComposeContext,
   run: Runner = runDocker,
+  token: string = randomUUID(),
 ): Promise<string | null> {
   if (ctx.projectsDir === ctx.projectsHostDir) return null;
   const canonical = await composeConfig(ctx, run);
@@ -130,13 +143,19 @@ export async function ensureOverride(
     projectsHostDir: ctx.projectsHostDir,
     slug: ctx.slug,
   });
-  const path = join(ctx.dataDir, "run", `${ctx.slug}.override.yml`);
-  if (yaml === null) {
-    await rm(path, { force: true });
-    return null;
+  if (yaml === null) return null;
+
+  const runDir = join(ctx.dataDir, "run");
+  await mkdir(runDir, { recursive: true });
+  const path = join(runDir, `${ctx.slug}-${token}.override.yml`);
+  const tmp = `${path}.tmp`;
+  try {
+    await writeFile(tmp, yaml, "utf8");
+    await rename(tmp, path);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
   }
-  await mkdir(join(ctx.dataDir, "run"), { recursive: true });
-  await writeFile(path, yaml, "utf8");
   return path;
 }
 
@@ -168,26 +187,56 @@ export async function composePs(
   return containers;
 }
 
-/** Streams merged stdout and stderr. Resolves with the exit code; does not throw on non-zero. */
-export async function composeExec(
+/**
+ * The single path from a compose verb to a running `docker` child: validate,
+ * build the override, build the argv, stream, clean up. Every caller goes
+ * through here so none of them can skip the validation or leak the override.
+ */
+async function composeStream(
   ctx: ComposeContext,
   verb: string[],
   onOutput: (chunk: string) => void,
-  run: Runner = runDocker,
+  docker: DockerRunner,
+  signal?: AbortSignal,
 ): Promise<number> {
   validateComposeVerb(verb);
-  const overridePath = await ensureOverride(ctx, run);
-  const args = await argsFor(ctx, overridePath, verb);
+  const overridePath = await ensureOverride(ctx, docker.run);
+  try {
+    const args = await argsFor(ctx, overridePath, verb);
+    return await docker.stream(
+      args,
+      { cwd: projectPath(ctx.projectsDir, ctx.slug), signal },
+      onOutput,
+    );
+  } finally {
+    if (overridePath) await rm(overridePath, { force: true });
+  }
+}
 
-  return new Promise((resolve, reject) => {
-    const child = spawn("docker", args, {
-      cwd: projectPath(ctx.projectsDir, ctx.slug),
-    });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", onOutput);
-    child.stderr.on("data", onOutput);
-    child.on("error", reject);
-    child.on("close", (code) => resolve(code ?? 1));
-  });
+/** Streams merged stdout and stderr. Resolves with the exit code; does not throw on non-zero. */
+export function composeExec(
+  ctx: ComposeContext,
+  verb: string[],
+  onOutput: (chunk: string) => void,
+  docker: DockerRunner = dockerRunner,
+): Promise<number> {
+  return composeStream(ctx, verb, onOutput, docker);
+}
+
+export type LogOptions = {
+  service?: string | undefined;
+  tail: number;
+  signal?: AbortSignal | undefined;
+};
+
+/** `compose logs --follow`, argv built by the same path as every other verb. */
+export function composeLogs(
+  ctx: ComposeContext,
+  opts: LogOptions,
+  onOutput: (chunk: string) => void,
+  docker: DockerRunner = dockerRunner,
+): Promise<number> {
+  const verb = ["logs", "--follow", "--tail", String(opts.tail)];
+  if (opts.service) verb.push(opts.service);
+  return composeStream(ctx, verb, onOutput, docker, opts.signal);
 }

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -15,6 +16,12 @@ const d = enabled ? describe : describe.skip;
 
 let root: string;
 let ctx: ComposeContext;
+/**
+ * Compose reconciles by project-name label, not by directory, so this name is
+ * randomised: a fixed one that happened to match a real stack on the host
+ * would have this suite recreate the operator's containers.
+ */
+const projectName = `hs-test-${randomUUID().slice(0, 8)}`;
 
 beforeAll(async () => {
   if (!enabled) return;
@@ -24,7 +31,7 @@ beforeAll(async () => {
   await writeFile(
     join(root, "probe", "docker-compose.yml"),
     [
-      "name: hs-probe",
+      `name: ${projectName}`,
       "services:",
       "  app:",
       "    image: traefik/whoami",
@@ -44,13 +51,19 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!enabled) return;
-  await composeExec(ctx, ["down"], () => {});
+  // Tear the stack down before the compose file disappears: once `root` is
+  // gone there is no ordinary way to reach these containers again.
+  try {
+    await composeExec(ctx, ["down", "--remove-orphans"], () => {});
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 d("compose against real Docker", () => {
   it("reads the project name from compose rather than the directory", async () => {
     const canonical = (await composeConfig(ctx)) as { name: string };
-    expect(canonical.name).toBe("hs-probe");
+    expect(canonical.name).toBe(projectName);
   });
 
   it("brings the stack up and reports it running", async () => {
