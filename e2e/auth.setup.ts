@@ -1,6 +1,8 @@
-import { expect, test } from "@playwright/test";
+import { expect, test as setup } from "@playwright/test";
 
-test("first run creates an admin, then signs in", async ({ page }) => {
+const authFile = "/tmp/homestead-e2e/.auth/admin.json";
+
+setup("perform first-run onboarding and save authenticated state", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Welcome to Homestead" })).toBeVisible();
 
@@ -16,9 +18,11 @@ test("first run creates an admin, then signs in", async ({ page }) => {
 
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByText("admin@example.com")).toBeVisible();
+
+  await page.context().storageState({ path: authFile });
 });
 
-test("setup is closed once an admin exists", async ({ page }) => {
+setup("verify setup is closed once admin exists", async ({ page }) => {
   await page.goto("/setup");
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 });

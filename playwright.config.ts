@@ -7,12 +7,25 @@ import { defineConfig } from "@playwright/test";
 if (!process.env.E2E_CLEANUP_DONE) {
   rmSync("/tmp/homestead-e2e", { recursive: true, force: true });
   mkdirSync("/tmp/homestead-e2e/stacks", { recursive: true });
+  mkdirSync("/tmp/homestead-e2e/.auth", { recursive: true });
   process.env.E2E_CLEANUP_DONE = "1";
 }
 
 export default defineConfig({
   testDir: "./e2e",
   use: { baseURL: "http://localhost:5173" },
+  projects: [
+    {
+      name: "setup",
+      testMatch: /auth\.setup\.ts/,
+    },
+    {
+      name: "authenticated",
+      testIgnore: /auth\.setup\.ts/,
+      dependencies: ["setup"],
+      use: { storageState: "/tmp/homestead-e2e/.auth/admin.json" },
+    },
+  ],
   webServer: [
     {
       // D2: Use non-watch server script for e2e to avoid file-watcher restarts

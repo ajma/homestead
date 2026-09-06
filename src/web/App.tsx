@@ -1,8 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { AppShell } from "./components/AppShell.js";
 import { ProtectedRoute } from "./components/ProtectedRoute.js";
 import { Dashboard } from "./routes/Dashboard.js";
 import { Login } from "./routes/Login.js";
+import { NotFound } from "./routes/NotFound.js";
+import { Projects } from "./routes/Projects.js";
 import { Setup } from "./routes/Setup.js";
 
 export function App() {
@@ -39,13 +42,18 @@ export function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/setup" element={<Navigate to="/login" replace />} />
       <Route
-        path="/"
         element={
           <ProtectedRoute>
-            <Dashboard />
+            <AppShell />
           </ProtectedRoute>
         }
-      />
+      >
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/projects" element={<Projects />} />
+        {/* Nested, so an unknown path is still behind ProtectedRoute and still
+            renders inside the shell — a mistyped URL keeps its navigation. */}
+        <Route path="*" element={<NotFound />} />
+      </Route>
     </Routes>
   );
 }
