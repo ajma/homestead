@@ -2,5 +2,6 @@
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
   "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "css": { "parser": { "cssModules": false, "tailwindDirectives": true } },
   "files": { "includes": ["src/**", "*.config.ts"] }
 }

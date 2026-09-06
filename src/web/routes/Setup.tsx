@@ -30,20 +30,20 @@ export function Setup() {
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 p-8">
       <h1 className="text-2xl font-semibold">Welcome to Homestead</h1>
-      <p className="text-slate-500">Create the administrator account.</p>
+      <p className="text-muted">Create the administrator account.</p>
       <form onSubmit={onSubmit} className="flex flex-col gap-3">
         <input
           name="name"
           placeholder="Name"
           required
-          className="rounded border p-2"
+          className="rounded border-border bg-surface p-2 text-text"
         />
         <input
           name="email"
           type="email"
           placeholder="Email"
           required
-          className="rounded border p-2"
+          className="rounded border-border bg-surface p-2 text-text"
         />
         <input
           name="password"
@@ -52,14 +52,17 @@ export function Setup() {
           required
           minLength={12}
           maxLength={128}
-          className="rounded border p-2"
+          className="rounded border-border bg-surface p-2 text-text"
         />
-        <button type="submit" className="rounded bg-slate-900 p-2 text-white">
+        <button
+          type="submit"
+          className="rounded bg-accent p-2 text-accent-contrast"
+        >
           Create account
         </button>
       </form>
       {error && (
-        <p role="alert" className="text-red-600">
+        <p role="alert" className="text-danger">
           {error}
         </p>
       )}

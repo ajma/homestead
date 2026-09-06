@@ -7,6 +7,13 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      try {
+        const s = localStorage.getItem("homestead.color-scheme");
+        const dark = s === "dark" || (s !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      } catch (_) {}
+    </script>
     <script type="module" src="/main.tsx"></script>
   </body>
 </html>

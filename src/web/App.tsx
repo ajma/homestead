@@ -12,14 +12,14 @@ export function App() {
       (await fetch("/api/status")).json() as Promise<{ initialised: boolean }>,
   });
 
-  if (isPending) return <div className="p-8 text-slate-500">Loading…</div>;
+  if (isPending) return <div className="p-8 text-muted">Loading…</div>;
   if (isError)
     return (
       <div className="p-8">
-        <h1 className="text-xl font-semibold text-red-600">
+        <h1 className="text-xl font-semibold text-danger">
           Server Unreachable
         </h1>
-        <p className="mt-2 text-slate-600">
+        <p className="mt-2 text-muted">
           Cannot connect to the Homestead server. Check that the server is
           running and try refreshing the page.
         </p>

@@ -27,21 +27,24 @@ export function Login() {
           type="email"
           placeholder="Email"
           required
-          className="rounded border p-2"
+          className="rounded border-border bg-surface p-2 text-text"
         />
         <input
           name="password"
           type="password"
           placeholder="Password"
           required
-          className="rounded border p-2"
+          className="rounded border-border bg-surface p-2 text-text"
         />
-        <button type="submit" className="rounded bg-slate-900 p-2 text-white">
+        <button
+          type="submit"
+          className="rounded bg-accent p-2 text-accent-contrast"
+        >
           Sign in
         </button>
       </form>
       {error && (
-        <p role="alert" className="text-red-600">
+        <p role="alert" className="text-danger">
           {error}
         </p>
       )}
