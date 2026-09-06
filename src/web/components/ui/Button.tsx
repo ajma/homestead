@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ComponentPropsWithRef, ReactNode } from "react";
 import { Spinner } from "./Spinner.js";
 
 type Variant = "primary" | "secondary" | "danger" | "ghost";
@@ -18,7 +18,7 @@ export function Button({
   className = "",
   disabled,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
+}: ComponentPropsWithRef<"button"> & {
   variant?: Variant;
   size?: "sm" | "md";
   loading?: boolean;

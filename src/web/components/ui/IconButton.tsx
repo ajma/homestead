@@ -1,11 +1,11 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ComponentPropsWithRef, ReactNode } from "react";
 
 export function IconButton({
   label,
   children,
   className = "",
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
+}: ComponentPropsWithRef<"button"> & {
   label: string;
   children: ReactNode;
 }) {
