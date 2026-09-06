@@ -1,3 +1,17 @@
+/**
+ * One directory under the projects root as the cheap list scan sees it: no
+ * compose parsing, no Docker calls. This is the wire shape of
+ * `GET /api/projects`, so it lives here rather than in the server's store —
+ * the browser must never import server code, and a hand-copied twin drifts.
+ */
+export type ScanEntry = {
+  slug: string;
+  path: string;
+  hasCompose: boolean;
+  hasEnv: boolean;
+  composeFile: string | null;
+};
+
 export type PublishedPort = {
   hostIp: string;
   hostPort: number;

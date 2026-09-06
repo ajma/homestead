@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { ScanEntry } from "@shared/projects.js";
 
 /** Compose's own precedence order. */
 const COMPOSE_FILENAMES = [
@@ -20,13 +21,8 @@ const COMPOSE_FILENAMES = [
   "docker-compose.yml",
 ];
 
-export type ScanEntry = {
-  slug: string;
-  path: string;
-  hasCompose: boolean;
-  hasEnv: boolean;
-  composeFile: string | null;
-};
+/** Re-exported for the server's own callers; defined in the shared boundary. */
+export type { ScanEntry };
 
 export function isValidSlug(slug: string): boolean {
   return (
