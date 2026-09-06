@@ -7,6 +7,7 @@
   "license": "ISC",
   "scripts": {
     "test": "vitest run",
+    "test:docker": "HOMESTACKS_DOCKER_TESTS=1 vitest run",
     "dev": "HOMESTACKS_TRUSTED_ORIGINS=http://localhost:5173 tsx watch src/server/index.ts",
     "dev:server:once": "tsx src/server/index.ts",
     "dev:web": "vite",
@@ -25,6 +26,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.3",
+    "yaml": "^2.9.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
