@@ -8,11 +8,17 @@
   <body>
     <div id="root"></div>
     <script>
+      // matchMedia first, and outside the try: reading localStorage throws in
+      // a browser with site data blocked, and doing it first skipped the OS
+      // preference too, so a privacy-mode user whose OS prefers dark always
+      // got light. The stored choice is the override, not the source.
+      let dark = matchMedia("(prefers-color-scheme: dark)").matches;
       try {
         const s = localStorage.getItem("homestead.color-scheme");
-        const dark = s === "dark" || (s !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        if (s === "dark") dark = true;
+        else if (s === "light") dark = false;
       } catch (_) {}
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
     </script>
     <script type="module" src="/main.tsx"></script>
   </body>

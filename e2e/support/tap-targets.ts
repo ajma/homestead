@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
  * The phone this suite holds itself to.
@@ -87,6 +87,47 @@ export function expectTappable(
     sweep.measured,
     `${when}: the sweep matched ${sweep.measured} controls, so it proved nothing`,
   ).toBeGreaterThanOrEqual(minControls);
+}
+
+/**
+ * The control actually has an edge drawn around it.
+ *
+ * This exists because of a defect the design-system conformance gate is
+ * structurally unable to see. `border-border` is a *valid* utility: it
+ * compiles to `border-color: var(--color-border)` and the gate's resolution
+ * check passes it. But Tailwind v4's preflight sets `border: 0 solid` on every
+ * element, so a colour with no width companion paints nothing — the sign-in
+ * and setup fields were invisible boxes on both themes. A static rule can see
+ * the colour class but not whether a width class is applied to the same
+ * element: widths come from siblings in other template literals (`border-b-2`
+ * next to `border-transparent`), from a shared constant, or from a primitive.
+ * Only the rendered page knows. So this asks the browser.
+ *
+ * Both halves matter: a border of zero width is invisible, and so is one
+ * painted in the background colour.
+ */
+export async function expectDrawnBorder(
+  control: Locator,
+  what: string,
+): Promise<void> {
+  const drawn = await control.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      width: Number.parseFloat(s.borderTopWidth),
+      style: s.borderTopStyle,
+      color: s.borderTopColor,
+      background: s.backgroundColor,
+    };
+  });
+  expect(
+    drawn.width,
+    `${what}: border-width is 0, so nothing is drawn`,
+  ).toBeGreaterThan(0);
+  expect(drawn.style, `${what}: border-style is none`).not.toBe("none");
+  expect(
+    drawn.color,
+    `${what}: the border is painted in the field's own background colour`,
+  ).not.toBe(drawn.background);
 }
 
 /**

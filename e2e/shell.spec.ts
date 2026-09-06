@@ -1,6 +1,12 @@
 import type { Locator } from "@playwright/test";
 import { SIGNED_OUT_STORAGE_STATE, signInAsAdmin } from "./support/auth.js";
 import { expect, test } from "./support/fixtures.js";
+import {
+  expectDrawnBorder,
+  expectNoHorizontalScroll,
+  expectTappable,
+  sweepTapTargets,
+} from "./support/tap-targets.js";
 
 const PHONE = { width: 390, height: 844 };
 const TOUCH_MIN = 44;
@@ -114,6 +120,35 @@ test.describe("signed out", () => {
   // Sign-out is a server-side session delete. Consuming the shared storage
   // state here would revoke the session other spec files run against.
   test.use({ storageState: SIGNED_OUT_STORAGE_STATE });
+
+  /**
+   * The screen no sweep reached.
+   *
+   * `sweepTapTargets` and `expectNoHorizontalScroll` were called on `/`,
+   * `/projects` and `/projects/:slug` only, so the two screens a first-run
+   * user actually meets were the two the mobile-parity gate did not cover —
+   * and they shipped with ~40px controls and, because `border-border` carries
+   * a colour and no width, fields with no border at all in either theme.
+   *
+   * This runs under both viewport projects, so it holds at 1440 and at 390.
+   */
+  test("the sign-in screen is tappable, bordered and does not scroll sideways", async ({
+    page,
+  }) => {
+    await page.goto("/login");
+    await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+
+    // Two fields and a submit button is the floor; a sweep that matched
+    // nothing would otherwise pass.
+    expectTappable(await sweepTapTargets(page), "the sign-in screen", 3);
+    await expectNoHorizontalScroll(page, "the sign-in screen");
+
+    // The conformance gate cannot see this: `border-border` resolves to a real
+    // rule, it just draws nothing without a width, and preflight zeroes the
+    // width. Only the browser can answer whether the field has an edge.
+    await expectDrawnBorder(page.getByLabel("Email"), "the email field");
+    await expectDrawnBorder(page.getByLabel("Password"), "the password field");
+  });
 
   test("an unknown URL redirects to the login screen", async ({ page }) => {
     await page.goto("/nope/nowhere");
