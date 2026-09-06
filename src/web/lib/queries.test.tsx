@@ -1,18 +1,21 @@
 import {
   focusManager,
-  QueryClient,
+  type QueryClient,
   QueryClientProvider,
+  useQuery,
 } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError } from "./api.js";
+import { ApiError, apiFetch } from "./api.js";
 import {
+  createQueryClient,
+  isRefusal,
   lifecycleErrorMessage,
   POLL_MS,
   projectsPollInterval,
   queryKeys,
-  refetchProjectsOnFocus,
+  refetchUnlessRefused,
   useLifecycle,
   useProject,
   useProjectOperations,
@@ -47,9 +50,16 @@ function wrapper(client: QueryClient) {
   );
 }
 
-/** No retry delay: a failing query should finish inside a test, not a backoff. */
+/**
+ * The app's own client, with no retry delay so a failing query finishes inside
+ * the test rather than inside a backoff.
+ *
+ * Built through `createQueryClient` deliberately: the refusal rules now live on
+ * the client, and a test that constructed a bare `QueryClient` would be proving
+ * things about a client the app never uses.
+ */
 function testClient() {
-  return new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+  return createQueryClient({ retryDelay: 0 });
 }
 
 describe("queryKeys", () => {
@@ -84,14 +94,82 @@ describe("projectsPollInterval", () => {
   });
 });
 
-describe("refetchProjectsOnFocus", () => {
+describe("isRefusal", () => {
+  it("names a 401 or a 403 and nothing else", () => {
+    expect(isRefusal(new ApiError(401, "unauthenticated"))).toBe(true);
+    expect(isRefusal(new ApiError(403, "forbidden"))).toBe(true);
+    expect(isRefusal(new ApiError(500, "boom"))).toBe(false);
+    expect(isRefusal(new ApiError(404, "not_found"))).toBe(false);
+    expect(isRefusal(new Error("network down"))).toBe(false);
+    expect(isRefusal(null)).toBe(false);
+  });
+});
+
+describe("refetchUnlessRefused", () => {
+  const query = (error: unknown) => ({ state: { error } });
+
   it("refetches on focus while healthy but not after a refusal", () => {
-    expect(refetchProjectsOnFocus(null)).toBe(true);
-    expect(refetchProjectsOnFocus(new ApiError(500, "boom"))).toBe(true);
-    expect(refetchProjectsOnFocus(new ApiError(403, "forbidden"))).toBe(false);
-    expect(refetchProjectsOnFocus(new ApiError(401, "unauthenticated"))).toBe(
+    expect(refetchUnlessRefused(query(null))).toBe(true);
+    expect(refetchUnlessRefused(query(new ApiError(500, "boom")))).toBe(true);
+    expect(refetchUnlessRefused(query(new ApiError(403, "forbidden")))).toBe(
       false,
     );
+    expect(
+      refetchUnlessRefused(query(new ApiError(401, "unauthenticated"))),
+    ).toBe(false);
+  });
+});
+
+/**
+ * The rule, not the call sites.
+ *
+ * P3-R16 made `useProjects` refusal-aware on window focus; the next task added
+ * two hooks and neither inherited it, because inheriting it meant remembering
+ * it. These two tests use a query that **no hook in this file owns** and that
+ * sets no options at all — the shape a hook added next month will have. They
+ * fail if the defaults are ever taken off the client, which is the only way
+ * the regression can happen again.
+ */
+describe("the client every hook inherits from", () => {
+  function useFutureHook() {
+    return useQuery({
+      queryKey: ["a-hook-nobody-has-written-yet"],
+      queryFn: () => apiFetch<{ ok: boolean }>("/api/anything"),
+    });
+  }
+
+  it("gives a hook that asks for nothing refusal-aware retry and focus", async () => {
+    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(useFutureHook, {
+      wrapper: wrapper(testClient()),
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock, "a refusal is not retried").toHaveBeenCalledOnce();
+
+    await refocusWindow();
+    await refocusWindow();
+    expect(
+      fetchMock,
+      "a refusal is not refetched on focus",
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("still retries and still refetches on focus when the failure is transient", async () => {
+    // The other half: a default that refused everything would pass the test
+    // above while breaking the app.
+    const fetchMock = vi.fn(async () => json(500, { error: "boom" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(useFutureHook, {
+      wrapper: wrapper(testClient()),
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await refocusWindow();
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(3));
   });
 });
 
@@ -234,6 +312,22 @@ describe("useProject", () => {
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(fetchMock).toHaveBeenCalledOnce();
   });
+
+  it("does not refetch on focus once the server has refused", async () => {
+    // A viewer following a project link an admin sent them lands here. Left at
+    // the default this issued a guaranteed 403 on every single alt-tab, for as
+    // long as the tab stayed open.
+    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useProject("jellyfin"), {
+      wrapper: wrapper(testClient()),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    await refocusWindow();
+    await refocusWindow();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
 });
 
 describe("useProjectOperations", () => {
@@ -259,6 +353,20 @@ describe("useProjectOperations", () => {
       wrapper: wrapper(testClient()),
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not refetch on focus once the server has refused", async () => {
+    // The second of the two requests a viewer's alt-tab used to cost.
+    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(() => useProjectOperations("jellyfin"), {
+      wrapper: wrapper(testClient()),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    await refocusWindow();
+    await refocusWindow();
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
@@ -332,6 +440,23 @@ describe("lifecycleErrorMessage", () => {
     expect(
       lifecycleErrorMessage(new ApiError(409, "operation_in_progress")),
     ).toMatch(/already running/i);
+  });
+
+  it("says which operation is already running, when the server said", () => {
+    // The 409 body's `detail` is the only thing that names it. Without it the
+    // message can say "an operation" and nothing more, which answers none of
+    // the question the user actually has.
+    const message = lifecycleErrorMessage(
+      new ApiError(
+        409,
+        "operation_in_progress",
+        'an operation is already running for project "jellyfin"',
+      ),
+    );
+    expect(message).toContain('project "jellyfin"');
+    // Still a sentence: the server's detail is a fragment.
+    expect(message).toMatch(/^An operation/);
+    expect(message).toMatch(/wait for it to finish/i);
   });
 
   it("names a refusal as a permission problem", () => {

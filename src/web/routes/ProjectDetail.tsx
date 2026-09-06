@@ -14,12 +14,14 @@ import {
   EmptyState,
   Panel,
   Spinner,
+  StaleNotice,
   StatusDot,
   Tabs,
 } from "../components/ui/index.js";
 import { ApiError } from "../lib/api.js";
 import {
   hasRunningOperation,
+  isRefusal,
   lifecycleErrorMessage,
   useLifecycle,
   useProject,
@@ -182,14 +184,17 @@ export function ProjectDetail() {
       </main>
     );
 
-  if (detail.error) {
-    const refused =
-      detail.error instanceof ApiError &&
-      (detail.error.status === 401 || detail.error.status === 403);
+  // `detail.error && !detail.data`, never the error alone. This query is
+  // refetched by window focus and by every operation that ends, and a failed
+  // refetch keeps the last good `data` while flipping status to "error" — so
+  // branching on the error first tears down the whole page, including a live
+  // OperationPanel, closing its stream and discarding the output the user is
+  // reading, because one unrelated background request failed.
+  if (detail.error && !detail.data) {
     return (
       <main className="mx-auto w-full max-w-3xl p-4 sm:p-8">
         <BackLink />
-        {refused ? (
+        {isRefusal(detail.error) ? (
           // Every endpoint this page needs is admin-only, so a viewer's whole
           // page is a 403. That is a state, not a crash, and not something to
           // keep retrying.
@@ -308,6 +313,11 @@ export function ProjectDetail() {
           <p role="alert" className="mt-2 text-sm text-danger">
             {lifecycleErrorMessage(lifecycle.error)}
           </p>
+        )}
+        {/* Rendered only when `data` survived, which is the point: the page
+            below is real, just a moment old. */}
+        {(detail.isError || operations.isError) && (
+          <StaleNotice className="mt-2" />
         )}
       </div>
 

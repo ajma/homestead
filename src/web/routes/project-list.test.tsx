@@ -1,8 +1,9 @@
 import type { ScanEntry } from "@shared/projects.js";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createQueryClient, queryKeys } from "../lib/queries.js";
 import { ProjectList } from "./ProjectList.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -10,7 +11,6 @@ afterEach(() => vi.unstubAllGlobals());
 function entry(over: Partial<ScanEntry> = {}): ScanEntry {
   return {
     slug: "jellyfin",
-    path: "/srv/stacks/jellyfin",
     hasCompose: true,
     hasEnv: false,
     composeFile: "compose.yaml",
@@ -43,19 +43,21 @@ function stubFailure(status: number, error: string) {
 }
 
 function renderList() {
-  const client = new QueryClient({
-    // Failures must surface inside the test rather than inside a backoff.
-    defaultOptions: { queries: { retryDelay: 0 } },
-  });
-  return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/projects"]}>
-        <Routes>
-          <Route path="/projects" element={<ProjectList />} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  // The app's own client — the refusal rules live on it. `retryDelay: 0` so a
+  // failure surfaces inside the test rather than inside a backoff.
+  const client = createQueryClient({ retryDelay: 0 });
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/projects"]}>
+          <Routes>
+            <Route path="/projects" element={<ProjectList />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 describe("ProjectList", () => {
@@ -80,12 +82,27 @@ describe("ProjectList", () => {
     expect(within(link).getByText(/valid compose/i)).toBeInTheDocument();
   });
 
+  it("does not spend the running tint on 'the compose file parses'", async () => {
+    // This endpoint is a directory scan: it cannot know whether anything is
+    // running (P3-R14). Drawing "valid compose" as the same green dot the
+    // detail page uses for "running" makes thirty parseable projects read as
+    // thirty running stacks.
+    stubProjects([entry()]);
+    renderList();
+
+    const link = await screen.findByRole("link", { name: /jellyfin/ });
+    expect(within(link).getByText(/valid compose/i)).toBeInTheDocument();
+    expect(
+      link.querySelector(".bg-success"),
+      "the row claims a runtime state it cannot know",
+    ).toBeNull();
+  });
+
   it("shows the .env indicator only for projects that have one", async () => {
     stubProjects([
       entry({ slug: "jellyfin", hasEnv: true }),
       entry({
         slug: "paperless",
-        path: "/srv/stacks/paperless",
         hasEnv: false,
       }),
     ]);
@@ -101,7 +118,6 @@ describe("ProjectList", () => {
     stubProjects([
       entry({
         slug: "downloads",
-        path: "/srv/stacks/downloads",
         hasCompose: false,
         composeFile: null,
       }),
@@ -133,5 +149,45 @@ describe("ProjectList", () => {
       /could not load/i,
     );
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  });
+
+  it("keeps the list on screen when a background refresh fails", async () => {
+    // This query polls every 15 seconds. TanStack sets status "error" on a
+    // failed *refetch* while keeping the last good data, so branching on the
+    // error before the data empties a list the user is reading because one
+    // poll lost the network — and fills it back in 15 seconds later.
+    let healthy = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        healthy
+          ? new Response(JSON.stringify({ projects: [entry()] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            })
+          : new Response(JSON.stringify({ error: "bad_gateway" }), {
+              status: 502,
+              headers: { "content-type": "application/json" },
+            }),
+      ),
+    );
+    const { client } = renderList();
+    expect(
+      await screen.findByRole("link", { name: /jellyfin/ }),
+    ).toBeInTheDocument();
+
+    healthy = false;
+    await act(async () => {
+      await client.refetchQueries({ queryKey: queryKeys.projects });
+    });
+    // Said, rather than left for the user to notice their data is old.
+    await screen.findByText(/could not refresh/i);
+
+    expect(
+      screen.getByRole("link", { name: /jellyfin/ }),
+      "the row a failed poll must not delete",
+    ).toBeInTheDocument();
+    // And the blanking error is not also on screen.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

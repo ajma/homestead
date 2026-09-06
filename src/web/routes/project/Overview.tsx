@@ -1,8 +1,8 @@
 import type { Operation, PublishedPort } from "@shared/projects.js";
 import type { ReactNode } from "react";
 import { Badge, Panel, Spinner, StatusDot } from "../../components/ui/index.js";
-import { ApiError } from "../../lib/api.js";
 import {
+  isRefusal,
   type ProjectDetailData,
   useProjectOperations,
 } from "../../lib/queries.js";
@@ -184,13 +184,16 @@ function RecentOperations({ slug }: { slug: string }) {
         <div className="flex justify-center text-muted">
           <Spinner />
         </div>
-      ) : error ? (
+      ) : // Same rule as the page around it: this list is polled every three
+      // seconds while an operation runs, so a failed refetch must not delete
+      // the history it already has. The header's notice says it is stale.
+      error && !data ? (
         <Note>
-          {error instanceof ApiError && error.status === 403
+          {isRefusal(error)
             ? "Operation history needs an administrator account."
             : `Could not load the operation history. ${error.message}`}
         </Note>
-      ) : data.length === 0 ? (
+      ) : !data ? null : data.length === 0 ? (
         <Note>Nothing has run for this project yet.</Note>
       ) : (
         <ul className="flex flex-col divide-y divide-border">

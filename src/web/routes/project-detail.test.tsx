@@ -1,14 +1,14 @@
 import type { ContainerState, Operation } from "@shared/projects.js";
-import {
-  focusManager,
-  QueryClient,
-  QueryClientProvider,
-} from "@tanstack/react-query";
+import { focusManager, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, MemoryRouter, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProjectDetailData } from "../lib/queries.js";
+import {
+  createQueryClient,
+  type ProjectDetailData,
+  queryKeys,
+} from "../lib/queries.js";
 import { projectDetailRoute } from "./ProjectDetail.js";
 
 afterEach(() => {
@@ -39,7 +39,6 @@ function container(over: Partial<ContainerState> = {}): ContainerState {
 function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
   return {
     slug: "jellyfin",
-    path: "/srv/stacks/jellyfin",
     hasCompose: true,
     hasEnv: true,
     composeFile: "compose.yaml",
@@ -138,17 +137,19 @@ function Path() {
 }
 
 function renderDetail(path = "/projects/jellyfin/overview") {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retryDelay: 0 } },
-  });
-  return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[path]}>
-        <Routes>{projectDetailRoute}</Routes>
-        <Path />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  // The app's own client: the refusal rules live on it, not in the hooks.
+  const client = createQueryClient({ retryDelay: 0 });
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>{projectDetailRoute}</Routes>
+          <Path />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 const LIFECYCLE = ["Start", "Stop & remove", "Restart", "Pull"] as const;
@@ -388,6 +389,71 @@ describe("permissions", () => {
         ),
       ).toHaveLength(1),
     );
+  });
+});
+
+describe("a background refresh that fails", () => {
+  /** Healthy until the test says otherwise, then 502 on the detail endpoint. */
+  function stubFlakyDetail() {
+    let healthy = true;
+    stubApi({
+      detail: () =>
+        healthy ? json(200, detail()) : json(502, { error: "bad_gateway" }),
+      post: () => json(202, { operationId: "op-42" }),
+    });
+    return { fail: () => (healthy = false) };
+  }
+
+  it("does not tear down a live operation panel", async () => {
+    // The worst shape of this bug. `useProject` is refetched by window focus
+    // and by every operation that ends, and rendering the error branch before
+    // the data unmounts the whole page — including the panel, which closes its
+    // EventSource and discards the output the user is reading — because one
+    // unrelated background request failed.
+    const flaky = stubFlakyDetail();
+    const { client } = renderDetail();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Restart" }));
+    const panel = await screen.findByRole("region", { name: "Operation" });
+    expect(panel).toHaveAttribute("data-operation-id", "op-42");
+
+    flaky.fail();
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: queryKeys.project("jellyfin"),
+      });
+    });
+
+    await screen.findByText(/could not refresh/i);
+    expect(
+      screen.getByRole("region", { name: "Operation" }),
+      "the panel a failed poll must not unmount",
+    ).toHaveAttribute("data-operation-id", "op-42");
+    // The page under it is still the page, not an error screen.
+    expect(
+      screen.getByRole("heading", { name: "jellyfin", level: 1 }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the project on screen rather than replacing it with the error", async () => {
+    const flaky = stubFlakyDetail();
+    const { client } = renderDetail();
+
+    await screen.findByRole("heading", { name: "jellyfin", level: 1 });
+    flaky.fail();
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: queryKeys.project("jellyfin"),
+      });
+    });
+
+    await screen.findByText(/could not refresh/i);
+    expect(
+      screen.getByRole("region", { name: "Services" }),
+      "the overview a failed poll must not delete",
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not load this project/i)).toBeNull();
   });
 });
 

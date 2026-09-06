@@ -5,7 +5,13 @@ import type {
   ProjectModel,
   ScanEntry,
 } from "@shared/projects.js";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { DefaultOptions } from "@tanstack/react-query";
+import {
+  QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { ApiError, apiFetch } from "./api.js";
 
 export const queryKeys = {
@@ -23,8 +29,13 @@ export const POLL_MS = 15_000;
  * A 401 or 403 is a standing answer, not a blip: the permission will not
  * appear on its own, so retrying only burns requests and delays the message
  * the user needs to see.
+ *
+ * Exported because the same predicate decides three different things — retry,
+ * focus refetching, and which message a component renders — and it was
+ * hand-written a fourth and fifth time in `ProjectList` and `ProjectDetail`
+ * before it was. One rule, one spelling.
  */
-function isRefusal(error: unknown): boolean {
+export function isRefusal(error: unknown): boolean {
   return (
     error instanceof ApiError && (error.status === 401 || error.status === 403)
   );
@@ -49,9 +60,42 @@ export function projectsPollInterval(error: unknown): number | false {
  * errored query has no `dataUpdatedAt`, so it is always considered stale: left
  * at the default, a viewer who alt-tabs 200 times issues 200 requests that are
  * all guaranteed to 403. Same rule as the poll, applied to the other trigger.
+ *
+ * Typed structurally rather than as `Query<…>` so one function serves every
+ * query in the app regardless of its data and error types.
  */
-export function refetchProjectsOnFocus(error: unknown): boolean {
-  return !isRefusal(error);
+export function refetchUnlessRefused(query: {
+  state: { error: unknown };
+}): boolean {
+  return !isRefusal(query.state.error);
+}
+
+/**
+ * The behaviour every Homestead query gets **by default**, not by remembering.
+ *
+ * This was first applied to `useProjects` alone; the next task added two more
+ * hooks and neither inherited it, so a viewer opening a shared project link
+ * took two guaranteed-403s and two more on every alt-tab. A rule that has to
+ * be re-typed at each call site is a rule that will be missed, so it lives on
+ * the client instead: a hook added tomorrow that sets no options at all is
+ * refusal-aware, and `queries.test.tsx` pins exactly that with a query no hook
+ * in this file owns.
+ */
+export const queryDefaults = {
+  retry: retryUnlessRefused,
+  refetchOnWindowFocus: refetchUnlessRefused,
+} as const;
+
+/**
+ * The app's `QueryClient`. Tests build theirs through here too — a test that
+ * constructed a bare client would be testing a client the app never uses.
+ */
+export function createQueryClient(
+  overrides: DefaultOptions["queries"] = {},
+): QueryClient {
+  return new QueryClient({
+    defaultOptions: { queries: { ...queryDefaults, ...overrides } },
+  });
 }
 
 /**
@@ -66,9 +110,9 @@ export function useProjects() {
       const body = await apiFetch<{ projects: ScanEntry[] }>("/api/projects");
       return body?.projects ?? [];
     },
+    // Retry and focus behaviour come from {@link queryDefaults}; only the poll
+    // is this hook's own.
     refetchInterval: (query) => projectsPollInterval(query.state.error),
-    refetchOnWindowFocus: (query) => refetchProjectsOnFocus(query.state.error),
-    retry: retryUnlessRefused,
   });
 }
 
@@ -94,7 +138,6 @@ export function useProject(slug: string) {
     queryFn: () =>
       apiFetch<ProjectDetailData>(`/api/projects/${encodeURIComponent(slug)}`),
     enabled: slug !== "",
-    retry: retryUnlessRefused,
   });
 }
 
@@ -120,7 +163,6 @@ export function useProjectOperations(slug: string) {
       return body?.operations ?? [];
     },
     enabled: slug !== "",
-    retry: retryUnlessRefused,
     refetchInterval: (query) =>
       hasRunningOperation(query.state.data ?? []) ? RUNNING_POLL_MS : false,
   });
@@ -157,11 +199,23 @@ export function useLifecycle(slug: string) {
   });
 }
 
+/** The server's `detail` is a sentence fragment; this makes it one. */
+function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** What to put in front of the user when a lifecycle request is refused. */
 export function lifecycleErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 409)
-      return "An operation is already running for this project. Wait for it to finish, then try again.";
+      // The 409's `detail` names the project the operation is running for,
+      // which is the whole question the user has. Without it this could only
+      // say "an operation" — true, and no help.
+      return `${
+        error.detail
+          ? sentence(error.detail)
+          : "An operation is already running for this project"
+      }. Wait for it to finish, then try again.`;
     if (error.status === 403 || error.status === 401)
       return "Controlling a stack needs an administrator account.";
     if (error.status === 404)
