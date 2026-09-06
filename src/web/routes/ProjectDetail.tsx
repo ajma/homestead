@@ -147,6 +147,19 @@ export function ProjectDetail() {
     if (confirmingDown) cancelRef.current?.focus();
   }, [confirmingDown]);
 
+  // Escape on the document, not on the dialog: this confirmation is not modal,
+  // so focus can be anywhere on the page — a click on the background, or a Tab
+  // out of it — and a dismissal key that silently stops working once focus
+  // leaves is worse than none, because the user believes they cancelled.
+  useEffect(() => {
+    if (!confirmingDown) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") cancelDownRef.current();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [confirmingDown]);
+
   const run = (verb: OperationKind) =>
     lifecycle.mutate(verb, { onSuccess: setActiveOperationId });
 
@@ -155,6 +168,10 @@ export function ProjectDetail() {
     setConfirmingDown(false);
     downRef.current?.focus();
   };
+  // Read through a ref so the document listener above is bound once per open
+  // rather than re-bound on every render.
+  const cancelDownRef = useRef(cancelDown);
+  cancelDownRef.current = cancelDown;
 
   if (detail.isPending)
     return (
@@ -255,9 +272,6 @@ export function ProjectDetail() {
           <div
             role="alertdialog"
             aria-labelledby={confirmId}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") cancelDown();
-            }}
             className="mt-3 rounded-md border border-danger bg-raised p-3"
           >
             <p id={confirmId} className="text-sm text-text">
@@ -268,6 +282,13 @@ export function ProjectDetail() {
             <div className="mt-3 flex flex-wrap gap-2">
               <Button
                 variant="danger"
+                // Gated on exactly what the toolbar is gated on: someone else
+                // can start an operation between opening this and confirming
+                // it, and an ungated confirm turns that into an unanticipated
+                // 409.
+                disabled={busy}
+                aria-describedby={busy ? busyId : undefined}
+                title={busy ? BUSY_REASON : undefined}
                 onClick={() => {
                   setConfirmingDown(false);
                   run("down");

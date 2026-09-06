@@ -1,13 +1,29 @@
 import type { ContainerState, Operation } from "@shared/projects.js";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  focusManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, MemoryRouter, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectDetailData } from "../lib/queries.js";
 import { projectDetailRoute } from "./ProjectDetail.js";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  // focusManager is module-level state; a test that forces focus must undo it.
+  focusManager.setFocused(undefined);
+});
+
+/** Alt-tab away and back, which is what makes react-query refetch. */
+async function refocusWindow() {
+  await act(async () => {
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+  });
+}
 
 function container(over: Partial<ContainerState> = {}): ContainerState {
   return {
@@ -497,7 +513,10 @@ describe("lifecycle controls", () => {
     ).toHaveLength(0);
   });
 
-  it("escape cancels the confirmation", async () => {
+  it("escape cancels the confirmation wherever focus has gone", async () => {
+    // The confirmation is not modal, so focus can be anywhere on the page. An
+    // Escape that quietly stops working once focus leaves the dialog is worse
+    // than none: the user believes they cancelled and walks away.
     stubApi({});
     renderDetail();
     const user = userEvent.setup();
@@ -506,26 +525,50 @@ describe("lifecycle controls", () => {
       await screen.findByRole("button", { name: "Stop & remove" }),
     );
     await screen.findByRole("alertdialog");
+    // Move focus out of the dialog first, the way a background click or a Tab
+    // out of it would.
+    screen.getByRole("heading", { name: "jellyfin", level: 1 }).focus();
     await user.keyboard("{Escape}");
     await waitFor(() =>
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
     );
   });
 
-  it("leaves the other three verbs at one tap", async () => {
-    // Restarting from a phone is the primary mobile job; it must not grow a
-    // confirmation step.
-    const fetchMock = stubApi({});
+  it("gates the confirm button on the same in-flight state as the toolbar", async () => {
+    // Someone else can start an operation between opening this confirmation
+    // and confirming it. The trigger being disabled does not help — this
+    // dialog is already open — so the confirm must be gated too, or the user
+    // gets a 409 they could not have anticipated.
+    let running = false;
+    stubApi({
+      operations: () =>
+        json(200, {
+          operations: running
+            ? [
+                operation({
+                  status: "running",
+                  finishedAt: null,
+                  exitCode: null,
+                }),
+              ]
+            : [],
+        }),
+    });
     renderDetail();
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole("button", { name: "Restart" }));
-    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
-    await waitFor(() =>
-      expect(
-        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
-      ).toHaveLength(1),
+    await user.click(
+      await screen.findByRole("button", { name: "Stop & remove" }),
     );
+    const yes = within(await screen.findByRole("alertdialog")).getByRole(
+      "button",
+      { name: /yes, stop and remove/i },
+    );
+    expect(yes).toBeEnabled();
+
+    running = true;
+    await refocusWindow();
+    await waitFor(() => expect(yes).toBeDisabled());
   });
 
   it("does not carry one project's operation into the next", async () => {

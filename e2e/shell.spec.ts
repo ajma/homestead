@@ -1,6 +1,6 @@
 import type { Locator } from "@playwright/test";
-import { expect, test } from "./support/fixtures.js";
 import { SIGNED_OUT_STORAGE_STATE, signInAsAdmin } from "./support/auth.js";
+import { expect, test } from "./support/fixtures.js";
 
 const PHONE = { width: 390, height: 844 };
 const TOUCH_MIN = 44;
@@ -46,10 +46,9 @@ test("the theme toggle switches scheme and survives a reload", async ({
   const trigger = page.getByRole("button", { name: /theme/i });
   await expect(trigger).toHaveAccessibleName(/dark/i);
   await trigger.click();
-  await expect(page.getByRole("menuitemradio", { name: "Dark" })).toHaveAttribute(
-    "aria-checked",
-    "true",
-  );
+  await expect(
+    page.getByRole("menuitemradio", { name: "Dark" }),
+  ).toHaveAttribute("aria-checked", "true");
 });
 
 test("the header fits a phone viewport with usable touch targets", async ({
@@ -75,9 +74,10 @@ test("the header fits a phone viewport with usable touch targets", async ({
   for (const [name, control] of controls) {
     const b = await box(control);
     expect(b.x, `${name} starts inside the viewport`).toBeGreaterThanOrEqual(0);
-    expect(b.x + b.width, `${name} ends inside the viewport`).toBeLessThanOrEqual(
-      PHONE.width,
-    );
+    expect(
+      b.x + b.width,
+      `${name} ends inside the viewport`,
+    ).toBeLessThanOrEqual(PHONE.width);
     expect(b.height, `${name} clears the touch minimum`).toBeGreaterThanOrEqual(
       TOUCH_MIN,
     );

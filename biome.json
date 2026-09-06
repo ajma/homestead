@@ -3,5 +3,27 @@
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2 },
   "linter": { "enabled": true, "rules": { "preset": "recommended" } },
   "css": { "parser": { "cssModules": false, "tailwindDirectives": true } },
-  "files": { "includes": ["src/**", "*.config.ts"] }
+  "files": { "includes": ["src/**", "e2e/**", "*.config.ts"] },
+  "overrides": [
+    {
+      "includes": ["e2e/**", "!e2e/support/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@playwright/test": {
+                    "importNames": ["test"],
+                    "message": "Import `test` from ./support/fixtures.js instead. That one carries the automatic guard that stops a lifecycle POST reaching the real Docker daemon; @playwright/test's does not, and a spec that loses it fails open and silently. Type-only imports such as `type Page` are fine."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

@@ -51,9 +51,9 @@ test("a directory without a compose file is shown but not linked", async ({
   await page.goto("/projects");
 
   await expect(page.getByText(BARE, { exact: true })).toBeVisible();
-  await expect(
-    page.getByRole("link", { name: new RegExp(BARE) }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("link", { name: new RegExp(BARE) })).toHaveCount(
+    0,
+  );
   // The row explains itself rather than looking like a broken project.
   await expect(
     page.getByRole("listitem").filter({ hasText: BARE }),

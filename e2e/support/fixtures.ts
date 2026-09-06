@@ -41,7 +41,7 @@ export const GUARD_MARKER = "e2e_lifecycle_guard";
  * accident it silently breaks the app, and misread it is a bypass. A test-only
  * guard belongs in the test layer.
  */
-export const test = base.extend<{ lifecycleGuard: void }>({
+export const test = base.extend<{ lifecycleGuard: null }>({
   lifecycleGuard: [
     async ({ context }, use) => {
       await context.route(LIFECYCLE_ROUTE, (route) =>
@@ -51,7 +51,7 @@ export const test = base.extend<{ lifecycleGuard: void }>({
           body: JSON.stringify({ error: GUARD_MARKER }),
         }),
       );
-      await use();
+      await use(null);
     },
     { auto: true },
   ],

@@ -58,7 +58,9 @@ test.afterAll(async () => {
 test("the header names the project and shows its status", async ({ page }) => {
   await page.goto(`/projects/${STACK}`);
 
-  await expect(page.getByRole("heading", { name: STACK, level: 1 })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: STACK, level: 1 }),
+  ).toBeVisible();
   // Nothing was ever brought up, and the page says so rather than guessing.
   await expect(page.getByText("No containers")).toBeVisible();
   await expect(
@@ -119,7 +121,9 @@ test("a malformed compose file still renders, with its parse error", async ({
 
   // Not a blank page and not a crash: the header, the controls and the parse
   // error are all there.
-  await expect(page.getByRole("heading", { name: BROKEN, level: 1 })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: BROKEN, level: 1 }),
+  ).toBeVisible();
   await expect(page.getByText(/must be a/i)).toBeVisible();
   for (const name of LIFECYCLE)
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
@@ -212,22 +216,46 @@ test("a 409 from another tab is reported, not swallowed", async ({ page }) => {
 });
 
 /**
+ * How many controls the page must have for the sweep to mean anything.
+ *
+ * Back, four lifecycle buttons and three tabs is eight before anything else,
+ * so this is a floor, not a count — asserting an exact number would break on
+ * every legitimate addition.
+ */
+const MIN_CONTROLS = 8;
+
+/**
+ * A thumb needs 44px in both directions: a control 44px tall and 8px wide is
+ * as hard to hit as one 8px tall.
+ */
+type Sweep = { offenders: string[]; measured: number };
+
+/**
  * Every visible control, not a hand-written list.
  *
  * The previous version measured only the four lifecycle buttons, and so said
  * nothing about the operation panel's Dismiss — which shipped at 36px and
  * renders at 390px. A sweep cannot forget a control that was added later.
+ *
+ * It reports how many it measured, because a selector that quietly stops
+ * matching turns the whole mobile safety net into a green no-op. An empty
+ * sweep must fail loudly, not pass.
  */
-async function tapTargetOffenders(page: Page): Promise<string[]> {
+async function sweepTapTargets(page: Page): Promise<Sweep> {
   const controls = page.locator(
-    "button:visible, a[href]:visible, [role=tab]:visible",
+    'button:visible, a[href]:visible, input:visible, [role="button"]:visible, [role="tab"]:visible',
   );
+  const measured = await controls.count();
   const offenders: string[] = [];
-  for (let i = 0; i < (await controls.count()); i++) {
+  for (let i = 0; i < measured; i++) {
     const control = controls.nth(i);
     const name = (
       await control.evaluate(
-        (el) => el.getAttribute("aria-label") ?? el.textContent ?? "",
+        (el) =>
+          el.getAttribute("aria-label") ??
+          (el as HTMLInputElement).value ??
+          el.textContent ??
+          "",
       )
     )
       .trim()
@@ -239,10 +267,21 @@ async function tapTargetOffenders(page: Page): Promise<string[]> {
     }
     if (box.height < TOUCH_MIN)
       offenders.push(`${name}: ${Math.round(box.height)}px tall`);
+    if (box.width < TOUCH_MIN)
+      offenders.push(`${name}: ${Math.round(box.width)}px wide`);
     if (box.x < 0 || box.x + box.width > PHONE.width)
       offenders.push(`${name}: outside the viewport`);
   }
-  return offenders;
+  return { offenders, measured };
+}
+
+/** Fails on an offender *and* on a sweep that found nothing to measure. */
+function expectTappable(sweep: Sweep, when: string): void {
+  expect(sweep.offenders, `${when}: undersized or off-screen`).toEqual([]);
+  expect(
+    sweep.measured,
+    `${when}: the sweep matched ${sweep.measured} controls, so it proved nothing`,
+  ).toBeGreaterThanOrEqual(MIN_CONTROLS);
 }
 
 test("every control on the page is tappable at phone width", async ({
@@ -265,7 +304,7 @@ test("every control on the page is tappable at phone width", async ({
   for (const name of LIFECYCLE)
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
 
-  expect(await tapTargetOffenders(page), "the page at rest").toEqual([]);
+  expectTappable(await sweepTapTargets(page), "the page at rest");
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(PHONE.width);
@@ -275,12 +314,10 @@ test("every control on the page is tappable at phone width", async ({
   await expect(
     page.getByRole("region", { name: "Operation", exact: true }),
   ).toBeVisible();
-  expect(await tapTargetOffenders(page), "with an operation open").toEqual([]);
+  expectTappable(await sweepTapTargets(page), "with an operation open");
 
   // …and with the remove confirmation open, which is the other pair.
   await page.getByRole("button", { name: "Stop & remove" }).click();
   await expect(page.getByRole("alertdialog")).toBeVisible();
-  expect(await tapTargetOffenders(page), "with the confirmation open").toEqual(
-    [],
-  );
+  expectTappable(await sweepTapTargets(page), "with the confirmation open");
 });
