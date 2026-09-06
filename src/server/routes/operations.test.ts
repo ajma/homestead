@@ -223,6 +223,47 @@ describe("lifecycle routes", () => {
     expect(op).not.toHaveProperty("actorUserId");
   });
 
+  it("lists an operation while it is still running", async () => {
+    // The project page disables its lifecycle buttons from this listing. The
+    // history row is only written when the run ends, so a database-only
+    // answer here tells a second admin the project is idle while someone
+    // else's `pull` is halfway through — and their click earns a 409.
+    let release!: (code: number) => void;
+    const held = new Promise<number>((resolve) => {
+      release = resolve;
+    });
+    await build({ stream: () => held });
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/projects/${slug}/pull`,
+      headers: { cookie: adminCookie },
+    });
+    expect(started.statusCode).toBe(202);
+    const { operationId } = started.json();
+
+    const during = await app.inject({
+      method: "GET",
+      url: `/api/projects/${slug}/operations`,
+      headers: { cookie: adminCookie },
+    });
+    expect(during.json().operations).toMatchObject([
+      { id: operationId, kind: "pull", status: "running", finishedAt: null },
+    ]);
+
+    release(0);
+    await settle(operationId);
+
+    // Once: the live entry and the history row are the same operation.
+    const after = await app.inject({
+      method: "GET",
+      url: `/api/projects/${slug}/operations`,
+      headers: { cookie: adminCookie },
+    });
+    expect(after.json().operations).toHaveLength(1);
+    expect(after.json().operations[0]).toMatchObject({ status: "succeeded" });
+  });
+
   it("does not capture the validate route with the verb route", async () => {
     const res = await app.inject({
       method: "POST",

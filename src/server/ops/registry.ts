@@ -223,14 +223,30 @@ export function createRegistry(db: Db) {
       entry.subscribers.add(sub);
       return () => entry.subscribers.delete(sub);
     },
+    /**
+     * In-memory first, database second — the same precedence {@link find}
+     * uses, and for the same reason, but it matters more here.
+     *
+     * The history row is written only when an operation *ends*, so a listing
+     * read from the database alone can never contain the operation that is
+     * running right now. That is precisely the one a second person opening the
+     * project page needs: without it they see every lifecycle button enabled
+     * and "nothing has run yet" while someone else's four-minute `pull` is in
+     * flight, and their click earns a 409.
+     */
     async listForProject(slug: string): Promise<Operation[]> {
+      // Only running entries: a finished one is already a history row, and
+      // including it here would list it twice.
+      const running = Array.from(live.values(), (entry) => entry.op)
+        .filter((op) => op.slug === slug && op.status === "running")
+        .sort((a, b) => b.startedAt - a.startedAt);
       const rows = await db
         .select(historyColumns)
         .from(operations)
         .where(eq(operations.projectSlug, slug))
         .orderBy(desc(operations.startedAt))
         .limit(50);
-      return rows.map(toOperation);
+      return [...running, ...rows.map(toOperation)];
     },
   };
 }

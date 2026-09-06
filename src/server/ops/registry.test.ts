@@ -145,6 +145,53 @@ describe("operation registry", () => {
     });
   });
 
+  it("lists the operation that is running now, not only finished ones", async () => {
+    // The history row is written on completion, so a database-only listing
+    // reports an idle project while a four-minute `pull` is in flight — and
+    // the second person to open that page sees enabled buttons and earns a
+    // 409. The running operation must be in the listing while it runs.
+    const gate = deferred();
+    const op = await registry.start("media", "pull", "u1", () => gate.promise);
+
+    const during = await registry.listForProject("media");
+    expect(during.map((o) => o.id)).toEqual([op.id]);
+    expect(during[0]).toMatchObject({
+      kind: "pull",
+      status: "running",
+      finishedAt: null,
+    });
+
+    gate.resolve(0);
+    await registry.wait(op.id);
+
+    // And exactly once afterwards: the live entry and the history row are the
+    // same operation, not two.
+    const after = await registry.listForProject("media");
+    expect(after.map((o) => o.id)).toEqual([op.id]);
+    expect(after[0]?.status).toBe("succeeded");
+  });
+
+  it("keeps another project's running operation out of this one's listing", async () => {
+    const gate = deferred();
+    await registry.start("media", "pull", "u1", () => gate.promise);
+    expect(await registry.listForProject("photos")).toEqual([]);
+    gate.resolve(0);
+  });
+
+  it("puts the running operation ahead of the finished history", async () => {
+    const done = await registry.start("media", "up", "u1", async () => 0);
+    await registry.wait(done.id);
+    const gate = deferred();
+    const now = await registry.start("media", "pull", "u1", () => gate.promise);
+
+    expect((await registry.listForProject("media")).map((o) => o.id)).toEqual([
+      now.id,
+      done.id,
+    ]);
+    gate.resolve(0);
+    await registry.wait(now.id);
+  });
+
   it("returns history in the shared Operation shape, without output", async () => {
     const op = await registry.start("media", "up", "u1", async (emit) => {
       emit("a lot of output\n");
