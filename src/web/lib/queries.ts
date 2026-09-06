@@ -1,11 +1,19 @@
-import type { ProjectModel, ScanEntry } from "@shared/projects.js";
-import { useQuery } from "@tanstack/react-query";
+import type {
+  ContainerState,
+  Operation,
+  OperationKind,
+  ProjectModel,
+  ScanEntry,
+} from "@shared/projects.js";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, apiFetch } from "./api.js";
 
 export const queryKeys = {
   /** AppShell's sign-out clears the cache by this key — keep them in step. */
   projects: ["projects"] as const,
   project: (slug: string) => ["project", slug] as const,
+  /** A prefix of `project(slug)`, so invalidating the detail invalidates this. */
+  projectOperations: (slug: string) => ["project", slug, "operations"] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -65,12 +73,18 @@ export function useProjects() {
 }
 
 /**
- * `GET /api/projects/:slug`. Task 7's detail view owns the rest of this shape
- * (container states, parse errors); it is extended there as the view needs it.
+ * `GET /api/projects/:slug`.
+ *
+ * `model` is null — with `parseError` set — whenever `docker compose config`
+ * refuses the file, and the response still carries everything else. That is
+ * the whole point: the projects a user most needs to open are the broken ones,
+ * so nothing here may be reached through a non-null assertion.
  */
-export type ProjectDetail = ScanEntry & {
+export type ProjectDetailData = ScanEntry & {
   model: ProjectModel | null;
   parseError: string | null;
+  states: ContainerState[];
+  statesError: string | null;
   snapshots: string[];
 };
 
@@ -78,8 +92,82 @@ export function useProject(slug: string) {
   return useQuery({
     queryKey: queryKeys.project(slug),
     queryFn: () =>
-      apiFetch<ProjectDetail>(`/api/projects/${encodeURIComponent(slug)}`),
+      apiFetch<ProjectDetailData>(`/api/projects/${encodeURIComponent(slug)}`),
     enabled: slug !== "",
     retry: retryUnlessRefused,
   });
+}
+
+/** While something is running, three seconds is the difference between "did it work?" and knowing. */
+const RUNNING_POLL_MS = 3_000;
+
+export function hasRunningOperation(operations: Operation[]): boolean {
+  return operations.some((op) => op.status === "running");
+}
+
+/**
+ * `GET /api/projects/:slug/operations`. Polled only while an operation is
+ * running: history does not change on its own, and a page left open on a NAS
+ * should cost nothing.
+ */
+export function useProjectOperations(slug: string) {
+  return useQuery({
+    queryKey: queryKeys.projectOperations(slug),
+    queryFn: async () => {
+      const body = await apiFetch<{ operations: Operation[] }>(
+        `/api/projects/${encodeURIComponent(slug)}/operations`,
+      );
+      return body?.operations ?? [];
+    },
+    enabled: slug !== "",
+    retry: retryUnlessRefused,
+    refetchInterval: (query) =>
+      hasRunningOperation(query.state.data ?? []) ? RUNNING_POLL_MS : false,
+  });
+}
+
+/**
+ * `POST /api/projects/:slug/:verb` — 202 with an operation id, or 409 when one
+ * is already running for that project.
+ *
+ * Deliberately never retried. Every verb here spawns `docker compose` against
+ * a real stack, so an automatic second attempt is a second `up`, not a
+ * harmless re-read.
+ */
+export function useLifecycle(slug: string) {
+  const queryClient = useQueryClient();
+  return useMutation<string, Error, OperationKind>({
+    mutationFn: async (verb) => {
+      const body = await apiFetch<{ operationId: string }>(
+        `/api/projects/${encodeURIComponent(slug)}/${verb}`,
+        { method: "POST" },
+      );
+      // apiFetch returns `T | null` because a 204 has no body. A 202 without
+      // an id is a broken server, not an operation we can follow.
+      if (!body?.operationId)
+        throw new Error("the server accepted the request without giving an id");
+      return body.operationId;
+    },
+    retry: false,
+    // The detail key is a prefix of the operations key, so one call refreshes
+    // both container states and the operation list.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.project(slug) });
+    },
+  });
+}
+
+/** What to put in front of the user when a lifecycle request is refused. */
+export function lifecycleErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 409)
+      return "An operation is already running for this project. Wait for it to finish, then try again.";
+    if (error.status === 403 || error.status === 401)
+      return "Controlling a stack needs an administrator account.";
+    if (error.status === 404)
+      return "This project is no longer on disk. Return to the project list.";
+  }
+  return error instanceof Error
+    ? `Could not start the operation. ${error.message}`
+    : "Could not start the operation.";
 }

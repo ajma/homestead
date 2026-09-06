@@ -5,6 +5,7 @@ import { ProtectedRoute } from "./components/ProtectedRoute.js";
 import { Dashboard } from "./routes/Dashboard.js";
 import { Login } from "./routes/Login.js";
 import { NotFound } from "./routes/NotFound.js";
+import { projectDetailRoute } from "./routes/ProjectDetail.js";
 import { ProjectList } from "./routes/ProjectList.js";
 import { Setup } from "./routes/Setup.js";
 
@@ -50,6 +51,7 @@ export function App() {
       >
         <Route path="/" element={<Dashboard />} />
         <Route path="/projects" element={<ProjectList />} />
+        {projectDetailRoute}
         {/* Nested, so an unknown path is still behind ProtectedRoute and still
             renders inside the shell — a mistyped URL keeps its navigation. */}
         <Route path="*" element={<NotFound />} />

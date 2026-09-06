@@ -1,6 +1,11 @@
 import type { HTMLAttributes } from "react";
 
-type State = "running" | "exited" | "restarting" | "unknown";
+/**
+ * The closed set of tints this dot can draw. Exported so that anything mapping
+ * a free-form Docker state into it is checked by the compiler rather than
+ * guessing at strings.
+ */
+export type State = "running" | "exited" | "restarting" | "unknown";
 
 const STATE_STYLES: Record<State, string> = {
   running: "bg-success",
