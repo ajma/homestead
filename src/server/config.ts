@@ -20,7 +20,7 @@ const absolutePath = z
 /**
  * Validates one `scheme://host[:port]` origin.
  *
- * Shared by HOMESTACKS_TRUSTED_ORIGINS and HOMESTACKS_BASE_URL so both env
+ * Shared by HOMESTEAD_TRUSTED_ORIGINS and HOMESTEAD_BASE_URL so both env
  * vars accept exactly the same syntax and reject the same mistakes.
  *
  * @returns an error message, or undefined when the origin is well-formed.
@@ -69,13 +69,13 @@ const baseUrl = z
   .transform((v) => (v && v.trim() !== "" ? v.trim() : undefined));
 
 const schema = z.object({
-  HOMESTACKS_DATA: absolutePath.default("/var/lib/homestacks"),
-  HOMESTACKS_PROJECTS: absolutePath.default("/opt/stacks"),
-  HOMESTACKS_PROJECTS_HOST: absolutePath.optional(),
+  HOMESTEAD_DATA: absolutePath.default("/var/lib/homestead"),
+  HOMESTEAD_PROJECTS: absolutePath.default("/opt/stacks"),
+  HOMESTEAD_PROJECTS_HOST: absolutePath.optional(),
   PORT: z.coerce.number().int().min(1).max(65535).default(7420),
-  HOMESTACKS_SECRET_KEY: z.string().min(1).optional(),
-  HOMESTACKS_BASE_URL: baseUrl,
-  HOMESTACKS_TRUSTED_ORIGINS: trustedOrigins,
+  HOMESTEAD_SECRET_KEY: z.string().min(1).optional(),
+  HOMESTEAD_BASE_URL: baseUrl,
+  HOMESTEAD_TRUSTED_ORIGINS: trustedOrigins,
 });
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
@@ -89,15 +89,15 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   }
   const v = parsed.data;
   return {
-    dataDir: v.HOMESTACKS_DATA,
-    projectsDir: v.HOMESTACKS_PROJECTS,
-    projectsHostDir: v.HOMESTACKS_PROJECTS_HOST ?? v.HOMESTACKS_PROJECTS,
+    dataDir: v.HOMESTEAD_DATA,
+    projectsDir: v.HOMESTEAD_PROJECTS,
+    projectsHostDir: v.HOMESTEAD_PROJECTS_HOST ?? v.HOMESTEAD_PROJECTS,
     port: v.PORT,
-    secretKey: v.HOMESTACKS_SECRET_KEY,
+    secretKey: v.HOMESTEAD_SECRET_KEY,
     // Better-Auth checks the browser's Origin header against this value, and
     // derives useSecureCookies from its scheme. It must be the URL operators
     // actually browse to; the localhost default only suits local development.
-    baseUrl: v.HOMESTACKS_BASE_URL ?? `http://localhost:${v.PORT}`,
-    trustedOrigins: v.HOMESTACKS_TRUSTED_ORIGINS,
+    baseUrl: v.HOMESTEAD_BASE_URL ?? `http://localhost:${v.PORT}`,
+    trustedOrigins: v.HOMESTEAD_TRUSTED_ORIGINS,
   };
 }

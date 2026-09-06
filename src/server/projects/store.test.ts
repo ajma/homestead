@@ -43,8 +43,8 @@ beforeEach(async () => {
   await symlink(join(root, "real-project"), join(root, "symlinked-project"));
   // Create broken symlink
   await symlink(join(root, "nonexistent"), join(root, "broken-link"));
-  await mkdir(join(root, ".homestacks"), { recursive: true }); // data dir living inside
-  await writeFile(join(root, ".homestacks", "compose.yaml"), "services: {}\n");
+  await mkdir(join(root, ".homestead"), { recursive: true }); // data dir living inside
+  await writeFile(join(root, ".homestead", "compose.yaml"), "services: {}\n");
   await writeFile(join(root, "loose-file.txt"), "x");
 });
 
@@ -76,7 +76,7 @@ describe("scanProjects", () => {
 
   it("ignores dot-directories so a nested data dir is not adopted", async () => {
     const entries = await scanProjects(root);
-    expect(entries.map((e) => e.slug)).not.toContain(".homestacks");
+    expect(entries.map((e) => e.slug)).not.toContain(".homestead");
   });
 
   it("ignores plain files at the root", async () => {

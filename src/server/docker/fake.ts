@@ -8,7 +8,7 @@ import type { DockerRunner, RunResult, StreamOpts } from "./run.js";
  * dangerous: compose reconciles by project-name label, not by directory, so a
  * `up` issued from a temp fixture will happily recreate a user's real stack of
  * the same name. Real-Docker coverage lives in `*.integration.test.ts`, gated
- * behind HOMESTACKS_DOCKER_TESTS.
+ * behind HOMESTEAD_DOCKER_TESTS.
  */
 export type FakeDockerCall = { args: string[]; cwd: string | undefined };
 

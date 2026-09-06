@@ -10,8 +10,8 @@ import {
   composePs,
 } from "./compose.js";
 
-// Real Docker. Opt in with HOMESTACKS_DOCKER_TESTS=1.
-const enabled = process.env.HOMESTACKS_DOCKER_TESTS === "1";
+// Real Docker. Opt in with HOMESTEAD_DOCKER_TESTS=1.
+const enabled = process.env.HOMESTEAD_DOCKER_TESTS === "1";
 const d = enabled ? describe : describe.skip;
 
 let root: string;

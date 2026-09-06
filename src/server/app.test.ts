@@ -68,12 +68,12 @@ describe("error handler", () => {
   it("masks a 5xx and does not leak the thrown message", async () => {
     const app = await boot();
     app.get("/api/_boom", async () => {
-      throw new Error("db at /var/lib/homestacks/homestacks.db is corrupt");
+      throw new Error("db at /var/lib/homestead/homestead.db is corrupt");
     });
     const res = await app.inject({ method: "GET", url: "/api/_boom" });
     expect(res.statusCode).toBe(500);
     expect(res.json()).toEqual({ error: "internal_error" });
-    expect(res.body).not.toContain("/var/lib/homestacks");
+    expect(res.body).not.toContain("/var/lib/homestead");
     await app.close();
   });
 

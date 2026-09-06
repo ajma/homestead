@@ -1,5 +1,5 @@
 {
-  "name": "homestacks",
+  "name": "homestead",
   "version": "1.0.0",
   "private": true,
   "description": "Self-hosted Docker Compose manager for home servers and NAS appliances",
@@ -7,8 +7,8 @@
   "license": "ISC",
   "scripts": {
     "test": "vitest run",
-    "test:docker": "HOMESTACKS_DOCKER_TESTS=1 vitest run",
-    "dev": "HOMESTACKS_TRUSTED_ORIGINS=http://localhost:5173 tsx watch src/server/index.ts",
+    "test:docker": "HOMESTEAD_DOCKER_TESTS=1 vitest run",
+    "dev": "HOMESTEAD_TRUSTED_ORIGINS=http://localhost:5173 tsx watch src/server/index.ts",
     "dev:server:once": "tsx src/server/index.ts",
     "dev:web": "vite",
     "lint": "biome check .",

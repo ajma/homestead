@@ -5,8 +5,8 @@ import { defineConfig } from "@playwright/test";
 // This ensures the directory is ready before Playwright starts any servers
 // Use process.env guard to ensure it only happens once even if config is loaded multiple times
 if (!process.env.E2E_CLEANUP_DONE) {
-  rmSync("/tmp/homestacks-e2e", { recursive: true, force: true });
-  mkdirSync("/tmp/homestacks-e2e/stacks", { recursive: true });
+  rmSync("/tmp/homestead-e2e", { recursive: true, force: true });
+  mkdirSync("/tmp/homestead-e2e/stacks", { recursive: true });
   process.env.E2E_CLEANUP_DONE = "1";
 }
 
@@ -19,9 +19,9 @@ export default defineConfig({
       command: "pnpm dev:server:once",
       port: 7420,
       env: {
-        HOMESTACKS_DATA: "/tmp/homestacks-e2e",
-        HOMESTACKS_PROJECTS: "/tmp/homestacks-e2e/stacks",
-        HOMESTACKS_TRUSTED_ORIGINS: "http://localhost:5173",
+        HOMESTEAD_DATA: "/tmp/homestead-e2e",
+        HOMESTEAD_PROJECTS: "/tmp/homestead-e2e/stacks",
+        HOMESTEAD_TRUSTED_ORIGINS: "http://localhost:5173",
       },
       reuseExistingServer: false,
     },

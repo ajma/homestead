@@ -29,7 +29,7 @@ export function Setup() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 p-8">
-      <h1 className="text-2xl font-semibold">Welcome to Homestacks</h1>
+      <h1 className="text-2xl font-semibold">Welcome to Homestead</h1>
       <p className="text-slate-500">Create the administrator account.</p>
       <form onSubmit={onSubmit} className="flex flex-col gap-3">
         <input

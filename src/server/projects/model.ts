@@ -40,9 +40,9 @@ function parseApp(
   labels: Record<string, string>,
   ports: PublishedPort[],
 ): AppMeta | null {
-  if (labels["homestacks.app.enabled"] === "false") return null;
+  if (labels["homestead.app.enabled"] === "false") return null;
   if (ports.length === 0) return null;
-  const labelled = Number.parseInt(labels["homestacks.app.port"] ?? "", 10);
+  const labelled = Number.parseInt(labels["homestead.app.port"] ?? "", 10);
   const port = Number.isFinite(labelled)
     ? labelled
     : ports.reduce(
@@ -50,12 +50,12 @@ function parseApp(
         ports[0]?.containerPort ?? 0,
       );
   const app: AppMeta = {
-    name: labels["homestacks.app.name"] ?? name,
+    name: labels["homestead.app.name"] ?? name,
     port,
     enabled: true,
   };
-  if (labels["homestacks.app.icon"]) app.icon = labels["homestacks.app.icon"];
-  if (labels["homestacks.app.path"]) app.path = labels["homestacks.app.path"];
+  if (labels["homestead.app.icon"]) app.icon = labels["homestead.app.icon"];
+  if (labels["homestead.app.path"]) app.path = labels["homestead.app.path"];
   return app;
 }
 
@@ -96,6 +96,6 @@ export function parseCanonical(json: unknown): ProjectModel {
   return {
     projectName: root.name,
     services,
-    meta: parseMeta(root["x-homestacks"]),
+    meta: parseMeta(root["x-homestead"]),
   };
 }

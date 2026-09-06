@@ -1,14 +1,14 @@
-# Homestacks Plan 1 — Foundation & Access Control
+# Homestead Plan 1 — Foundation & Access Control
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A Homestacks server that boots, validates its environment, stores encrypted secrets, and enforces admin/viewer access control behind a login screen.
+**Goal:** A Homestead server that boots, validates its environment, stores encrypted secrets, and enforces admin/viewer access control behind a login screen.
 
 **Architecture:** Single pnpm package with three zones (`src/web`, `src/server`, `src/shared`). Fastify serves the API and the built SPA from one Node process. SQLite via libSQL + Drizzle. Better-Auth with the admin plugin provides sessions and role-based access control. Configuration is a pure function of the environment so it can be unit-tested without a filesystem.
 
 **Tech Stack:** TypeScript (ESM, strict), Fastify 5, Vite + React, Tailwind, TanStack Query v5, react-router-dom v6, Drizzle ORM + `@libsql/client`, Better-Auth + admin plugin, Vitest, Playwright, Biome, tsup.
 
-**Spec:** `docs/superpowers/specs/2026-09-05-homestacks-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-05-homestead-design.md`
 
 ## Global Constraints
 
@@ -18,8 +18,8 @@
 - Path alias `@shared/*` → `src/shared/*`. Server and web both import through it.
 - Biome is the only linter/formatter. No ESLint, no Prettier.
 - **No `Co-Authored-By` trailers and no AI-attribution lines in commit messages.**
-- `$HOMESTACKS_DATA` must be on a local filesystem — SQLite locking is unreliable over NFS/SMB (spec §4.1).
-- Every secret at rest (`api_token`, `tunnel_token`, `client_secret`) is encrypted with the key from `HOMESTACKS_SECRET_KEY`, or from `$HOMESTACKS_DATA/secret.key` generated at `0600` (spec §12.4).
+- `$HOMESTEAD_DATA` must be on a local filesystem — SQLite locking is unreliable over NFS/SMB (spec §4.1).
+- Every secret at rest (`api_token`, `tunnel_token`, `client_secret`) is encrypted with the key from `HOMESTEAD_SECRET_KEY`, or from `$HOMESTEAD_DATA/secret.key` generated at `0600` (spec §12.4).
 - Role enforcement is a server-side route precondition, never a UI concern (spec §6).
 - `compose:read` is an admin permission, not a viewer one — the compose file and `.env` hold passwords (spec §6).
 
@@ -219,28 +219,28 @@ import { ConfigError, loadConfig } from "./config.js";
 describe("loadConfig", () => {
   it("applies defaults when nothing is set", () => {
     const c = loadConfig({});
-    expect(c.dataDir).toBe("/var/lib/homestacks");
+    expect(c.dataDir).toBe("/var/lib/homestead");
     expect(c.projectsDir).toBe("/opt/stacks");
     expect(c.port).toBe(7420);
     expect(c.secretKey).toBeUndefined();
   });
 
   it("defaults projectsHostDir to projectsDir", () => {
-    const c = loadConfig({ HOMESTACKS_PROJECTS: "/opt/stacks" });
+    const c = loadConfig({ HOMESTEAD_PROJECTS: "/opt/stacks" });
     expect(c.projectsHostDir).toBe("/opt/stacks");
   });
 
   it("keeps projectsHostDir distinct when set, for path translation", () => {
     const c = loadConfig({
-      HOMESTACKS_PROJECTS: "/data/stacks",
-      HOMESTACKS_PROJECTS_HOST: "/volume2/docker",
+      HOMESTEAD_PROJECTS: "/data/stacks",
+      HOMESTEAD_PROJECTS_HOST: "/volume2/docker",
     });
     expect(c.projectsDir).toBe("/data/stacks");
     expect(c.projectsHostDir).toBe("/volume2/docker");
   });
 
   it("rejects relative paths", () => {
-    expect(() => loadConfig({ HOMESTACKS_DATA: "relative/path" })).toThrow(ConfigError);
+    expect(() => loadConfig({ HOMESTEAD_DATA: "relative/path" })).toThrow(ConfigError);
   });
 
   it("rejects a non-numeric port", () => {
@@ -248,7 +248,7 @@ describe("loadConfig", () => {
   });
 
   it("strips a trailing slash so path joins do not double up", () => {
-    const c = loadConfig({ HOMESTACKS_PROJECTS: "/opt/stacks/" });
+    const c = loadConfig({ HOMESTEAD_PROJECTS: "/opt/stacks/" });
     expect(c.projectsDir).toBe("/opt/stacks");
   });
 });
@@ -282,11 +282,11 @@ const absolutePath = z
   .transform((v) => (v.length > 1 && v.endsWith("/") ? v.slice(0, -1) : v));
 
 const schema = z.object({
-  HOMESTACKS_DATA: absolutePath.default("/var/lib/homestacks"),
-  HOMESTACKS_PROJECTS: absolutePath.default("/opt/stacks"),
-  HOMESTACKS_PROJECTS_HOST: absolutePath.optional(),
+  HOMESTEAD_DATA: absolutePath.default("/var/lib/homestead"),
+  HOMESTEAD_PROJECTS: absolutePath.default("/opt/stacks"),
+  HOMESTEAD_PROJECTS_HOST: absolutePath.optional(),
   PORT: z.coerce.number().int().min(1).max(65535).default(7420),
-  HOMESTACKS_SECRET_KEY: z.string().min(1).optional(),
+  HOMESTEAD_SECRET_KEY: z.string().min(1).optional(),
 });
 
 export function loadConfig(env: Record<string, string | undefined>): Config {
@@ -298,11 +298,11 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   }
   const v = parsed.data;
   return {
-    dataDir: v.HOMESTACKS_DATA,
-    projectsDir: v.HOMESTACKS_PROJECTS,
-    projectsHostDir: v.HOMESTACKS_PROJECTS_HOST ?? v.HOMESTACKS_PROJECTS,
+    dataDir: v.HOMESTEAD_DATA,
+    projectsDir: v.HOMESTEAD_PROJECTS,
+    projectsHostDir: v.HOMESTEAD_PROJECTS_HOST ?? v.HOMESTEAD_PROJECTS,
     port: v.PORT,
-    secretKey: v.HOMESTACKS_SECRET_KEY,
+    secretKey: v.HOMESTEAD_SECRET_KEY,
   };
 }
 ```
@@ -530,7 +530,7 @@ export default defineConfig({
   schema: "./src/server/db/schema.ts",
   out: "./drizzle",
   dialect: "sqlite",
-  dbCredentials: { url: "file:./.dev/homestacks.db" },
+  dbCredentials: { url: "file:./.dev/homestead.db" },
 });
 ```
 
@@ -702,7 +702,7 @@ Expected: FAIL — cannot resolve `./permissions.js`.
 `src/shared/permissions.ts`:
 
 ```typescript
-export const homestacksStatement = {
+export const homesteadStatement = {
   project: ["read", "create", "update", "delete", "control"],
   compose: ["read", "write"],
   tunnel: ["read", "create", "delete"],
@@ -718,11 +718,11 @@ export const homestacksStatement = {
 ```typescript
 import { createAccessControl } from "better-auth/plugins/access";
 import { adminAc, defaultStatements } from "better-auth/plugins/admin/access";
-import { homestacksStatement } from "@shared/permissions.js";
+import { homesteadStatement } from "@shared/permissions.js";
 
 export const statement = {
   ...defaultStatements,
-  ...homestacksStatement,
+  ...homesteadStatement,
 } as const;
 
 export const ac = createAccessControl(statement);
@@ -943,7 +943,7 @@ import { ensureSecretKey } from "./crypto/secrets.js";
 
 const config = loadConfig(process.env);
 const key = await ensureSecretKey(config.dataDir, config.secretKey);
-const db = createDb(`${config.dataDir}/homestacks.db`);
+const db = createDb(`${config.dataDir}/homestead.db`);
 await runMigrations(db);
 const auth = createAuth(db, {
   secret: key.toString("hex"),
@@ -1299,15 +1299,15 @@ const MOUNTS = [
 
 describe("isNetworkFilesystem", () => {
   it("flags an NFS mount", () => {
-    expect(isNetworkFilesystem("/mnt/nas/homestacks", MOUNTS)).toBe(true);
+    expect(isNetworkFilesystem("/mnt/nas/homestead", MOUNTS)).toBe(true);
   });
 
   it("flags a CIFS mount", () => {
-    expect(isNetworkFilesystem("/mnt/smb/homestacks", MOUNTS)).toBe(true);
+    expect(isNetworkFilesystem("/mnt/smb/homestead", MOUNTS)).toBe(true);
   });
 
   it("accepts local btrfs", () => {
-    expect(isNetworkFilesystem("/volume2/docker/.homestacks", MOUNTS)).toBe(false);
+    expect(isNetworkFilesystem("/volume2/docker/.homestead", MOUNTS)).toBe(false);
   });
 
   it("picks the longest matching mount point, not the first", () => {
@@ -1319,13 +1319,13 @@ describe("isNetworkFilesystem", () => {
 describe("runChecks", () => {
   it("reports a writable data dir as ok", async () => {
     const dir = await mkdtemp(join(tmpdir(), "hs-pre-"));
-    const config = loadConfig({ HOMESTACKS_DATA: dir, HOMESTACKS_PROJECTS: dir });
+    const config = loadConfig({ HOMESTEAD_DATA: dir, HOMESTEAD_PROJECTS: dir });
     const results = await runChecks(dataDirChecks(config));
     expect(results.find((r) => r.id === "data_dir_writable")?.ok).toBe(true);
   });
 
   it("reports an unwritable data dir as a blocking failure", async () => {
-    const config = loadConfig({ HOMESTACKS_DATA: "/proc/nope", HOMESTACKS_PROJECTS: "/tmp" });
+    const config = loadConfig({ HOMESTEAD_DATA: "/proc/nope", HOMESTEAD_PROJECTS: "/tmp" });
     const results = await runChecks(dataDirChecks(config));
     const check = results.find((r) => r.id === "data_dir_writable");
     expect(check?.ok).toBe(false);
@@ -1558,7 +1558,7 @@ export default defineConfig({
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Homestacks</title>
+    <title>Homestead</title>
   </head>
   <body>
     <div id="root"></div>
@@ -1629,7 +1629,7 @@ export function Setup() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 p-8">
-      <h1 className="text-2xl font-semibold">Welcome to Homestacks</h1>
+      <h1 className="text-2xl font-semibold">Welcome to Homestead</h1>
       <p className="text-slate-500">Create the administrator account.</p>
       <form onSubmit={onSubmit} className="flex flex-col gap-3">
         <input name="name" placeholder="Name" required className="rounded border p-2" />
@@ -1768,8 +1768,8 @@ export default defineConfig({
       command: "pnpm dev",
       port: 7420,
       env: {
-        HOMESTACKS_DATA: "/tmp/homestacks-e2e",
-        HOMESTACKS_PROJECTS: "/tmp/homestacks-e2e/stacks",
+        HOMESTEAD_DATA: "/tmp/homestead-e2e",
+        HOMESTEAD_PROJECTS: "/tmp/homestead-e2e/stacks",
       },
       reuseExistingServer: false,
     },
@@ -1785,13 +1785,13 @@ import { rm, mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 
 test.beforeAll(async () => {
-  await rm("/tmp/homestacks-e2e", { recursive: true, force: true });
-  await mkdir("/tmp/homestacks-e2e/stacks", { recursive: true });
+  await rm("/tmp/homestead-e2e", { recursive: true, force: true });
+  await mkdir("/tmp/homestead-e2e/stacks", { recursive: true });
 });
 
 test("first run creates an admin, then signs in", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Welcome to Homestacks" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome to Homestead" })).toBeVisible();
 
   await page.getByPlaceholder("Name").fill("Admin");
   await page.getByPlaceholder("Email").fill("admin@example.com");
@@ -1843,7 +1843,7 @@ git commit -m "feat: add web shell with first-run setup, login, and protected ro
 - `pnpm vitest run` passes: config, secrets, settings, permissions, auth plugin, onboarding, guard, preflight.
 - `pnpm e2e` passes: first-run setup → login → dashboard, and setup closes afterwards.
 - `pnpm biome check .` is clean.
-- A fresh checkout with `HOMESTACKS_DATA` on a network mount refuses to start with a named check failure.
+- A fresh checkout with `HOMESTEAD_DATA` on a network mount refuses to start with a named check failure.
 - Eight concurrent calls to `POST /api/onboarding/admin` create exactly one user.
 
 ## Handoff to Plan 2

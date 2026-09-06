@@ -1,4 +1,4 @@
-# Homestacks — Design
+# Homestead — Design
 
 **Date:** 2026-09-05
 **Status:** Approved for implementation planning
@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-Homestacks manages self-hosted Docker containers on a home server. Everything is
+Homestead manages self-hosted Docker containers on a home server. Everything is
 organised around a **Project**, which maps to one Docker Compose file plus an
 optional `.env`. A project may publish any number of its ports through a single
 Cloudflare Tunnel. A dashboard presents the results as a grid of apps.
@@ -35,7 +35,7 @@ delivery, backup/restore, and compose version history beyond snapshots. See §16
 | Term | Meaning |
 |---|---|
 | **Project** | A directory containing `docker-compose.yml`, optionally `.env`. Identified by its **slug**. |
-| **Slug** | The project's directory name. Also the Compose project name for projects Homestacks creates. |
+| **Slug** | The project's directory name. Also the Compose project name for projects Homestead creates. |
 | **Compose project name** | What Docker calls the stack. Read from `docker compose config`, never computed. |
 | **Endpoint** | A published host port of a project. |
 | **Exposure** | A binding of a host port to a public hostname on the tunnel. |
@@ -69,7 +69,7 @@ Each module has one responsibility, a narrow interface, and is testable alone.
 | `docker/compose.ts` | **The only** code that shells out to `docker compose`. `up/down/restart/pull/ps/logs/config`. Owns host-path translation (§7.2). |
 | `docker/engine.ts` | Read-only Engine API: event stream, container inspect, stats, image digests. |
 | `projects/store.ts` | Disk CRUD: list, read, atomic write + snapshot, rename, delete. |
-| `projects/compose-model.ts` | Parse canonical config → services, published ports, `x-homestacks`, `homestacks.*` labels. Comment-preserving YAML edits. |
+| `projects/compose-model.ts` | Parse canonical config → services, published ports, `x-homestead`, `homestead.*` labels. Comment-preserving YAML edits. |
 | `tunnel/cloudflare.ts` | Typed Cloudflare API client. |
 | `tunnel/reconciler.ts` | Desired ingress → `PUT`, behind a mutex. Drift detection. |
 | `tunnel/runtime.ts` | Detect/adopt/deploy `cloudflared`. |
@@ -85,8 +85,8 @@ Each module has one responsibility, a narrow interface, and is testable alone.
 | State | Home | Rationale |
 |---|---|---|
 | Compose YAML, `.env` | Disk | Source of truth. Portable, git-able, editable over SSH. |
-| Project display name, description, icon, source | `x-homestacks:` in the compose file | Travels with the project. |
-| Per-app name, icon, port, path | `homestacks.*` service labels | Readable from the Engine API at runtime; enables discovery. |
+| Project display name, description, icon, source | `x-homestead:` in the compose file | Travels with the project. |
+| Per-app name, icon, port, path | `homestead.*` service labels | Readable from the Engine API at runtime; enables discovery. |
 | Users, sessions, roles, app grants | SQLite | References users; no natural file form. |
 | Cloudflare credentials, tunnel id/token, Access service tokens | SQLite, encrypted | Secrets must not sit in a copyable project directory. |
 | Exposures (host port → hostname) | SQLite | A hostname belongs to the Cloudflare account, not the project. |
@@ -96,22 +96,22 @@ Each module has one responsibility, a narrow interface, and is testable alone.
 ### 4.1 Directory layout
 
 ```
-$HOMESTACKS_DATA                  # default /var/lib/homestacks
-├── homestacks.db                 # SQLite (must be on a local filesystem)
-├── secret.key                    # 0600, generated if HOMESTACKS_SECRET_KEY unset
+$HOMESTEAD_DATA                  # default /var/lib/homestead
+├── homestead.db                 # SQLite (must be on a local filesystem)
+├── secret.key                    # 0600, generated if HOMESTEAD_SECRET_KEY unset
 ├── icons/                        # cached and uploaded icons
 └── run/                          # generated compose overrides (ephemeral)
 
-$HOMESTACKS_PROJECTS              # default /opt/stacks
+$HOMESTEAD_PROJECTS              # default /opt/stacks
 ├── jellyfin/
 │   ├── docker-compose.yml
 │   ├── .env
 │   └── .snapshots/               # pre-write copies, last N retained
-└── homestacks-tunnel/            # cloudflared, if Homestacks deployed it
+└── homestead-tunnel/            # cloudflared, if Homestead deployed it
 ```
 
-`$HOMESTACKS_DATA` must not be on a network filesystem — SQLite locking is
-unreliable over NFS/SMB. Homestacks detects this at startup and refuses to run.
+`$HOMESTEAD_DATA` must not be on a network filesystem — SQLite locking is
+unreliable over NFS/SMB. Homestead detects this at startup and refuses to run.
 
 ---
 
@@ -119,11 +119,11 @@ unreliable over NFS/SMB. Homestacks detects this at startup and refuses to run.
 
 ### 5.1 Identity
 
-The slug is the directory name. For projects Homestacks creates, it also writes
+The slug is the directory name. For projects Homestead creates, it also writes
 an explicit top-level `name:` equal to the slug, pinning the Compose project
 name.
 
-**Homestacks never computes the Compose project name.** It reads it from
+**Homestead never computes the Compose project name.** It reads it from
 `docker compose config --format json` → `.name`. This is not a stylistic
 preference: Compose derives the default name by normalising the directory name
 (`My_Stack.v2` → `my_stackv2`), and `COMPOSE_PROJECT_NAME` in `.env` overrides
@@ -138,7 +138,7 @@ extension field; app-level metadata uses service labels. Compose has no
 project-level `labels` key — it is rejected by the schema (§17.2).
 
 ```yaml
-x-homestacks:
+x-homestead:
   schemaVersion: 1
   displayName: Media Stack
   description: Jellyfin and friends
@@ -151,11 +151,11 @@ services:
     image: jellyfin/jellyfin
     ports: ["127.0.0.1:8096:8096"]
     labels:
-      homestacks.app.name: Jellyfin
-      homestacks.app.icon: jellyfin
-      homestacks.app.port: "8096"      # container port
-      homestacks.app.path: /web
-      homestacks.app.enabled: "true"
+      homestead.app.name: Jellyfin
+      homestead.app.icon: jellyfin
+      homestead.app.port: "8096"      # container port
+      homestead.app.path: /web
+      homestead.app.enabled: "true"
 ```
 
 Edits are made with `yaml`'s `parseDocument` so comments and formatting survive.
@@ -169,15 +169,15 @@ Three entry points, all landing in the same YAML editor:
 2. **Template catalog** — a built-in set of common self-hosted apps that prefill
    compose + `.env` and prompt for the few values that matter. Templates seed the
    editor; they are not a live abstraction.
-3. **Import / adopt** — paste, upload, or scan `$HOMESTACKS_PROJECTS`.
+3. **Import / adopt** — paste, upload, or scan `$HOMESTEAD_PROJECTS`.
 
 Adoption is **read-only until the user acts**. A scan lists what was found and
 writes nothing. Directories with no compose file are listed as "not a project"
 rather than hidden.
 
 The scan **ignores directories whose name begins with `.`**. This matters
-because a common deployment puts `$HOMESTACKS_DATA` inside the projects root
-(e.g. `/volume2/docker/.homestacks`), which would otherwise be scanned as a
+because a common deployment puts `$HOMESTEAD_DATA` inside the projects root
+(e.g. `/volume2/docker/.homestead`), which would otherwise be scanned as a
 candidate project.
 
 Generated compose files bind published ports to `127.0.0.1` by default when the
@@ -202,8 +202,8 @@ Rename is therefore an explicit migration:
 ### 5.5 Deletion
 
 Requires typing the slug. `down` without `-v`; volume removal is a separate,
-explicitly-checked option. Deleting a directory Homestacks did not create needs
-a second confirmation. `x-homestacks.system: true` projects cannot be deleted
+explicitly-checked option. Deleting a directory Homestead did not create needs
+a second confirmation. `x-homestead.system: true` projects cannot be deleted
 from the normal project UI.
 
 ---
@@ -257,7 +257,7 @@ The Engine API is used only for things it is genuinely better at: the event
 stream, container inspect, stats, and image digests.
 
 Ports and volumes are read from `docker compose config --format json`, which
-normalises every legal syntax to long form and resolves interpolation. Homestacks
+normalises every legal syntax to long form and resolves interpolation. Homestead
 does not parse compose syntax by hand.
 
 ### 7.2 Host-path translation
@@ -265,7 +265,7 @@ does not parse compose syntax by hand.
 Bind-mount sources are resolved **twice**: once by the compose CLI, in its own
 filesystem namespace, to produce an absolute path; and again by the Docker
 daemon, in the host namespace, when the container is created. The socket is an
-RPC channel and performs no path translation. Containers Homestacks launches are
+RPC channel and performs no path translation. Containers Homestead launches are
 siblings created by the host daemon, not children.
 
 If those two namespaces disagree about what a path means, the daemon mounts the
@@ -275,16 +275,16 @@ path. Verified in §17.3.
 Two configuration variables:
 
 ```
-HOMESTACKS_PROJECTS       # where Homestacks reads project files
-HOMESTACKS_PROJECTS_HOST  # what the daemon is told; defaults to the above
+HOMESTEAD_PROJECTS       # where Homestead reads project files
+HOMESTEAD_PROJECTS_HOST  # what the daemon is told; defaults to the above
 ```
 
 **When equal** (native install, or an identity-mapped container), nothing
 special happens.
 
-**When they differ**, before each compose invocation Homestacks derives the
-canonical config, rewrites relative bind sources to `$HOMESTACKS_PROJECTS_HOST/…`,
-writes `$HOMESTACKS_DATA/run/<slug>.override.yml`, and passes it as a second
+**When they differ**, before each compose invocation Homestead derives the
+canonical config, rewrites relative bind sources to `$HOMESTEAD_PROJECTS_HOST/…`,
+writes `$HOMESTEAD_DATA/run/<slug>.override.yml`, and passes it as a second
 `-f`. Named volumes and already-absolute binds pass through untouched.
 
 `--project-directory` is **not** used for this. It does redirect bind resolution,
@@ -297,7 +297,7 @@ Only relative bind mounts are affected by any of this. Absolute binds are alread
 host paths; named volumes involve no host path; build contexts, `env_file`, and
 `secrets: file:` are read client-side and streamed as content (§17.3).
 
-Because Homestacks-in-a-container cannot see arbitrary host paths, validation of
+Because Homestead-in-a-container cannot see arbitrary host paths, validation of
 absolute bind mounts in the editor is **advisory, not blocking**.
 
 ### 7.3 Operations
@@ -324,25 +324,25 @@ files, and the UI shows a per-port indicator distinguishing *LAN-reachable* from
 
 ### 8.1 Model
 
-One shared, remotely-managed tunnel per Homestacks instance, created through the
+One shared, remotely-managed tunnel per Homestead instance, created through the
 API with `config_src: "cloudflare"`. Ingress rules are pushed from Cloudflare, so
 adding a hostname requires no daemon restart.
 
 ### 8.2 Setup
 
 1. The user supplies an API token. Required scopes: Account →
-   *Cloudflare Tunnel: Edit*; Zone → *DNS: Edit* and *Zone: Read*. Homestacks
+   *Cloudflare Tunnel: Edit*; Zone → *DNS: Edit* and *Zone: Read*. Homestead
    verifies it and lists accounts for selection.
 2. `POST /accounts/{account_id}/cfd_tunnel` with `config_src: "cloudflare"`; then
    `GET …/cfd_tunnel/{id}/token` for the run token.
 3. **Runtime detection**: `cloudflared` on `PATH` → offer a systemd unit; an
    existing cloudflared container → adopt; neither → deploy one.
 
-A deployed `cloudflared` is itself a Homestacks project, in
-`$HOMESTACKS_PROJECTS/homestacks-tunnel/`, with `network_mode: host`, the token
-in its `.env`, and `x-homestacks.system: true`. It gets logs, restart, and image
+A deployed `cloudflared` is itself a Homestead project, in
+`$HOMESTEAD_PROJECTS/homestead-tunnel/`, with `network_mode: host`, the token
+in its `.env`, and `x-homestead.system: true`. It gets logs, restart, and image
 updates from the same machinery as everything else. It must live under
-`$HOMESTACKS_PROJECTS` because its compose path is passed to the daemon.
+`$HOMESTEAD_PROJECTS` because its compose path is passed to the daemon.
 
 ### 8.3 Zones
 
@@ -399,12 +399,12 @@ record.
 1. **Services in managed projects.** A tile is **inferred** for any service with
    a published port; labels only refine it. Adopting a directory of existing
    stacks therefore produces a populated grid immediately, with no annotation.
-   `homestacks.app.enabled: "false"` suppresses tiles for databases and sidecars.
+   `homestead.app.enabled: "false"` suppresses tiles for databases and sidecars.
    **One tile per service**, not per port: a service publishing several ports
-   uses `homestacks.app.port` if present, otherwise the lowest published port,
+   uses `homestead.app.port` if present, otherwise the lowest published port,
    and the remainder are listed on the project detail view.
-2. **Discovered containers** — any running container carrying `homestacks.*`
-   labels, including outside `$HOMESTACKS_PROJECTS`. Deduped against (1) by
+2. **Discovered containers** — any running container carrying `homestead.*`
+   labels, including outside `$HOMESTEAD_PROJECTS`. Deduped against (1) by
    container id; the managed record wins, since it also has lifecycle controls.
 3. **Manual apps** — SQLite rows with a name, URL, and icon. No container.
 
@@ -422,7 +422,7 @@ row stores no service name (§8.4).
 ### 9.3 Icons
 
 Resolved by slug against the dashboard-icons set, or an explicit URL, or an
-upload. Fetched icons are cached to `$HOMESTACKS_DATA/icons/` so a box with no
+upload. Fetched icons are cached to `$HOMESTEAD_DATA/icons/` so a box with no
 outbound internet still renders.
 
 ---
@@ -475,7 +475,7 @@ its status.
 | `403` → `*.cloudflareaccess.com` | Working; Access is doing its job |
 | `2xx` | Healthy end to end |
 
-1033 is a **global** failure. Homestacks polls
+1033 is a **global** failure. Homestead polls
 `GET /accounts/{id}/cfd_tunnel/{id}` (which returns `status` and a live
 `connections[]` array) and, when the tunnel is down, shows one banner instead of
 N red dots, suppressing public-reachability status. Local health keeps reporting,
@@ -562,20 +562,20 @@ host's. Multi-arch build (`linux/amd64`, `linux/arm64`) — many NAS boxes are
 
 ```yaml
 services:
-  homestacks:
-    image: homestacks:latest
+  homestead:
+    image: homestead:latest
     network_mode: host          # required: probes must reach 127.0.0.1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /volume2/docker:/volume2/docker     # identity-mapped here, so no
-      - /volume2/docker/.homestacks:/data   # translation is needed. To mount
+      - /volume2/docker/.homestead:/data   # translation is needed. To mount
                                             # elsewhere, set …_PROJECTS to the
                                             # container path and …_PROJECTS_HOST
                                             # to /volume2/docker.
     environment:
-      HOMESTACKS_DATA: /data
-      HOMESTACKS_PROJECTS: /volume2/docker
-      HOMESTACKS_PROJECTS_HOST: /volume2/docker
+      HOMESTEAD_DATA: /data
+      HOMESTEAD_PROJECTS: /volume2/docker
+      HOMESTEAD_PROJECTS_HOST: /volume2/docker
 ```
 
 `network_mode: host` is not optional: a bridged container's `127.0.0.1` is its
@@ -583,19 +583,19 @@ own loopback, so every local probe would fail.
 
 ### 12.2 Native
 
-systemd unit with `EnvironmentFile=/etc/homestacks.env`, running as a
-`homestacks` user in the `docker` group. No path translation, no parity check.
+systemd unit with `EnvironmentFile=/etc/homestead.env`, running as a
+`homestead` user in the `docker` group. No path translation, no parity check.
 The installer **asserts Compose v2** and fails loudly if it finds only v1's
 `docker-compose` binary.
 
 ### 12.3 Startup preflight
 
 - Docker socket reachable; Compose v2 present.
-- `$HOMESTACKS_DATA` writable and not on a network filesystem.
-- `$HOMESTACKS_PROJECTS` readable.
+- `$HOMESTEAD_DATA` writable and not on a network filesystem.
+- `$HOMESTEAD_PROJECTS` readable.
 - **Path translation check** (containerised only): write a nonce marker into
-  `$HOMESTACKS_PROJECTS`, ask the daemon to bind-mount
-  `$HOMESTACKS_PROJECTS_HOST` into a throwaway container using the Homestacks
+  `$HOMESTEAD_PROJECTS`, ask the daemon to bind-mount
+  `$HOMESTEAD_PROJECTS_HOST` into a throwaway container using the Homestead
   image, and confirm the marker is visible. Fail with a specific message rather
   than proceeding.
 - Listen port free.
@@ -604,10 +604,10 @@ The installer **asserts Compose v2** and fails loudly if it finds only v1's
 
 | Variable | Default | Notes |
 |---|---|---|
-| `HOMESTACKS_DATA` | `/var/lib/homestacks` | Local filesystem required |
-| `HOMESTACKS_PROJECTS` | `/opt/stacks` | Where Homestacks reads files |
-| `HOMESTACKS_PROJECTS_HOST` | = `HOMESTACKS_PROJECTS` | What the daemon is told |
-| `HOMESTACKS_SECRET_KEY` | generated to `$HOMESTACKS_DATA/secret.key`, `0600` | Encrypts all stored secrets |
+| `HOMESTEAD_DATA` | `/var/lib/homestead` | Local filesystem required |
+| `HOMESTEAD_PROJECTS` | `/opt/stacks` | Where Homestead reads files |
+| `HOMESTEAD_PROJECTS_HOST` | = `HOMESTEAD_PROJECTS` | What the daemon is told |
+| `HOMESTEAD_SECRET_KEY` | generated to `$HOMESTEAD_DATA/secret.key`, `0600` | Encrypts all stored secrets |
 | `PORT` | configurable | Preflight checks it is free |
 
 ---
@@ -617,7 +617,7 @@ The installer **asserts Compose v2** and fails loudly if it finds only v1's
 Better-Auth owns `user`, `session`, `account`, `verification`, plus the admin
 plugin's `role`, `banned`, `banReason`, `banExpires`, and `session.impersonatedBy`.
 
-Homestacks adds:
+Homestead adds:
 
 ```
 settings(key, value)                       -- onboarding_completed, instance_name, theme
@@ -689,7 +689,7 @@ CRUD   /api/users                                                   [admin]
 
 **Pure unit tests**, where the logic lives:
 `compose-model` (port and volume extraction from canonical config,
-`x-homestacks` parsing, comment-preserving label edits, host-path rewriting),
+`x-homestead` parsing, comment-preserving label edits, host-path rewriting),
 the **reconciler** (ingress construction, catch-all last, drift detection,
 adopt-vs-overwrite), the **status resolver** (fixture signals → tier), slug
 validation, and rename planning.
@@ -749,7 +749,7 @@ brings up a duplicate stack beside a running one.
 ### 17.2 Compose has no project-level labels; `x-` survives
 
 Top-level `labels:` → `additional properties 'labels' not allowed`.
-Top-level `x-homestacks:` is echoed back by `docker compose config` unchanged.
+Top-level `x-homestead:` is echoed back by `docker compose config` unchanged.
 `docker compose config` also normalises ports to
 `{target, published, protocol}`.
 

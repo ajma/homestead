@@ -44,7 +44,7 @@ export function dockerChecks(run: Runner = runDocker): Check[] {
         if (!Number.isFinite(major) || major < 2) {
           return {
             ok: false,
-            detail: `found "${version}", Homestacks requires Compose v2 or newer`,
+            detail: `found "${version}", Homestead requires Compose v2 or newer`,
           };
         }
         return { ok: true, detail: `Compose ${version}` };

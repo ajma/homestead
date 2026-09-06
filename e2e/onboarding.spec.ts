@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("first run creates an admin, then signs in", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Welcome to Homestacks" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Welcome to Homestead" })).toBeVisible();
 
   await page.getByPlaceholder("Name").fill("Admin");
   await page.getByPlaceholder("Email").fill("admin@example.com");

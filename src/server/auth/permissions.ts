@@ -1,10 +1,10 @@
-import { homestacksStatement } from "@shared/permissions.js";
+import { homesteadStatement } from "@shared/permissions.js";
 import { createAccessControl } from "better-auth/plugins/access";
 import { adminAc, defaultStatements } from "better-auth/plugins/admin/access";
 
 export const statement = {
   ...defaultStatements,
-  ...homestacksStatement,
+  ...homesteadStatement,
 } as const;
 
 export const ac = createAccessControl(statement);

@@ -14,15 +14,15 @@ const MOUNTS = [
 
 describe("isNetworkFilesystem", () => {
   it("flags an NFS mount", () => {
-    expect(isNetworkFilesystem("/mnt/nas/homestacks", MOUNTS)).toBe(true);
+    expect(isNetworkFilesystem("/mnt/nas/homestead", MOUNTS)).toBe(true);
   });
 
   it("flags a CIFS mount", () => {
-    expect(isNetworkFilesystem("/mnt/smb/homestacks", MOUNTS)).toBe(true);
+    expect(isNetworkFilesystem("/mnt/smb/homestead", MOUNTS)).toBe(true);
   });
 
   it("accepts local btrfs", () => {
-    expect(isNetworkFilesystem("/volume2/docker/.homestacks", MOUNTS)).toBe(
+    expect(isNetworkFilesystem("/volume2/docker/.homestead", MOUNTS)).toBe(
       false,
     );
   });
@@ -38,7 +38,7 @@ describe("isNetworkFilesystem", () => {
       "nas:/export /mnt/nas\\040share nfs4 rw 0 0",
     ].join("\n");
     expect(
-      isNetworkFilesystem("/mnt/nas share/homestacks", mountsWithEscapes),
+      isNetworkFilesystem("/mnt/nas share/homestead", mountsWithEscapes),
     ).toBe(true);
   });
 });
@@ -47,8 +47,8 @@ describe("runChecks", () => {
   it("reports a writable data dir as ok", async () => {
     const dir = await tempDir("hs-pre-");
     const config = loadConfig({
-      HOMESTACKS_DATA: dir,
-      HOMESTACKS_PROJECTS: dir,
+      HOMESTEAD_DATA: dir,
+      HOMESTEAD_PROJECTS: dir,
     });
     const results = await runChecks(dataDirChecks(config));
     expect(results.find((r) => r.id === "data_dir_writable")?.ok).toBe(true);
@@ -62,8 +62,8 @@ describe("runChecks", () => {
     await chmod(dir, 0o500);
     try {
       const config = loadConfig({
-        HOMESTACKS_DATA: dir,
-        HOMESTACKS_PROJECTS: "/tmp",
+        HOMESTEAD_DATA: dir,
+        HOMESTEAD_PROJECTS: "/tmp",
       });
       const results = await runChecks(dataDirChecks(config));
       const check = results.find((r) => r.id === "data_dir_writable");
@@ -79,10 +79,10 @@ describe("runChecks", () => {
   // now part of the check, and both flavours of failure report identically.
   it("creates a missing data dir rather than failing the check", async () => {
     const parent = await tempDir("hs-pre-");
-    const dir = join(parent, "nested", "homestacks");
+    const dir = join(parent, "nested", "homestead");
     const config = loadConfig({
-      HOMESTACKS_DATA: dir,
-      HOMESTACKS_PROJECTS: parent,
+      HOMESTEAD_DATA: dir,
+      HOMESTEAD_PROJECTS: parent,
     });
     const results = await runChecks(dataDirChecks(config));
     expect(results.find((r) => r.id === "data_dir_writable")?.ok).toBe(true);
@@ -94,8 +94,8 @@ describe("runChecks", () => {
     await chmod(parent, 0o500);
     try {
       const config = loadConfig({
-        HOMESTACKS_DATA: join(parent, "homestacks"),
-        HOMESTACKS_PROJECTS: parent,
+        HOMESTEAD_DATA: join(parent, "homestead"),
+        HOMESTEAD_PROJECTS: parent,
       });
       const results = await runChecks(dataDirChecks(config));
       const check = results.find((r) => r.id === "data_dir_writable");

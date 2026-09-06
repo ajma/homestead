@@ -4,5 +4,5 @@ export default defineConfig({
   schema: "./src/server/db/schema.ts",
   out: "./drizzle",
   dialect: "sqlite",
-  dbCredentials: { url: "file:./.dev/homestacks.db" },
+  dbCredentials: { url: "file:./.dev/homestead.db" },
 });

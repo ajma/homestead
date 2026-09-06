@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   }
 
   const key = await ensureSecretKey(config.dataDir, config.secretKey);
-  const db = createDb(`${config.dataDir}/homestacks.db`);
+  const db = createDb(`${config.dataDir}/homestead.db`);
   await runMigrations(db);
   const auth = createAuth(db, {
     secret: key.toString("hex"),

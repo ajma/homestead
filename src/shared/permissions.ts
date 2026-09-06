@@ -1,4 +1,4 @@
-export const homestacksStatement = {
+export const homesteadStatement = {
   project: ["read", "create", "update", "delete", "control"],
   compose: ["read", "write"],
   tunnel: ["read", "create", "delete"],

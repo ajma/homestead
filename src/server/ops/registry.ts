@@ -125,7 +125,7 @@ export function createRegistry(db: Db) {
           });
         } catch (err) {
           console.error(
-            `homestacks: failed to record operation ${op.id} (${kind} ${slug}):`,
+            `homestead: failed to record operation ${op.id} (${kind} ${slug}):`,
             err,
           );
         } finally {

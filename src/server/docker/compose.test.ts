@@ -16,7 +16,7 @@ import type { Runner } from "./run.js";
 const CTX = {
   projectsDir: "/data/stacks",
   projectsHostDir: "/data/stacks",
-  dataDir: "/var/lib/homestacks",
+  dataDir: "/var/lib/homestead",
   slug: "media",
 };
 
@@ -35,7 +35,7 @@ describe("composeArgs", () => {
     const args = composeArgs(
       CTX,
       "docker-compose.yml",
-      "/var/lib/homestacks/run/media.override.yml",
+      "/var/lib/homestead/run/media.override.yml",
       ["up", "-d"],
     );
     expect(args.slice(0, 5)).toEqual([
@@ -43,7 +43,7 @@ describe("composeArgs", () => {
       "-f",
       "/data/stacks/media/docker-compose.yml",
       "-f",
-      "/var/lib/homestacks/run/media.override.yml",
+      "/var/lib/homestead/run/media.override.yml",
     ]);
   });
 

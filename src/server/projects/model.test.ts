@@ -8,10 +8,10 @@ const CANONICAL = {
     jellyfin: {
       image: "jellyfin/jellyfin",
       labels: {
-        "homestacks.app.name": "Jellyfin",
-        "homestacks.app.icon": "jellyfin",
-        "homestacks.app.port": "8096",
-        "homestacks.app.path": "/web",
+        "homestead.app.name": "Jellyfin",
+        "homestead.app.icon": "jellyfin",
+        "homestead.app.port": "8096",
+        "homestead.app.path": "/web",
       },
       ports: [
         {
@@ -26,12 +26,12 @@ const CANONICAL = {
     },
     db: {
       image: "postgres:17",
-      labels: { "homestacks.app.enabled": "false" },
+      labels: { "homestead.app.enabled": "false" },
       ports: [],
     },
     worker: { image: "busybox" },
   },
-  "x-homestacks": {
+  "x-homestead": {
     schemaVersion: 1,
     displayName: "Media Stack",
     icon: "jellyfin",
@@ -106,7 +106,7 @@ describe("parseCanonical", () => {
     expect(parseCanonical(json).services[0]?.app?.name).toBe("grafana");
   });
 
-  it("reads x-homestacks project metadata", () => {
+  it("reads x-homestead project metadata", () => {
     expect(parseCanonical(CANONICAL).meta).toEqual({
       schemaVersion: 1,
       displayName: "Media Stack",
@@ -115,7 +115,7 @@ describe("parseCanonical", () => {
     });
   });
 
-  it("supplies defaults when x-homestacks is absent", () => {
+  it("supplies defaults when x-homestead is absent", () => {
     const meta = parseCanonical({ name: "p", services: {} }).meta;
     expect(meta).toEqual({ schemaVersion: 1, system: false });
   });

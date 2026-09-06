@@ -20,7 +20,7 @@ export function App() {
           Server Unreachable
         </h1>
         <p className="mt-2 text-slate-600">
-          Cannot connect to the Homestacks server. Check that the server is
+          Cannot connect to the Homestead server. Check that the server is
           running and try refreshing the page.
         </p>
       </div>

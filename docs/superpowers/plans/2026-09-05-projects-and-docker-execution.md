@@ -1,14 +1,14 @@
-# Homestacks Plan 2 — Projects & Docker Execution (server)
+# Homestead Plan 2 — Projects & Docker Execution (server)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A server-side API that discovers, adopts, edits, and runs Docker Compose projects that already exist on disk, with long-running lifecycle operations streamed to the client. Creating a project from blank/template/import is explicitly *not* in scope — see "Not in this plan".
 
-**Architecture:** Everything talks to Docker through the `docker compose` CLI — the Engine API is not used in this plan (see Global Constraints). Project files on disk are the source of truth; SQLite stores only operation history. Compose's own `config --format json` output is the parsing substrate, so Homestacks never interprets compose syntax by hand. Long-running commands become tracked *operations* with an SSE output stream and a per-project mutex.
+**Architecture:** Everything talks to Docker through the `docker compose` CLI — the Engine API is not used in this plan (see Global Constraints). Project files on disk are the source of truth; SQLite stores only operation history. Compose's own `config --format json` output is the parsing substrate, so Homestead never interprets compose syntax by hand. Long-running commands become tracked *operations* with an SSE output stream and a per-project mutex.
 
 **Tech Stack:** TypeScript (ESM, strict), Fastify 5, Drizzle + `@libsql/client`, the `yaml` package's Document API, `node:child_process`, Vitest. No new runtime dependencies beyond `yaml`.
 
-**Spec:** `docs/superpowers/specs/2026-09-05-homestacks-design.md` — §5 (project model), §7 (Docker execution), §17.1–§17.4 (verified behaviours this plan depends on).
+**Spec:** `docs/superpowers/specs/2026-09-05-homestead-design.md` — §5 (project model), §7 (Docker execution), §17.1–§17.4 (verified behaviours this plan depends on).
 
 **Predecessor:** Plan 1 (`docs/superpowers/plans/2026-09-05-foundation-and-access-control.md`), merged at `aee26d3`.
 
@@ -29,11 +29,11 @@
 
 ## Deferred from Plan 1 — do not fix here
 
-Recorded so nobody re-discovers them: module-relative migration paths, tsup config / static SPA serving / build script, squashing migrations, an admin-recovery CLI, sign-out UI, a catch-all web route, error-body naming unification, Biome coverage of `e2e/`, Windows shell portability, and `HOMESTACKS_BASE_URL` documentation. All belong to Plan 5.
+Recorded so nobody re-discovers them: module-relative migration paths, tsup config / static SPA serving / build script, squashing migrations, an admin-recovery CLI, sign-out UI, a catch-all web route, error-body naming unification, Biome coverage of `e2e/`, Windows shell portability, and `HOMESTEAD_BASE_URL` documentation. All belong to Plan 5.
 
 Two carry an **action for a later plan**, not this one: Plan 3 must trust `cf-connecting-ip` so rate limiting stops using one shared bucket; Plan 5 must add `it.skipIf(process.getuid?.() === 0)` to the two `chmod`-based preflight tests in the same task that introduces the Dockerfile.
 
-**The `projects_path_parity` preflight check is deferred to Plan 5**, not forgotten. Verifying that `HOMESTACKS_PROJECTS_HOST` resolves to the same directory the daemon sees requires bind-mounting it into a throwaway container using the Homestacks image, which Plan 5 creates. Until then, translation correctness is covered by the pure unit tests in Task 6.
+**The `projects_path_parity` preflight check is deferred to Plan 5**, not forgotten. Verifying that `HOMESTEAD_PROJECTS_HOST` resolves to the same directory the daemon sees requires bind-mounting it into a throwaway container using the Homestead image, which Plan 5 creates. Until then, translation correctness is covered by the pure unit tests in Task 6.
 
 ---
 
@@ -45,7 +45,7 @@ Two carry an **action for a later plan**, not this one: Plan 3 must trust `cf-co
 | `src/server/docker/run.ts` | The single place that spawns `docker`. Buffered and streaming variants. |
 | `src/server/docker/translate.ts` | Pure: canonical config → host-path override YAML. |
 | `src/server/docker/compose.ts` | Compose verbs: `config`, `ps`, `up`, `down`, `restart`, `pull`, `logs`. |
-| `src/server/projects/model.ts` | Pure: canonical JSON → `ProjectModel` (services, ports, labels, `x-homestacks`). |
+| `src/server/projects/model.ts` | Pure: canonical JSON → `ProjectModel` (services, ports, labels, `x-homestead`). |
 | `src/server/projects/doc.ts` | Pure: comment-preserving YAML edits via `yaml`'s Document API. |
 | `src/server/projects/store.ts` | Disk: scan, read, atomic write + snapshot, create, delete, rename. |
 | `src/server/ops/registry.ts` | Operation lifecycle, SSE fan-out, per-project mutex, history persistence. |
@@ -187,7 +187,7 @@ export function dockerChecks(run: Runner = runDocker): Check[] {
         const version = stdout.trim();
         const major = Number.parseInt(version.replace(/^v/, "").split(".")[0] ?? "", 10);
         if (!Number.isFinite(major) || major < 2) {
-          return { ok: false, detail: `found "${version}", Homestacks requires Compose v2 or newer` };
+          return { ok: false, detail: `found "${version}", Homestead requires Compose v2 or newer` };
         }
         return { ok: true, detail: `Compose ${version}` };
       },
@@ -239,7 +239,7 @@ git commit -m "feat: add Docker and Compose preflight checks"
   - `type ProjectModel = { projectName: string; services: ServiceModel[]; meta: ProjectMeta }`
 - From `src/server/projects/model.ts`: `parseCanonical(json: unknown): ProjectModel`
 
-**Why this is pure:** `docker compose config --format json` normalises every legal port and volume syntax to long form and resolves `.env` interpolation (spec §17.2). Parsing its output means Homestacks never reimplements the Compose spec.
+**Why this is pure:** `docker compose config --format json` normalises every legal port and volume syntax to long form and resolves `.env` interpolation (spec §17.2). Parsing its output means Homestead never reimplements the Compose spec.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -256,10 +256,10 @@ const CANONICAL = {
     jellyfin: {
       image: "jellyfin/jellyfin",
       labels: {
-        "homestacks.app.name": "Jellyfin",
-        "homestacks.app.icon": "jellyfin",
-        "homestacks.app.port": "8096",
-        "homestacks.app.path": "/web",
+        "homestead.app.name": "Jellyfin",
+        "homestead.app.icon": "jellyfin",
+        "homestead.app.port": "8096",
+        "homestead.app.path": "/web",
       },
       ports: [
         { mode: "ingress", target: 8096, published: "8096", protocol: "tcp", host_ip: "127.0.0.1" },
@@ -268,12 +268,12 @@ const CANONICAL = {
     },
     db: {
       image: "postgres:17",
-      labels: { "homestacks.app.enabled": "false" },
+      labels: { "homestead.app.enabled": "false" },
       ports: [],
     },
     worker: { image: "busybox" },
   },
-  "x-homestacks": { schemaVersion: 1, displayName: "Media Stack", icon: "jellyfin" },
+  "x-homestead": { schemaVersion: 1, displayName: "Media Stack", icon: "jellyfin" },
 };
 
 describe("parseCanonical", () => {
@@ -313,13 +313,13 @@ describe("parseCanonical", () => {
     expect(parseCanonical(json).services[0]?.app?.name).toBe("grafana");
   });
 
-  it("reads x-homestacks project metadata", () => {
+  it("reads x-homestead project metadata", () => {
     expect(parseCanonical(CANONICAL).meta).toEqual({
       schemaVersion: 1, displayName: "Media Stack", icon: "jellyfin", system: false,
     });
   });
 
-  it("supplies defaults when x-homestacks is absent", () => {
+  it("supplies defaults when x-homestead is absent", () => {
     const meta = parseCanonical({ name: "p", services: {} }).meta;
     expect(meta).toEqual({ schemaVersion: 1, system: false });
   });
@@ -414,15 +414,15 @@ function parsePorts(raw: unknown): PublishedPort[] {
 }
 
 function parseApp(name: string, labels: Record<string, string>, ports: PublishedPort[]): AppMeta | null {
-  if (labels["homestacks.app.enabled"] === "false") return null;
+  if (labels["homestead.app.enabled"] === "false") return null;
   if (ports.length === 0) return null;
-  const labelled = Number.parseInt(labels["homestacks.app.port"] ?? "", 10);
+  const labelled = Number.parseInt(labels["homestead.app.port"] ?? "", 10);
   const port = Number.isFinite(labelled)
     ? labelled
     : ports.reduce((lowest, p) => (p.containerPort < lowest ? p.containerPort : lowest), ports[0]!.containerPort);
-  const app: AppMeta = { name: labels["homestacks.app.name"] ?? name, port, enabled: true };
-  if (labels["homestacks.app.icon"]) app.icon = labels["homestacks.app.icon"];
-  if (labels["homestacks.app.path"]) app.path = labels["homestacks.app.path"];
+  const app: AppMeta = { name: labels["homestead.app.name"] ?? name, port, enabled: true };
+  if (labels["homestead.app.icon"]) app.icon = labels["homestead.app.icon"];
+  if (labels["homestead.app.path"]) app.path = labels["homestead.app.path"];
   return app;
 }
 
@@ -452,7 +452,7 @@ export function parseCanonical(json: unknown): ProjectModel {
     if (typeof svc.image === "string") model.image = svc.image;
     return model;
   });
-  return { projectName: root.name, services, meta: parseMeta(root["x-homestacks"]) };
+  return { projectName: root.name, services, meta: parseMeta(root["x-homestead"]) };
 }
 ```
 
@@ -486,7 +486,7 @@ git commit -m "feat: parse canonical compose config into a project model"
   - `setProjectName(doc: ComposeDoc, name: string): void`
   - `composeDocToText(doc: ComposeDoc): string`
 
-**Why the Document API:** the user hand-edits these files, and Homestacks writes them too. Round-tripping through `JSON.parse`/`stringify` would silently delete every comment. `yaml`'s `parseDocument` preserves them.
+**Why the Document API:** the user hand-edits these files, and Homestead writes them too. Round-tripping through `JSON.parse`/`stringify` would silently delete every comment. `yaml`'s `parseDocument` preserves them.
 
 - [ ] **Step 1: Install the dependency**
 
@@ -526,27 +526,27 @@ describe("compose document editing", () => {
     expect(out).toContain("displayName: Media Stack");
   });
 
-  it("creates x-homestacks when absent and updates it when present", () => {
+  it("creates x-homestead when absent and updates it when present", () => {
     const doc = parseComposeDoc(SRC);
     setProjectMeta(doc, { displayName: "First" });
     setProjectMeta(doc, { displayName: "Second", icon: "jellyfin" });
     const out = composeDocToText(doc);
     expect(out).toContain("displayName: Second");
     expect(out).toContain("icon: jellyfin");
-    expect(out.match(/x-homestacks:/g)).toHaveLength(1);
+    expect(out.match(/x-homestead:/g)).toHaveLength(1);
   });
 
   it("adds a label to a service that has none", () => {
     const doc = parseComposeDoc(SRC);
-    setServiceLabel(doc, "jellyfin", "homestacks.app.name", "Jellyfin");
-    expect(composeDocToText(doc)).toContain("homestacks.app.name: Jellyfin");
+    setServiceLabel(doc, "jellyfin", "homestead.app.name", "Jellyfin");
+    expect(composeDocToText(doc)).toContain("homestead.app.name: Jellyfin");
   });
 
   it("removes a label when the value is null", () => {
     const doc = parseComposeDoc(SRC);
-    setServiceLabel(doc, "jellyfin", "homestacks.app.icon", "jellyfin");
-    setServiceLabel(doc, "jellyfin", "homestacks.app.icon", null);
-    expect(composeDocToText(doc)).not.toContain("homestacks.app.icon");
+    setServiceLabel(doc, "jellyfin", "homestead.app.icon", "jellyfin");
+    setServiceLabel(doc, "jellyfin", "homestead.app.icon", null);
+    expect(composeDocToText(doc)).not.toContain("homestead.app.icon");
   });
 
   it("throws when the service does not exist rather than creating one", () => {
@@ -600,7 +600,7 @@ export function setProjectName(doc: ComposeDoc, name: string): void {
 export function setProjectMeta(doc: ComposeDoc, patch: Partial<ProjectMeta>): void {
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    doc.setIn(["x-homestacks", key], value);
+    doc.setIn(["x-homestead", key], value);
   }
 }
 
@@ -655,7 +655,7 @@ git commit -m "feat: add comment-preserving compose document editing"
   - `projectPath(projectsDir: string, slug: string): string` — throws on a slug that escapes the root.
   - `findComposeFile(dir: string): Promise<string | null>` — **must be exported**, because Tasks 5 and 7 both need it. Exporting it here rather than having a later task reach back and change this file is deliberate: in Plan 1 a task quietly edited an earlier task's reviewed file and reintroduced a security hole.
 
-**Two rules the spec pins down (§5.3):** the scan **ignores directories whose name begins with `.`**, because a common deployment puts `$HOMESTACKS_DATA` inside the projects root. And directories with no compose file are **listed as "not a project"** rather than hidden, so nothing silently disappears.
+**Two rules the spec pins down (§5.3):** the scan **ignores directories whose name begins with `.`**, because a common deployment puts `$HOMESTEAD_DATA` inside the projects root. And directories with no compose file are **listed as "not a project"** rather than hidden, so nothing silently disappears.
 
 Compose accepts several filenames. Recognise `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, in Compose's own precedence order.
 
@@ -680,8 +680,8 @@ beforeEach(async () => {
   await mkdir(join(root, "paperless"), { recursive: true });
   await writeFile(join(root, "paperless", "compose.yaml"), "services: {}\n");
   await mkdir(join(root, "notes"), { recursive: true });          // no compose file
-  await mkdir(join(root, ".homestacks"), { recursive: true });     // data dir living inside
-  await writeFile(join(root, ".homestacks", "compose.yaml"), "services: {}\n");
+  await mkdir(join(root, ".homestead"), { recursive: true });     // data dir living inside
+  await writeFile(join(root, ".homestead", "compose.yaml"), "services: {}\n");
   await writeFile(join(root, "loose-file.txt"), "x");
 });
 
@@ -704,7 +704,7 @@ describe("scanProjects", () => {
 
   it("ignores dot-directories so a nested data dir is not adopted", async () => {
     const entries = await scanProjects(root);
-    expect(entries.map((e) => e.slug)).not.toContain(".homestacks");
+    expect(entries.map((e) => e.slug)).not.toContain(".homestead");
   });
 
   it("ignores plain files at the root", async () => {
@@ -1006,7 +1006,7 @@ git commit -m "feat: write project files atomically with snapshots"
 - Consumes: nothing (pure).
 - Produces: `buildOverride(canonical: unknown, opts: { projectsDir: string; projectsHostDir: string; slug: string }): string | null`
 
-**Read spec §7.2 and §17.3–§17.4 before writing this.** The short version: a bind-mount source is a string that crosses from Homestacks' filesystem namespace into the Docker daemon's, untranslated. When Homestacks runs in a container whose projects mount is at a different path than the host's, the daemon resolves the path in *host* space and mounts the wrong directory — or silently creates an empty root-owned one. There is no error.
+**Read spec §7.2 and §17.3–§17.4 before writing this.** The short version: a bind-mount source is a string that crosses from Homestead' filesystem namespace into the Docker daemon's, untranslated. When Homestead runs in a container whose projects mount is at a different path than the host's, the daemon resolves the path in *host* space and mounts the wrong directory — or silently creates an empty root-owned one. There is no error.
 
 `docker compose config` has already absolutised relative binds to `${projectsDir}/${slug}/...`, so translation is a **prefix swap** on exactly those sources. Everything else passes through: absolute binds outside the projects root are already host paths, named volumes involve no host path, and build contexts / `env_file` / `secrets: file:` are read client-side and streamed as content.
 
@@ -1205,7 +1205,7 @@ import { composeArgs } from "./compose.js";
 const CTX = {
   projectsDir: "/data/stacks",
   projectsHostDir: "/data/stacks",
-  dataDir: "/var/lib/homestacks",
+  dataDir: "/var/lib/homestead",
   slug: "media",
 };
 
@@ -1218,12 +1218,12 @@ describe("composeArgs", () => {
 
   it("appends the override as a second -f, after the base file", () => {
     const args = composeArgs(
-      CTX, "docker-compose.yml", "/var/lib/homestacks/run/media.override.yml", ["up", "-d"],
+      CTX, "docker-compose.yml", "/var/lib/homestead/run/media.override.yml", ["up", "-d"],
     );
     expect(args.slice(0, 5)).toEqual([
       "compose",
       "-f", "/data/stacks/media/docker-compose.yml",
-      "-f", "/var/lib/homestacks/run/media.override.yml",
+      "-f", "/var/lib/homestead/run/media.override.yml",
     ]);
   });
 
@@ -1382,8 +1382,8 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { composeConfig, composeExec, composePs, type ComposeContext } from "./compose.js";
 
-// Real Docker. Opt in with HOMESTACKS_DOCKER_TESTS=1.
-const enabled = process.env.HOMESTACKS_DOCKER_TESTS === "1";
+// Real Docker. Opt in with HOMESTEAD_DOCKER_TESTS=1.
+const enabled = process.env.HOMESTEAD_DOCKER_TESTS === "1";
 const d = enabled ? describe : describe.skip;
 
 let root: string;
@@ -1441,12 +1441,12 @@ d("compose against real Docker", () => {
 - [ ] **Step 6: Run the integration test against real Docker**
 
 ```bash
-HOMESTACKS_DOCKER_TESTS=1 pnpm vitest run src/server/docker/compose.integration.test.ts
+HOMESTEAD_DOCKER_TESTS=1 pnpm vitest run src/server/docker/compose.integration.test.ts
 ```
 
 Expected: PASS (5 tests). Then confirm it is skipped by default: `pnpm test` should report them as skipped, not failed.
 
-Add the opt-in command to `package.json` as `"test:docker": "HOMESTACKS_DOCKER_TESTS=1 vitest run"`.
+Add the opt-in command to `package.json` as `"test:docker": "HOMESTEAD_DOCKER_TESTS=1 vitest run"`.
 
 - [ ] **Step 7: Verify and commit**
 
@@ -2388,7 +2388,7 @@ git commit -m "feat: add lifecycle routes with SSE operation and log streaming"
 ## Definition of Done
 
 - `pnpm typecheck`, `pnpm test`, `pnpm lint`, `pnpm e2e` all clean.
-- `HOMESTACKS_DOCKER_TESTS=1 pnpm test:docker` passes against real Docker; those tests are skipped, not failed, in the default run.
+- `HOMESTEAD_DOCKER_TESTS=1 pnpm test:docker` passes against real Docker; those tests are skipped, not failed, in the default run.
 - A viewer receives 403 on compose read, compose write, lifecycle verbs, and logs. An anonymous request receives 401.
 - Two concurrent lifecycle requests for one project produce one 202 and one 409.
 - Editing a compose file leaves a snapshot and no temp file.

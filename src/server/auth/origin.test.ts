@@ -7,7 +7,7 @@ import { type Auth, createAuth } from "./index.js";
 // C1: Better-Auth validates the browser's Origin header against baseURL plus
 // trustedOrigins. When baseURL was hardcoded to http://localhost:${port}, every
 // sign-in from a real deployment address was answered with 403 INVALID_ORIGIN,
-// which is why baseURL is now configuration (HOMESTACKS_BASE_URL).
+// which is why baseURL is now configuration (HOMESTEAD_BASE_URL).
 const LAN_ORIGIN = "http://192.168.1.50:7420";
 const CREDENTIALS = {
   email: "admin@example.com",
