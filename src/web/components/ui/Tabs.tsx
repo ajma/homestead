@@ -77,7 +77,7 @@ export function Tabs({ items, activeId }: TabsProps) {
               ${
                 isActive
                   ? "border-accent text-accent"
-                  : "border-transparent text-text-muted hover:text-text hover:border-border"
+                  : "border-transparent text-muted hover:text-text hover:border-border"
               }
             `}
           >

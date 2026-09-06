@@ -34,7 +34,7 @@ export function SegmentedControl({
               ${
                 isChecked
                   ? "bg-surface text-text shadow-sm"
-                  : "text-text-muted hover:text-text"
+                  : "text-muted hover:text-text"
               }
             `}
           >
