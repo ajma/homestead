@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Page } from "@playwright/test";
 import { expect, test } from "./support/fixtures.js";
+import {
+  expectNoHorizontalScroll,
+  expectTappable,
+  PHONE,
+  sweepTapTargets,
+} from "./support/tap-targets.js";
 
 /** Matches HOMESTEAD_PROJECTS in playwright.config.ts. */
 const PROJECTS_ROOT = "/tmp/homestead-e2e/stacks";
-const PHONE = { width: 390, height: 844 };
-const TOUCH_MIN = 44;
 
 /**
  * Every worker shares one projects root, one database and one Docker daemon,
@@ -224,66 +227,6 @@ test("a 409 from another tab is reported, not swallowed", async ({ page }) => {
  */
 const MIN_CONTROLS = 8;
 
-/**
- * A thumb needs 44px in both directions: a control 44px tall and 8px wide is
- * as hard to hit as one 8px tall.
- */
-type Sweep = { offenders: string[]; measured: number };
-
-/**
- * Every visible control, not a hand-written list.
- *
- * The previous version measured only the four lifecycle buttons, and so said
- * nothing about the operation panel's Dismiss — which shipped at 36px and
- * renders at 390px. A sweep cannot forget a control that was added later.
- *
- * It reports how many it measured, because a selector that quietly stops
- * matching turns the whole mobile safety net into a green no-op. An empty
- * sweep must fail loudly, not pass.
- */
-async function sweepTapTargets(page: Page): Promise<Sweep> {
-  const controls = page.locator(
-    'button:visible, a[href]:visible, input:visible, [role="button"]:visible, [role="tab"]:visible',
-  );
-  const measured = await controls.count();
-  const offenders: string[] = [];
-  for (let i = 0; i < measured; i++) {
-    const control = controls.nth(i);
-    const name = (
-      await control.evaluate(
-        (el) =>
-          el.getAttribute("aria-label") ??
-          (el as HTMLInputElement).value ??
-          el.textContent ??
-          "",
-      )
-    )
-      .trim()
-      .slice(0, 40);
-    const box = await control.boundingBox();
-    if (!box) {
-      offenders.push(`${name}: no bounding box`);
-      continue;
-    }
-    if (box.height < TOUCH_MIN)
-      offenders.push(`${name}: ${Math.round(box.height)}px tall`);
-    if (box.width < TOUCH_MIN)
-      offenders.push(`${name}: ${Math.round(box.width)}px wide`);
-    if (box.x < 0 || box.x + box.width > PHONE.width)
-      offenders.push(`${name}: outside the viewport`);
-  }
-  return { offenders, measured };
-}
-
-/** Fails on an offender *and* on a sweep that found nothing to measure. */
-function expectTappable(sweep: Sweep, when: string): void {
-  expect(sweep.offenders, `${when}: undersized or off-screen`).toEqual([]);
-  expect(
-    sweep.measured,
-    `${when}: the sweep matched ${sweep.measured} controls, so it proved nothing`,
-  ).toBeGreaterThanOrEqual(MIN_CONTROLS);
-}
-
 test("every control on the page is tappable at phone width", async ({
   page,
 }) => {
@@ -304,20 +247,26 @@ test("every control on the page is tappable at phone width", async ({
   for (const name of LIFECYCLE)
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
 
-  expectTappable(await sweepTapTargets(page), "the page at rest");
-  expect(
-    await page.evaluate(() => document.documentElement.scrollWidth),
-  ).toBeLessThanOrEqual(PHONE.width);
+  expectTappable(await sweepTapTargets(page), "the page at rest", MIN_CONTROLS);
+  await expectNoHorizontalScroll(page, "the page at rest");
 
   // …with the operation panel open, which is where Dismiss lives.
   await page.getByRole("button", { name: "Restart", exact: true }).click();
   await expect(
     page.getByRole("region", { name: "Operation", exact: true }),
   ).toBeVisible();
-  expectTappable(await sweepTapTargets(page), "with an operation open");
+  expectTappable(
+    await sweepTapTargets(page),
+    "with an operation open",
+    MIN_CONTROLS,
+  );
 
   // …and with the remove confirmation open, which is the other pair.
   await page.getByRole("button", { name: "Stop & remove" }).click();
   await expect(page.getByRole("alertdialog")).toBeVisible();
-  expectTappable(await sweepTapTargets(page), "with the confirmation open");
+  expectTappable(
+    await sweepTapTargets(page),
+    "with the confirmation open",
+    MIN_CONTROLS,
+  );
 });

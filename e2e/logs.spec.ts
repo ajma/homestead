@@ -181,6 +181,11 @@ test("streams the container log into a mono region", async ({ page }) => {
   // happily with no connection at all.
   expect(stream.served.length, "the tab opened the stream").toBeGreaterThan(0);
   await expect(log).toHaveClass(/font-mono/);
+  // The reconnect notice is not furniture — it appears only when the stream
+  // actually drops. Asserted here, on the one body in this file that carries a
+  // terminal frame: this connection never reconnects, so the claim is a fact
+  // about the component rather than a race against the browser's retry timer.
+  await expect(log).not.toContainText("reconnected");
 
   // Built to the server's validator: `tail` inside 0..10_000, and no `service`
   // key at all while "All services" is chosen — an empty `service=` fails the
@@ -328,7 +333,13 @@ test("a reconnect replaces the tail and says the scrollback is gone", async ({
   const log = await openLogs(page);
   await expect(log).toContainText("OLD-LINE-1");
   await expect(log).toContainText("OLD-LINE-2");
-  await expect(log).not.toContainText("reconnected");
+  // No "the notice is absent yet" assertion here, deliberately. This body has
+  // no terminal frame and `retry: 200`, so the browser is already reconnecting
+  // every fifth of a second: whether the notice has appeared by the time the
+  // assertion runs is a race against a machine under load, and it lost one
+  // once the suite began running at two viewports. The same claim is made in
+  // "streams the container log into a mono region", against the one body in
+  // this file that ends with a terminal frame and therefore never reconnects.
   const before = stream.served.length;
 
   stream.serve(CONNECTED + RETRY + chunk("TAIL-ONLY\n"));
