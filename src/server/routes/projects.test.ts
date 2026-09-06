@@ -120,6 +120,22 @@ describe("GET /api/projects", () => {
       (await app.inject({ method: "GET", url: "/api/projects" })).statusCode,
     ).toBe(401);
   });
+
+  it("does not put the host filesystem path on the wire", async () => {
+    // No client code ever read it, and it is an absolute path on the machine
+    // holding the Docker socket. Whoever widens this endpoint's audience
+    // should not have to notice a field nobody needs.
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/projects",
+      headers: { cookie: adminCookie },
+    });
+    const entry = res.json().projects[0];
+    expect(entry.slug).toBe(slug);
+    expect(entry).not.toHaveProperty("path");
+    // Belt and braces: nothing else smuggled the root in either.
+    expect(JSON.stringify(res.json())).not.toContain(root);
+  });
 });
 
 describe("GET /api/projects/:slug", () => {

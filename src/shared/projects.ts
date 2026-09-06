@@ -3,10 +3,15 @@
  * compose parsing, no Docker calls. This is the wire shape of
  * `GET /api/projects`, so it lives here rather than in the server's store —
  * the browser must never import server code, and a hand-copied twin drifts.
+ *
+ * Deliberately no `path`. The absolute host filesystem path was travelling to
+ * the browser and no client code ever read it; the server derives it from the
+ * slug through `projectPath`, which is also the only thing that validates it.
+ * Do not add it back — a field nothing reads is a disclosure with no benefit,
+ * and this endpoint is the one whose audience is most likely to widen.
  */
 export type ScanEntry = {
   slug: string;
-  path: string;
   hasCompose: boolean;
   hasEnv: boolean;
   composeFile: string | null;

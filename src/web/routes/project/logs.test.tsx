@@ -12,7 +12,6 @@ const SLUG = "jellyfin";
 function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
   return {
     slug: SLUG,
-    path: "/srv/stacks/jellyfin",
     hasCompose: true,
     hasEnv: false,
     composeFile: "compose.yaml",

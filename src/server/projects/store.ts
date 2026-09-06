@@ -83,7 +83,6 @@ export async function scanProjects(projectsDir: string): Promise<ScanEntry[]> {
     );
     entries.push({
       slug: dirent.name,
-      path,
       hasCompose: composeFile !== null,
       hasEnv,
       composeFile,
