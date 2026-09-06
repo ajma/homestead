@@ -62,7 +62,7 @@ describe("useEventStream", () => {
     expect(result.current.items).toHaveLength(2);
 
     emit((es) => {
-      es.emitError();
+      es.emitDrop();
       es.emitOpen();
       es.emitMessage({ chunk: "replayed\n" });
     });
@@ -84,7 +84,7 @@ describe("useEventStream", () => {
     });
 
     emit((es) => {
-      es.emitError();
+      es.emitDrop();
       es.emitOpen();
       es.emitMessage({ end: true });
     });
@@ -96,14 +96,32 @@ describe("useEventStream", () => {
   });
 
   it("marks the stream errored without throwing", () => {
+    // `readyState` CLOSED: the browser has given up and will not reconnect.
     const { result } = renderHook(() => useEventStream<Frame>(URL));
 
     emit((es) => {
       es.emitOpen();
-      es.emitError();
+      es.emitFatal();
     });
 
     expect(result.current.state).toBe("error");
+  });
+
+  it("calls a drop the browser will retry `connecting`, not an error", () => {
+    // A phone changing networks is a blink. Reporting it the same way as a
+    // session that expired mid-operation means a caller must either alarm the
+    // user on every Wi-Fi handoff or promise a retry that will never come.
+    const { result } = renderHook(() => useEventStream<Frame>(URL));
+
+    emit((es) => {
+      es.emitOpen();
+      es.emitDrop();
+    });
+
+    expect(result.current.state).toBe("connecting");
+
+    emit((es) => es.emitOpen());
+    expect(result.current.state).toBe("open");
   });
 
   it("hands the terminal payload to onEnd and stops listening", () => {

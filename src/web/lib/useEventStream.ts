@@ -2,12 +2,32 @@ import { useEffect, useRef, useState } from "react";
 
 /**
  * `idle` — no url, or no `EventSource` in this environment.
- * `open` — connected; `error` — dropped, and the browser is retrying.
+ * `connecting` — opening, or dropped and the browser is retrying by itself.
+ * `open` — connected.
  * `closed` — the server said it was finished and we hung up.
+ * `error` — the browser has given up and will not reconnect.
+ *
+ * `connecting` and `error` are separate because the difference is the whole
+ * message. A Wi-Fi handoff is a blink the user should barely notice; a session
+ * that expired mid-operation ends the stream for good, and telling that user
+ * "retrying" is a promise nothing is going to keep.
  */
-export type EventStreamState = "idle" | "open" | "closed" | "error";
+export type EventStreamState =
+  | "idle"
+  | "connecting"
+  | "open"
+  | "closed"
+  | "error";
 
 export type EventStream<T> = { items: T[]; state: EventStreamState };
+
+/**
+ * `EventSource.CLOSED`, read as a literal.
+ *
+ * Not off the constructor: a stub installed by a caller need not carry the
+ * statics, and the value is fixed by the spec.
+ */
+const CLOSED = 2;
 
 /** The server's terminal frame, whatever else `T` carries. */
 function isEnd(payload: unknown): boolean {
@@ -68,7 +88,7 @@ export function useEventStream<T>(
     // A different url is a different stream; its predecessor's output is not
     // this one's history. Unlike a reconnect, nothing will replay it.
     setItems([]);
-    setState("idle");
+    setState("connecting");
 
     const source = new Source(url);
     let armed = false;
@@ -99,7 +119,10 @@ export function useEventStream<T>(
     };
 
     source.onerror = () => {
-      setState("error");
+      // `CLOSED` is the browser saying it has given up — an expired session
+      // answering 401, a 403, a refused origin. It will not try again, and a
+      // caller told "retrying" would show a spinner that can never stop.
+      setState(source.readyState === CLOSED ? "error" : "connecting");
     };
 
     return () => {

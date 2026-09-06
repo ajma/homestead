@@ -61,7 +61,23 @@ export class FakeEventSource {
     this.onmessage?.(new MessageEvent<string>("message", { data }));
   }
 
-  emitError(): void {
+  /**
+   * The connection dropped and the browser intends to try again.
+   *
+   * `readyState` is back to `CONNECTING` before the event fires, which is the
+   * only thing that tells this apart from {@link emitFatal}.
+   */
+  emitDrop(): void {
+    this.readyState = FakeEventSource.CONNECTING;
+    this.onerror?.(new Event("error"));
+  }
+
+  /**
+   * The browser has given up: a 401 from an expired session, a 403, a refused
+   * origin. `readyState` is `CLOSED` and there will be no reconnect.
+   */
+  emitFatal(): void {
+    this.readyState = FakeEventSource.CLOSED;
     this.onerror?.(new Event("error"));
   }
 }

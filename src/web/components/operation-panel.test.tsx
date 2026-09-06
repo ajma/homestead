@@ -129,7 +129,7 @@ describe("OperationPanel", () => {
     });
 
     emit((es) => {
-      es.emitError();
+      es.emitDrop();
       es.emitOpen();
       es.emitMessage({
         end: true,
@@ -149,7 +149,7 @@ describe("OperationPanel", () => {
     });
 
     emit((es) => {
-      es.emitError();
+      es.emitDrop();
       es.emitOpen();
       // What the registry sends a fresh subscriber: the whole buffer again.
       es.emitMessage({ chunk: "Pulling web\n" });
@@ -161,17 +161,60 @@ describe("OperationPanel", () => {
     expect(text).toContain("Pulled");
   });
 
-  it("says the connection dropped rather than looking finished", () => {
+  it("says it is connecting, quietly, while the browser retries", () => {
     renderPanel();
     emit((es) => {
       es.emitOpen();
       es.emitMessage({ chunk: "Pulling web\n" });
-      es.emitError();
+      es.emitDrop();
     });
 
-    expect(screen.getByText(/lost the connection/i)).toBeInTheDocument();
-    // Not a terminal state: nothing here says the operation itself ended.
+    expect(screen.getByText(/connecting to the output stream/i)).toBeVisible();
+    // A retry the browser is already making is not an alarm, and it is not a
+    // terminal state.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/Succeeded|Failed/)).not.toBeInTheDocument();
+    // Still being watched, so the spinner is still telling the truth.
+    expect(screen.getByLabelText("Loading")).toBeInTheDocument();
+    // …and the drop did not cost the output already on screen.
+    expect(log()).toHaveTextContent("Pulling web");
+  });
+
+  it("stops saying so once the connection is back", () => {
+    renderPanel();
+    emit((es) => {
+      es.emitOpen();
+      es.emitDrop();
+    });
+    expect(screen.getByText(/connecting to the output stream/i)).toBeVisible();
+
+    emit((es) => es.emitOpen());
+
+    expect(
+      screen.queryByText(/connecting to the output stream/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stops the spinner and says so when the stream will not come back", () => {
+    // The realistic path: a session expires four minutes into a `pull`, the
+    // reconnect is refused, EventSource closes for good. A spinner that can
+    // never stop, over a banner promising a retry that will never come, is
+    // the worst of both — and the operation has very likely succeeded.
+    renderPanel();
+    emit((es) => {
+      es.emitOpen();
+      es.emitMessage({ chunk: "Pulling web\n" });
+      es.emitFatal();
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/will not reconnect/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/reload the page/i);
+    expect(screen.queryByLabelText("Loading")).not.toBeInTheDocument();
+    // And it stops claiming the operation is running, which it cannot know.
+    expect(screen.getByText("No longer following")).toBeInTheDocument();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    // The output it did receive is still there.
+    expect(log()).toHaveTextContent("Pulling web");
   });
 
   it("refreshes the project and the list when the operation ends", () => {

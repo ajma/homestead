@@ -41,8 +41,14 @@ export function isAtBottom(el: Scrollable): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_SLACK_PX;
 }
 
-function statusLine(operation: Operation | null, ended: boolean): string {
-  if (!ended) return "Running";
+function statusLine(
+  operation: Operation | null,
+  ended: boolean,
+  lost: boolean,
+): string {
+  // Order matters: `lost` before `Running`, because once the stream is gone
+  // for good this page has no way to know the operation is still going.
+  if (!ended) return lost ? "No longer following" : "Running";
   if (!operation) return "Finished — the server did not say how it ended";
   const code = operation.exitCode;
   const suffix = code === null ? "" : ` (exit ${code})`;
@@ -95,6 +101,27 @@ export function OperationPanel({
     .map((frame) => ("chunk" in frame ? frame.chunk : ""))
     .join("");
 
+  /**
+   * The stream is gone for good and this page will learn nothing more.
+   *
+   * The realistic cause is a session that expired part-way through a long
+   * `pull`: the reconnect is refused, `EventSource` closes for good and no
+   * further attempt is made. Reported as a retry it would leave a spinner
+   * that can never stop and a promise nothing will keep, over an operation
+   * that has very likely succeeded.
+   */
+  const lost = !ended && state === "error";
+
+  /**
+   * Between connections — the first attempt, or a retry after a drop.
+   *
+   * Deliberately not worded as "reconnecting". Telling the two apart would
+   * mean remembering whether there has ever been an `open`, and React batches
+   * a drop that follows one closely enough that the intermediate state is
+   * never rendered. "Connecting" is true of both, and true is enough.
+   */
+  const connecting = !ended && state === "connecting";
+
   // Collapsed only on a confirmed success: a stack that came up is a one-line
   // answer, and anything else is something the reader has to work through.
   const succeeded = ended && operation?.status === "succeeded";
@@ -128,22 +155,25 @@ export function OperationPanel({
           <span className="font-mono text-sm font-semibold text-text">
             {kind}
           </span>
-          {!ended && <Spinner size={16} />}
-          {ended ? (
+          {/* A spinner is a claim that something is still being watched. */}
+          {!ended && !lost && <Spinner size={16} />}
+          {ended || lost ? (
             <Badge
               tone={
-                operation?.status === "succeeded"
-                  ? "success"
-                  : operation
-                    ? "danger"
-                    : "neutral"
+                lost
+                  ? "warning"
+                  : operation?.status === "succeeded"
+                    ? "success"
+                    : operation
+                      ? "danger"
+                      : "neutral"
               }
             >
-              {statusLine(operation, ended)}
+              {statusLine(operation, ended, lost)}
             </Badge>
           ) : (
             <span className="text-sm text-muted">
-              {statusLine(operation, ended)}
+              {statusLine(operation, ended, lost)}
             </span>
           )}
         </p>
@@ -160,10 +190,23 @@ export function OperationPanel({
         </div>
       </div>
 
-      {state === "error" && !ended && (
-        <p className="border-b border-border px-4 py-2 text-sm text-warning">
-          Lost the connection to the output stream. The browser is retrying;
-          reload the page if it does not come back.
+      {lost && (
+        <p
+          role="alert"
+          className="border-b border-border px-4 py-2 text-sm text-danger"
+        >
+          The output stream ended and will not reconnect — your session may have
+          expired. This operation is probably still running. Reload the page to
+          sign in again and see how it finished.
+        </p>
+      )}
+
+      {/* A retry the browser is already making is not news, and an alarm on
+          every Wi-Fi handoff trains people to ignore alarms. One quiet line,
+          in the muted tone, and no `role="alert"`. */}
+      {connecting && (
+        <p className="border-b border-border px-4 py-2 text-sm text-muted">
+          Connecting to the output stream…
         </p>
       )}
 
