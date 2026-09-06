@@ -5,8 +5,16 @@
  * schema generator. It must mirror the tables that better-auth 1.7.2 plus the
  * admin plugin expect.
  *
- * On a better-auth upgrade, re-check required fields against the library's
- * table definitions and update this schema accordingly.
+ * Because of that, package.json pins better-auth and
+ * @better-auth/drizzle-adapter to exactly 1.7.2 rather than a caret range: the
+ * pin and this file are a pair. Under a range, a fresh install picking up a
+ * later minor could expect a column no migration creates, and the only drift
+ * guard is a round-trip test that runs against whatever happens to be
+ * installed.
+ *
+ * On a better-auth upgrade, change all three together — bump both pinned
+ * versions, re-check required fields against the library's table definitions,
+ * update this schema, and add the matching migration.
  */
 
 import { relations, sql } from "drizzle-orm";

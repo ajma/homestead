@@ -1,4 +1,4 @@
-import { access, constants, readFile } from "node:fs/promises";
+import { access, constants, mkdir, readFile } from "node:fs/promises";
 import type { Config } from "./config.js";
 
 const NETWORK_FSTYPES = new Set([
@@ -72,6 +72,11 @@ export function dataDirChecks(config: Config): Check[] {
       label: "Data directory is writable",
       blocking: true,
       run: async () => {
+        // Creating the directory is part of the check rather than a separate
+        // step before it: when the parent is unwritable the mkdir is what fails
+        // first, and runChecks turns that into a clean blocking FAIL line
+        // instead of an unhandled EACCES at startup.
+        await mkdir(config.dataDir, { recursive: true });
         await access(config.dataDir, constants.W_OK);
         return { ok: true, detail: config.dataDir };
       },

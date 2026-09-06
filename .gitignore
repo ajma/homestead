@@ -3,3 +3,6 @@ dist/
 .env
 *.local
 .worktrees/
+test-results/
+playwright-report/
+.dev/

@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { access, chmod, constants, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -55,14 +55,56 @@ describe("runChecks", () => {
   });
 
   it("reports an unwritable data dir as a blocking failure", async () => {
+    // Was /proc/nope; the check now creates the directory, and mkdir under
+    // /proc blocks indefinitely on some kernels instead of returning EACCES.
+    // An existing directory with the write bit cleared covers the same case.
+    const dir = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    await chmod(dir, 0o500);
+    try {
+      const config = loadConfig({
+        HOMESTACKS_DATA: dir,
+        HOMESTACKS_PROJECTS: "/tmp",
+      });
+      const results = await runChecks(dataDirChecks(config));
+      const check = results.find((r) => r.id === "data_dir_writable");
+      expect(check?.ok).toBe(false);
+      expect(check?.blocking).toBe(true);
+    } finally {
+      await chmod(dir, 0o700);
+    }
+  });
+
+  // I4: the mkdir used to run in index.ts before the checks, so an unwritable
+  // parent produced a raw EACCES stack and no preflight output at all. It is
+  // now part of the check, and both flavours of failure report identically.
+  it("creates a missing data dir rather than failing the check", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    const dir = join(parent, "nested", "homestacks");
     const config = loadConfig({
-      HOMESTACKS_DATA: "/proc/nope",
-      HOMESTACKS_PROJECTS: "/tmp",
+      HOMESTACKS_DATA: dir,
+      HOMESTACKS_PROJECTS: parent,
     });
     const results = await runChecks(dataDirChecks(config));
-    const check = results.find((r) => r.id === "data_dir_writable");
-    expect(check?.ok).toBe(false);
-    expect(check?.blocking).toBe(true);
+    expect(results.find((r) => r.id === "data_dir_writable")?.ok).toBe(true);
+    await expect(access(dir, constants.W_OK)).resolves.toBeUndefined();
+  });
+
+  it("reports an unwritable parent as a blocking failure, not a crash", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "hs-pre-"));
+    await chmod(parent, 0o500);
+    try {
+      const config = loadConfig({
+        HOMESTACKS_DATA: join(parent, "homestacks"),
+        HOMESTACKS_PROJECTS: parent,
+      });
+      const results = await runChecks(dataDirChecks(config));
+      const check = results.find((r) => r.id === "data_dir_writable");
+      expect(check?.ok).toBe(false);
+      expect(check?.blocking).toBe(true);
+      expect(check?.detail).toMatch(/EACCES|permission denied/i);
+    } finally {
+      await chmod(parent, 0o700);
+    }
   });
 
   it("does not let one failing check abort the others", async () => {

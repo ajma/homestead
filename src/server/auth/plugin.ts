@@ -13,6 +13,31 @@ declare module "fastify" {
   }
 }
 
+/**
+ * Narrows Better-Auth's `getSession()` result to the shape the guard relies on.
+ *
+ * The previous `as SessionWithUser` cast was unchecked: if a Better-Auth
+ * upgrade re-nested the session, `session.user` would silently become
+ * undefined and every guarded route would throw a 500 inside its preHandler.
+ * Anything that does not carry a usable `user` is treated as no session, so a
+ * malformed value denies access instead of propagating.
+ *
+ * `role` may legitimately be null or undefined (Better-Auth only assigns a role
+ * on sign-up); such a session is still returned so `requirePermission` answers
+ * 403 forbidden rather than 401 unauthenticated.
+ */
+export function toSessionWithUser(value: unknown): SessionWithUser | null {
+  if (typeof value !== "object" || value === null) return null;
+  const user = (value as { user?: unknown }).user;
+  if (typeof user !== "object" || user === null) return null;
+  const { id, email, role } = user as Record<string, unknown>;
+  if (typeof id !== "string" || typeof email !== "string") return null;
+  if (role !== null && role !== undefined && typeof role !== "string") {
+    return null;
+  }
+  return { user: { id, email, role } };
+}
+
 const plugin: FastifyPluginAsync<{ auth: Auth }> = async (app, { auth }) => {
   app.decorateRequest("session", null);
 
@@ -21,7 +46,7 @@ const plugin: FastifyPluginAsync<{ auth: Auth }> = async (app, { auth }) => {
       const session = await auth.api.getSession({
         headers: fromNodeHeaders(request.headers),
       });
-      request.session = (session as SessionWithUser | null) ?? null;
+      request.session = toSessionWithUser(session);
     } catch (error) {
       request.log.error(error, "Failed to get session");
       request.session = null;
