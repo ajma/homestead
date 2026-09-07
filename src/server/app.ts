@@ -6,6 +6,7 @@ import type { Db } from "./db/client.js";
 import type { DockerRunner } from "./docker/run.js";
 import { createRegistry } from "./ops/registry.js";
 import { cloudflareRoutes } from "./routes/cloudflare.js";
+import { dashboardRoutes } from "./routes/dashboard.js";
 import { deviceRoutes } from "./routes/devices.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
 import { operationRoutes } from "./routes/operations.js";
@@ -59,6 +60,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(authPlugin, { auth: deps.auth });
   await app.register(onboardingRoutes, { db: deps.db, auth: deps.auth });
   await app.register(statusRoutes, { db: deps.db });
+  await app.register(dashboardRoutes, {
+    db: deps.db,
+    projectsDir: deps.projectsDir,
+    dataDir: deps.dataDir,
+  });
   await app.register(deviceRoutes, {
     db: deps.db,
     secretKey: deps.secretKey,
@@ -73,6 +79,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // and the lifecycle verbs contend for the same one.
   const registry = createRegistry(deps.db);
   await app.register(projectRoutes, {
+    db: deps.db,
     projectsDir: deps.projectsDir,
     projectsHostDir: deps.projectsHostDir,
     dataDir: deps.dataDir,

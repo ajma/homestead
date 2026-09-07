@@ -17,6 +17,14 @@ export type CheckContext = {
    *  The `tailscale` executor reads state the sync already fetched; it must
    *  not call the API itself, or one tick would issue a request per device. */
   deviceConnected: (deviceId: string) => boolean | null;
+  /** Container state for a service. Returns null when there is no such container. */
+  containerState: (
+    projectSlug: string,
+    service: string,
+  ) => Promise<{
+    state: string;
+    health: string | null;
+  } | null>;
 };
 
 export type CheckExecutor = (
@@ -51,6 +59,11 @@ const reachabilityConfigSchema = z.object({
   url: z.string(),
   clientId: z.string(),
   clientSecret: z.string(),
+});
+
+const dockerConfigSchema = z.object({
+  projectSlug: z.string(),
+  service: z.string(),
 });
 
 async function pushExecutor(
@@ -216,7 +229,10 @@ async function httpExecutor(
       signal: AbortSignal.timeout(timeoutMs),
     });
 
-    if (response.ok) {
+    // 2xx is up, but also 401 and 403: an app behind a login is responding,
+    // just with an auth challenge. Marking those as down produces false-red
+    // tiles for healthy apps that require authentication.
+    if (response.ok || response.status === 401 || response.status === 403) {
       return {
         up: true,
         durationMs: performance.now() - start,
@@ -333,7 +349,7 @@ async function reachabilityExecutor(
           return {
             up: false,
             durationMs: performance.now() - start,
-            error: "Access authentication failed",
+            error: "access: Authentication failed",
           };
         }
       } catch {
@@ -362,6 +378,70 @@ async function reachabilityExecutor(
   }
 }
 
+async function dockerExecutor(
+  config: unknown,
+  _timeoutMs: number,
+  ctx: CheckContext,
+): Promise<CheckResult> {
+  const start = performance.now();
+  const parsed = dockerConfigSchema.safeParse(config);
+
+  if (!parsed.success) {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: `Invalid config: ${parsed.error.message}`,
+    };
+  }
+
+  const { projectSlug, service } = parsed.data;
+  const containerInfo = await ctx.containerState(projectSlug, service);
+
+  if (containerInfo === null) {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: "Container not found",
+    };
+  }
+
+  const { state, health } = containerInfo;
+
+  // Down if restarting
+  if (state === "restarting") {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: "Container is restarting",
+    };
+  }
+
+  // Down if not running
+  if (state !== "running") {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: `Container is ${state}`,
+    };
+  }
+
+  // Running but unhealthy
+  if (health === "unhealthy") {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: "Container is unhealthy",
+    };
+  }
+
+  // Running and either healthy or no healthcheck
+  return {
+    up: true,
+    durationMs: performance.now() - start,
+    error: null,
+  };
+}
+
 export const executors: Record<MonitorType, CheckExecutor> = {
   push: pushExecutor,
   tailscale: tailscaleExecutor,
@@ -369,4 +449,5 @@ export const executors: Record<MonitorType, CheckExecutor> = {
   http: httpExecutor,
   dns: dnsExecutor,
   reachability: reachabilityExecutor,
+  docker: dockerExecutor,
 };

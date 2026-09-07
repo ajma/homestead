@@ -68,9 +68,10 @@ export const monitors = sqliteTable(
     id: text("id").primaryKey(),
     targetType: text("target_type").notNull(),
     /**
-     * Text, not a foreign key. A device is a uuid, but an app is keyed by its
-     * published host port (product design §9.2), so one column holds both
-     * without a migration or a nullable column per target kind.
+     * Text, not a foreign key. A device is a uuid; an app is `project_slug:service`
+     * or `manual:<id>`. Identity is deliberately NOT the published port — moving a
+     * service to another port would otherwise discard its whole uptime history.
+     * The port is the join key to exposures, which is a different job.
      */
     targetId: text("target_id").notNull(),
     type: text("type").notNull(),
@@ -151,5 +152,15 @@ export const exposures = sqliteTable(
   },
   (t) => [index("exposures_port_idx").on(t.hostPort)],
 );
+
+export const manualApps = sqliteTable("manual_apps", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  /** The only thing we know about a manual app, so it is also what we monitor. */
+  url: text("url").notNull(),
+  iconSlug: text("icon_slug"),
+  iconUrl: text("icon_url"),
+  hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
+});
 
 export * from "./auth-schema.js";

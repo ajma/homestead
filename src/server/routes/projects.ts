@@ -1,7 +1,11 @@
 import { isReservedSlug } from "@shared/projects.js";
+import { and, eq } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { syncAppMonitors } from "../apps/sync.js";
 import { requirePermission } from "../auth/guard.js";
+import type { Db } from "../db/client.js";
+import { exposures } from "../db/schema.js";
 import {
   type ContainerState,
   composeConfig,
@@ -24,6 +28,7 @@ import {
 } from "../projects/store.js";
 
 type Opts = {
+  db: Db;
   projectsDir: string;
   projectsHostDir: string;
   dataDir: string;
@@ -51,6 +56,27 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     projectsHostDir: opts.projectsHostDir,
     dataDir: opts.dataDir,
     slug,
+  });
+
+  const buildSyncDeps = () => ({
+    listProjects: async () => {
+      const entries = await scanProjects(opts.projectsDir);
+      return entries.map((e) => e.slug);
+    },
+    composeConfig: async (slug: string) =>
+      composeConfig(ctxFor(slug), docker.run),
+    hostnameFor: async (slug: string, hostPort: number) => {
+      const [exposure] = await opts.db
+        .select({ hostname: exposures.hostname })
+        .from(exposures)
+        .where(
+          and(
+            eq(exposures.projectSlug, slug),
+            eq(exposures.hostPort, hostPort),
+          ),
+        );
+      return exposure?.hostname ?? null;
+    },
   });
 
   app.get(
@@ -151,6 +177,11 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         throw err;
       }
 
+      // Sync app monitors for the newly created project
+      await syncAppMonitors(opts.db, buildSyncDeps()).catch((err) => {
+        request.log.error({ err }, "Failed to sync app monitors after create");
+      });
+
       // Validated *after* writing, per §6.1: the file is kept either way and the
       // caller is told what it got, so an invalid paste lands in the editor
       // rather than being thrown away.
@@ -210,6 +241,12 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       } finally {
         release();
       }
+
+      // Sync app monitors after project deletion
+      await syncAppMonitors(opts.db, buildSyncDeps()).catch((err) => {
+        request.log.error({ err }, "Failed to sync app monitors after delete");
+      });
+
       return { ok: true };
     },
   );
@@ -267,6 +304,14 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         name.data,
         body.data.content,
       );
+
+      // Sync app monitors after compose file update
+      if (name.data === "compose") {
+        await syncAppMonitors(opts.db, buildSyncDeps()).catch((err) => {
+          request.log.error({ err }, "Failed to sync app monitors after save");
+        });
+      }
+
       return { ok: true };
     },
   );

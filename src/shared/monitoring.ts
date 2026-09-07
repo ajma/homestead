@@ -5,7 +5,8 @@ export type MonitorType =
   | "http"
   | "dns"
   | "push"
-  | "reachability";
+  | "reachability"
+  | "docker";
 export type DeviceKind = "phone" | "laptop" | "nas" | "vm" | "other";
 
 /** A monitor's current state, derived from its most recent check. */

@@ -5,12 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:net");
 vi.mock("node:dns/promises");
 
-import { executors } from "./checks.js";
+import { type CheckContext, executors } from "./checks.js";
 
 const ctx = (over: Partial<Parameters<typeof executors.push>[2]> = {}) => ({
   now: () => 10_000,
   lastPushAt: () => null,
   deviceConnected: () => null,
+  containerState: async () => null,
   ...over,
 });
 
@@ -361,6 +362,70 @@ describe("http executor", () => {
 
     Date.now = originalDateNow;
   });
+
+  it("is up when the app returns 401 (service is responding, just requires auth)", async () => {
+    const mockFetch = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const r = await executors.http(
+      { url: "https://app.example.com" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(true);
+    expect(r.error).toBe(null);
+  });
+
+  it("is up when the app returns 403 (service is responding, just forbidden)", async () => {
+    const mockFetch = vi.fn(async () => ({
+      ok: false,
+      status: 403,
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const r = await executors.http(
+      { url: "https://app.example.com" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(true);
+    expect(r.error).toBe(null);
+  });
+
+  it("is down when the app returns 500 (server error)", async () => {
+    const mockFetch = vi.fn(async () => ({
+      ok: false,
+      status: 500,
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const r = await executors.http(
+      { url: "https://app.example.com" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/500/);
+  });
+
+  it("is down when the app returns 404 (not found)", async () => {
+    const mockFetch = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+    }));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const r = await executors.http(
+      { url: "https://app.example.com/missing" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/404/);
+  });
 });
 
 describe("dns executor", () => {
@@ -557,5 +622,75 @@ describe("reachability executor", () => {
     );
     expect(r.error ?? "").not.toContain("SEKRIT");
     vi.unstubAllGlobals();
+  });
+});
+
+describe("docker executor", () => {
+  const withState = (s: Awaited<ReturnType<CheckContext["containerState"]>>) =>
+    ctx({ containerState: async () => s });
+
+  it("is up when the container runs and has no healthcheck", async () => {
+    const r = await executors.docker(
+      { projectSlug: "media", service: "jellyfin" },
+      1000,
+      withState({ state: "running", health: null }),
+    );
+    expect(r.up).toBe(true);
+  });
+
+  it("is up when the container runs and reports healthy", async () => {
+    const r = await executors.docker(
+      { projectSlug: "media", service: "jellyfin" },
+      1000,
+      withState({ state: "running", health: "healthy" }),
+    );
+    expect(r.up).toBe(true);
+  });
+
+  it("is down when the healthcheck says unhealthy, even though it is running", async () => {
+    // A container can be running and broken. Plain state hides that.
+    const r = await executors.docker(
+      { projectSlug: "media", service: "jellyfin" },
+      1000,
+      withState({ state: "running", health: "unhealthy" }),
+    );
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/unhealthy/i);
+  });
+
+  it("is down when the container is absent", async () => {
+    const r = await executors.docker(
+      { projectSlug: "media", service: "jellyfin" },
+      1000,
+      withState(null),
+    );
+    expect(r.up).toBe(false);
+  });
+
+  it("is down when the container is restarting", async () => {
+    const r = await executors.docker(
+      { projectSlug: "media", service: "jellyfin" },
+      1000,
+      withState({ state: "restarting", health: null }),
+    );
+    expect(r.up).toBe(false);
+  });
+
+  it("opens no socket", async () => {
+    const f = vi.fn();
+    vi.stubGlobal("fetch", f);
+    await executors.docker(
+      { projectSlug: "media", service: "jellyfin" },
+      1000,
+      withState({ state: "running", health: null }),
+    );
+    expect(f).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("reports a bad config as a failed check, not a thrown error", async () => {
+    const r = await executors.docker({ projectSlug: 123 }, 1000, ctx());
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/config/i);
   });
 });

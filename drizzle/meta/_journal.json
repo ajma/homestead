@@ -57,6 +57,13 @@
       "when": 1788798367647,
       "tag": "0007_fair_micromacro",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788812684180,
+      "tag": "0008_quiet_vivisector",
+      "breakpoints": true
     }
   ]
 }

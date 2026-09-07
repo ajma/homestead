@@ -1,4 +1,5 @@
 import type { ExposureSummary } from "@shared/cloudflare.js";
+import type { DashboardData } from "@shared/dashboard.js";
 import type {
   DeviceSummary,
   HistoryBucket,
@@ -34,6 +35,7 @@ export const queryKeys = {
   device: (id: string) => ["device", id] as const,
   exposures: ["exposures"] as const,
   cloudflareStatus: ["cloudflare", "status"] as const,
+  dashboard: ["dashboard"] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -320,6 +322,16 @@ export function useDevices() {
     queryFn: async () => {
       const body = await apiFetch<{ devices: DeviceSummary[] }>("/api/devices");
       return body?.devices ?? [];
+    },
+  });
+}
+
+export function useDashboard() {
+  return useQuery({
+    queryKey: queryKeys.dashboard,
+    queryFn: async () => {
+      const body = await apiFetch<DashboardData>("/api/dashboard");
+      return body;
     },
   });
 }

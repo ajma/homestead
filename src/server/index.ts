@@ -1,14 +1,18 @@
+import { and, eq } from "drizzle-orm";
 import { buildApp } from "./app.js";
+import { syncAppMonitors } from "./apps/sync.js";
 import { createAuth } from "./auth/index.js";
 import { createCloudflareClient } from "./cloudflare/client.js";
 import { syncAllowPolicy } from "./cloudflare/sync-users.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { decrypt, ensureSecretKey } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
-import { settings } from "./db/schema.js";
+import { exposures, settings } from "./db/schema.js";
+import { composeConfig } from "./docker/compose.js";
 import { dockerChecks } from "./docker/preflight.js";
 import { createRunner } from "./monitoring/runner.js";
 import { dataDirChecks, runChecks } from "./preflight.js";
+import { scanProjects } from "./projects/store.js";
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -78,6 +82,38 @@ async function main(): Promise<void> {
     }
   };
 
+  // Build the app sync function for the runner
+  const syncAppsToDb = async (_now: number): Promise<void> => {
+    await syncAppMonitors(db, {
+      listProjects: async () => {
+        const entries = await scanProjects(config.projectsDir);
+        return entries.map((e) => e.slug);
+      },
+      composeConfig: async (slug: string) =>
+        composeConfig(
+          {
+            projectsDir: config.projectsDir,
+            projectsHostDir: config.projectsHostDir,
+            dataDir: config.dataDir,
+            slug,
+          },
+          undefined,
+        ),
+      hostnameFor: async (slug: string, hostPort: number) => {
+        const [exposure] = await db
+          .select({ hostname: exposures.hostname })
+          .from(exposures)
+          .where(
+            and(
+              eq(exposures.projectSlug, slug),
+              eq(exposures.hostPort, hostPort),
+            ),
+          );
+        return exposure?.hostname ?? null;
+      },
+    });
+  };
+
   // Start the monitor runner AFTER buildApp, so route tests never start it
   const runner = createRunner({
     db,
@@ -87,6 +123,10 @@ async function main(): Promise<void> {
       return { cancel: () => clearInterval(id) };
     },
     syncUsers: syncUsersToCloudflare,
+    syncApps: syncAppsToDb,
+    projectsDir: config.projectsDir,
+    projectsHostDir: config.projectsHostDir,
+    dataDir: config.dataDir,
   });
   runner.start();
 

@@ -249,6 +249,23 @@ describe("runner tick", () => {
     expect(await db.select().from(checks)).toHaveLength(1);
   });
 
+  it("completes tick and checks monitors even when syncApps throws", async () => {
+    const db = await seed(0);
+    const syncApps = vi.fn(async () => {
+      throw new Error("Failed to enumerate projects");
+    });
+    const tcp = vi.fn(async () => ({ up: true, durationMs: 5, error: null }));
+    await createRunner({
+      db,
+      now: () => 600_001,
+      setTimer: noTimer,
+      syncApps,
+      executors: { tcp },
+    }).tick();
+    expect(tcp).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(checks)).toHaveLength(1);
+  });
+
   it("tailscale monitor reports down when device is present but disconnected", async () => {
     const db = createDb(":memory:");
     await runMigrations(db);

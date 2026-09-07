@@ -2,7 +2,7 @@ export const homesteadStatement = {
   project: ["read", "create", "update", "delete", "control"],
   compose: ["read", "write"],
   tunnel: ["read", "create", "delete"],
-  app: ["read"],
+  app: ["read", "create", "update", "delete"],
   logs: ["read"],
   stats: ["read"],
   settings: ["read", "write"],

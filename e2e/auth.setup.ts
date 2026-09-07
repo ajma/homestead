@@ -59,6 +59,7 @@ setup(
     await expect(
       page.getByRole("heading", { name: "Dashboard" }),
     ).toBeVisible();
+    await page.getByRole("button", { name: "Account" }).click();
     await expect(page.getByText("admin@example.com")).toBeVisible();
 
     await page.context().storageState({ path: authFile });

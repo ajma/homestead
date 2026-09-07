@@ -70,4 +70,23 @@ describe("roles", () => {
   it("exposes exactly the two roles", () => {
     expect(Object.keys(roles).sort()).toEqual(["admin", "viewer"]);
   });
+
+  it("lets an admin manage manual apps", () => {
+    for (const action of ["read", "create", "update", "delete"] as const) {
+      expect(
+        roles.admin.authorize({ app: [action] }).success,
+        `admin should have app:${action}`,
+      ).toBe(true);
+    }
+  });
+
+  it("leaves a viewer with app:read and nothing more", () => {
+    expect(roles.viewer.authorize({ app: ["read"] }).success).toBe(true);
+    for (const action of ["create", "update", "delete"] as const) {
+      expect(
+        roles.viewer.authorize({ app: [action] }).success,
+        `viewer must not have app:${action}`,
+      ).toBe(false);
+    }
+  });
 });

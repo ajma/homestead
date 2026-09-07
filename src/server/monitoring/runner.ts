@@ -3,6 +3,7 @@ import type { MonitorType } from "@shared/monitoring.js";
 import { and, eq, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { checks, devices, monitors } from "../db/schema.js";
+import { type ComposeContext, composePs } from "../docker/compose.js";
 import { type CheckExecutor, executors as defaultExecutors } from "./checks.js";
 import { rollUpAndPrune } from "./rollup.js";
 
@@ -18,11 +19,18 @@ export type RunnerDeps = {
   ) => Promise<{ rolled: number; pruned: number }>;
   /** Syncs Cloudflare Access allow policy to Homestead users every 5 minutes. */
   syncUsers?: (now: number) => Promise<void>;
+  /** Syncs app monitors every 10 minutes. */
+  syncApps?: (now: number) => Promise<void>;
+  /** Projects directory paths for docker monitor. */
+  projectsDir?: string;
+  projectsHostDir?: string;
+  dataDir?: string;
 };
 
 const TICK_INTERVAL_MS = 10_000;
 const ROLLUP_INTERVAL_MS = 3_600_000; // 1 hour
 const SYNC_USERS_INTERVAL_MS = 300_000; // 5 minutes
+const SYNC_APPS_INTERVAL_MS = 600_000; // 10 minutes
 const MAX_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes
 const POOL_SIZE = 8;
 
@@ -38,10 +46,15 @@ export function createRunner(deps: RunnerDeps): {
     executors = defaultExecutors,
     maintain = rollUpAndPrune,
     syncUsers,
+    syncApps,
+    projectsDir,
+    projectsHostDir,
+    dataDir,
   } = deps;
   let timer: { cancel: () => void } | null = null;
   let lastRollupAt = 0;
   let lastSyncUsersAt = 0;
+  let lastSyncAppsAt = 0;
   let tickInFlight = false;
 
   function computeNextDue(
@@ -120,6 +133,16 @@ export function createRunner(deps: RunnerDeps): {
           console.error("User sync failed:", err);
         }
       }
+
+      // Sync app monitors at most once per 10 minutes
+      if (syncApps && currentTime - lastSyncAppsAt >= SYNC_APPS_INTERVAL_MS) {
+        try {
+          await syncApps(currentTime);
+          lastSyncAppsAt = currentTime;
+        } catch (err) {
+          console.error("App sync failed:", err);
+        }
+      }
     } finally {
       tickInFlight = false;
     }
@@ -159,6 +182,32 @@ export function createRunner(deps: RunnerDeps): {
       lastPushAt: () => monitor.lastPushAt ?? null,
       deviceConnected: (deviceId: string) =>
         deviceConnectionMap?.get(deviceId) ?? null,
+      containerState: async (projectSlug: string, service: string) => {
+        // Return null if docker monitor dependencies are not configured
+        if (!projectsDir || !projectsHostDir || !dataDir) {
+          return null;
+        }
+
+        const composeCtx: ComposeContext = {
+          projectsDir,
+          projectsHostDir,
+          dataDir,
+          slug: projectSlug,
+        };
+
+        const containers = await composePs(composeCtx);
+        const container = containers.find((c) => c.service === service);
+
+        if (!container) {
+          return null;
+        }
+
+        // Docker compose ps doesn't provide restart count directly, so we set it to 0
+        return {
+          state: container.state,
+          health: container.health,
+        };
+      },
     };
 
     // Execute with retries (N retries = N+1 total attempts)

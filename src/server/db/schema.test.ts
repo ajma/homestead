@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createDb, runMigrations } from "./client.js";
-import { checks, devices, exposures, monitors } from "./schema.js";
+import { checks, devices, exposures, manualApps, monitors } from "./schema.js";
 
 async function db() {
   const d = createDb(":memory:");
@@ -94,6 +94,26 @@ describe("cloudflare schema", () => {
       enabled: true,
       noTlsVerify: false,
       accessAppId: null,
+    });
+  });
+});
+
+describe("manual apps schema", () => {
+  it("stores a manual app with an optional icon", async () => {
+    const d = createDb(":memory:");
+    await runMigrations(d);
+    await d.insert(manualApps).values({
+      id: "a1",
+      name: "Router",
+      url: "https://192.168.1.1",
+    });
+    const [row] = await d.select().from(manualApps);
+    expect(row).toMatchObject({
+      name: "Router",
+      url: "https://192.168.1.1",
+      iconSlug: null,
+      iconUrl: null,
+      hidden: false,
     });
   });
 });
