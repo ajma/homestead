@@ -22,10 +22,10 @@ are the second, and arrive with the dashboard.
 ### In scope
 
 - A monitor engine: monitors, a check runner, retries, per-monitor intervals.
-- Four monitor types: `tailscale`, `tcp`, `http`, `push`.
+- Five monitor types: `tailscale`, `tcp`, `http`, `dns`, `push`.
 - A check log with hourly rollups, retention, and uptime arithmetic.
 - Device records — Tailscale-synced and manually added.
-- A `/devices` screen: status, history bar, response-time graph, uptime figures.
+- A `/devices` screen: status, history bar, uptime figures.
 - The Tailscale API key, stored encrypted.
 
 ### Not in scope
@@ -36,7 +36,11 @@ are the second, and arrive with the dashboard.
 - **Apps as monitor targets.** The engine is built generic over target type and the
   schema reserves it, but wiring apps happens with the dashboard (§9).
 - **ICMP ping.** Requires `CAP_NET_RAW` in the container and fails silently without
-  it. `tcp` covers everything that listens; Tailscale covers what does not (§5.4).
+  it. `tcp` covers everything that listens; Tailscale covers what does not (§5.5).
+- **Latency, for apps or devices.** No response-time graph and no latency figures.
+  Checks still record `durationMs` because the runner has to measure elapsed time to
+  enforce its timeout — the number is free, and keeping the column avoids a migration
+  if a graph is ever wanted — but nothing reads it and no aggregate is stored.
 - **An installed agent.** The `push` monitor is a URL to curl from a cron line, not
   software to deploy.
 - **Inferring "at home".** Tailscale reports connectivity, not location. Status is
@@ -52,7 +56,7 @@ Monitoring + Devices (this) → Dashboard → Packaging.
 
 ```
 target  (device | app)              ← the thing with a status dot
-  ├── monitor   tailscale | tcp | http | push
+  ├── monitor   tailscale | tcp | http | dns | push
   │     └── checks   (at, up, durationMs, error)
   └── status = rollup of its monitors' current states
 ```
@@ -63,8 +67,8 @@ for apps (§10 of the product design), generalised so devices get the same treat
 
 ### 2.1 Required and advisory monitors
 
-Every monitor is either **required** — it gates the dot — or **advisory**: collected,
-graphed and displayed, but unable to pull the target red. Default required.
+Every monitor is either **required** — it gates the dot — or **advisory**: collected
+and displayed, but unable to pull the target red. Default required.
 
 Without this, one flaky signal makes a working app permanently red. The concrete case
 is a host that blocks ICMP or a port that is firewalled from the Homestead box: the
@@ -90,7 +94,7 @@ Four tables. `settings` and the `encrypt`/`decrypt` pair from Plan 1 are reused.
 | `id` | uuid |
 | `targetType` | `'device'` today; `'app'` reserved for the dashboard plan |
 | `targetId` | **`text`, deliberately** — see below |
-| `type` | `tailscale` \| `tcp` \| `http` \| `push` |
+| `type` | `tailscale` \| `tcp` \| `http` \| `dns` \| `push` |
 | `config` | JSON, shape determined by `type` (§5) |
 | `intervalSeconds` | per monitor |
 | `timeoutMs` | per monitor |
@@ -115,14 +119,18 @@ reconciles against Tailscale.
 ### 3.2 `checks`
 
 `monitorId`, `at`, `up`, `durationMs`, `error`. The observation log. Uptime
-percentages, the history bar and the response-time graph are **queries over this
-table**, never stored state.
+percentages and the history bar are **queries over this table**, never stored state.
+
+`durationMs` is recorded but unread (§1). The runner already measures elapsed time to
+enforce timeouts, so discarding it would be a choice rather than a saving, and keeping
+it means a latency graph later is a feature rather than a migration.
 
 ### 3.3 `check_rollups`
 
-`monitorId`, `hourStartedAt`, `upCount`, `downCount`, `avgDurationMs`,
-`maxDurationMs`. Written by the nightly job, read for windows longer than the raw
-retention.
+`monitorId`, `hourStartedAt`, `upCount`, `downCount`. Written by the nightly job, read
+for windows longer than the raw retention. No latency aggregate: nothing reads it, and
+an unused average is the kind of column that later gets trusted without anyone checking
+how it was computed.
 
 ### 3.4 `devices`
 
@@ -162,8 +170,10 @@ them wrong produces a plausible-looking but incorrect screen.
   therefore comes from **`connectedToControl`**, and a list sorted by `lastSeen` would
   place every currently-connected device at the end with an undefined value.
 - **`clientConnectivity.latency` is a map of DERP relay latencies**, not the device's
-  round-trip time. It cannot feed a per-device response-time graph; that data comes
-  from `tcp` and `http` monitors.
+  round-trip time. Recorded here because the name invites the opposite assumption: it
+  is the latency from the device to each Tailscale relay, and says nothing about
+  reaching the device. Latency is out of scope (§1) but this field would be the wrong
+  source for it regardless.
 - **`blocksIncomingConnections`** means the device refuses connections over Tailscale,
   including pings. A `tcp` monitor against such a device will always fail. The UI warns
   when a monitor is created against one rather than letting the user debug a
@@ -200,10 +210,22 @@ privileges required, works in any container.
 
 ### 5.3 `http`
 
-Config: `url`, `method`, `expectStatus`, optional `expectBodyContains`. Records
-response time. This is the app health probe, generalised.
+Config: `url`, `method`, `expectStatus`, optional `expectBodyContains`. This is the app
+health probe, generalised.
 
-### 5.4 `push`
+### 5.4 `dns`
+
+Config: `hostname`, optional `expectResolvesTo`. Up when the name resolves. This is the
+first rung of the product design's reachability probe: for an exposed app, DNS failing
+and the tunnel failing are different problems with different fixes, and collapsing them
+into one "unreachable" tells you nothing about which to go and look at.
+
+Devices rarely need it — a MagicDNS name resolving says little that
+`connectedToControl` has not already said. It is built here because the engine is where
+monitor types live, and the app monitors that need it (§9) would otherwise have to
+reopen the engine to add one type.
+
+### 5.5 `push`
 
 Config: `token`, `graceSeconds`. Homestead mints a URL; something on the device curls
 it on a schedule; the monitor is down when no call has arrived within
@@ -213,7 +235,7 @@ design already sketched as `POST /api/heartbeat/<token>`.
 A push monitor is checked by the runner like any other — it just examines a timestamp
 instead of opening a connection.
 
-### 5.5 Why not ICMP
+### 5.6 Why not ICMP
 
 A real ping needs `CAP_NET_RAW`, which means the deployment grows a `--cap-add` and,
 without it, every ICMP monitor reports down for a reason the UI cannot explain. The
@@ -288,8 +310,8 @@ toggle.
 ### 8.2 Device detail
 
 Its monitors with individual states, the **history bar** (a row of coloured segments
-over the retention window), the **response-time graph**, and uptime figures for 24h,
-30d and 1y. Add and edit monitors here. Manual devices can be created, renamed,
+over the retention window), and uptime figures for 24h, 30d and 1y. Add and edit
+monitors here. Manual devices can be created, renamed,
 re-kinded and deleted; synced devices can be renamed, re-kinded, annotated and hidden,
 but their Tailscale fields are read-only and refreshed on sync.
 
@@ -300,11 +322,11 @@ action that reports how many devices were found rather than a bare success.
 
 ### 8.4 Charting
 
-The history bar and the response-time graph are **hand-rolled SVG** — a row of rects
-and a line path. This keeps the token-only design rule intact (a charting library
-styles through its own props, which `design-system.test.ts` cannot police), adds no
-dependency to a bundle served from a NAS, and renders correctly in both themes. The
-cost is that tooltips and axis labelling are ours to write.
+The history bar is **hand-rolled SVG** — a row of rects. With latency out of scope
+there is no line chart, so this is the only drawing in the plan and a charting library
+would be a dependency for a dozen rectangles. It also keeps the token-only design rule
+intact: a library styles through its own props, which `design-system.test.ts` cannot
+police.
 
 ---
 
@@ -319,6 +341,31 @@ cost is that tooltips and axis labelling are ours to write.
 - App monitors must be reconciled against `docker compose config` whenever a project
   changes, or a monitor will outlive the port it watches (§3.1).
 - The dashboard renders both target types with the same dot and reason.
+
+### 9.1 A project-backed app provisions its monitors automatically
+
+Monitors for a project-backed app are **not** configured by hand. When such an app is
+discovered, Homestead creates its standard set and keeps it reconciled:
+
+| Monitor | Type | Asks |
+|---|---|---|
+| Container | `docker` | Is the container running, and what does its `HEALTHCHECK` say? |
+| Internal port | `tcp` | Does the published host port accept a connection? |
+| Internal URL | `http` | Does `http://127.0.0.1:<host_port><path>` answer? |
+| DNS | `dns` | Does the exposure hostname resolve? |
+
+Auto-provisioning is what makes the dot meaningful without setup: an app the user never
+configured still answers "is it working" the moment it appears. The user can mark any of
+them advisory or disable them, but cannot orphan the set from the project.
+
+Note this adds a sixth monitor type, **`docker`**, which reads container state and
+health through the existing Docker wrapper rather than the network. It is not built in
+this plan — devices have no containers — but the engine must not assume every check is
+a network call. `push` already establishes that precedent: it examines a timestamp.
+
+A manual app has no container and no local port, so it gets `http` against its URL and
+`dns` against its hostname; the product design's rule that its public probe *is* the
+health signal (§10) follows from having nothing else.
 
 ---
 
