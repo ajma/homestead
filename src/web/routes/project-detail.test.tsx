@@ -2,7 +2,13 @@ import type { ContainerState, Operation } from "@shared/projects.js";
 import { focusManager, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Link, MemoryRouter, Routes, useLocation } from "react-router-dom";
+import {
+  createMemoryRouter,
+  Link,
+  RouterProvider,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createQueryClient,
@@ -74,6 +80,7 @@ function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
     parseError: null,
     states: [container()],
     statesError: null,
+    hasHomestead: true,
     snapshots: ["compose.yaml.2026-09-01T10-00-00Z.bak"],
     ...over,
   };
@@ -103,6 +110,7 @@ type Stub = {
   detail?: () => Response;
   operations?: () => Response;
   post?: () => Response;
+  file?: (name: string) => Response;
 };
 
 /** One fetch mock routed by path, because the page issues several calls. */
@@ -112,6 +120,12 @@ function stubApi(stub: Stub) {
       return (stub.post ?? (() => json(202, { operationId: "op-9" })))();
     if (String(path).endsWith("/operations"))
       return (stub.operations ?? (() => json(200, { operations: [] })))();
+    // The Edit tab reads both files as soon as it mounts.
+    const file = /\/file\/(compose|env)$/.exec(String(path));
+    if (file?.[1])
+      return (
+        stub.file ?? ((name: string) => json(200, { content: `# ${name}\n` }))
+      )(file[1]);
     return (stub.detail ?? (() => json(200, detail())))();
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -136,17 +150,36 @@ function Path() {
   );
 }
 
+/**
+ * A **data** router with the routes mounted as a descendant `<Routes>`, which
+ * is exactly how `main.tsx` and `App.tsx` are arranged.
+ *
+ * `MemoryRouter` will not do any more: the Edit tab's unsaved-changes guard is
+ * built on `useBlocker`, which reads the router object rather than the
+ * location and throws outright outside a data router.
+ */
 function renderDetail(path = "/projects/jellyfin/overview") {
   // The app's own client: the refusal rules live on it, not in the hooks.
   const client = createQueryClient({ retryDelay: 0 });
+  const router = createMemoryRouter(
+    [
+      {
+        path: "*",
+        element: (
+          <>
+            <Routes>{projectDetailRoute}</Routes>
+            <Path />
+          </>
+        ),
+      },
+    ],
+    { initialEntries: [path] },
+  );
   return {
     client,
     ...render(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[path]}>
-          <Routes>{projectDetailRoute}</Routes>
-          <Path />
-        </MemoryRouter>
+        <RouterProvider router={router} />
       </QueryClientProvider>,
     ),
   };
@@ -212,10 +245,14 @@ describe("ProjectDetail routing", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps edit reachable as a placeholder until the editor lands", async () => {
+  it("mounts the real editor at the edit tab", async () => {
     stubApi({});
     renderDetail("/projects/jellyfin/edit");
-    expect(await screen.findByText(/not available yet/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("region", { name: "Edit project files" }),
+    ).toBeInTheDocument();
+    // The compose file the stub served, not a placeholder.
+    expect(await screen.findByText(/# compose/)).toBeInTheDocument();
   });
 
   it("moves between tabs", async () => {
@@ -228,7 +265,9 @@ describe("ProjectDetail routing", () => {
     expect(
       await screen.findByText("path: /projects/jellyfin/edit"),
     ).toBeInTheDocument();
-    expect(await screen.findByText(/not available yet/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("region", { name: "Edit project files" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Edit" })).toHaveAttribute(
       "aria-selected",
       "true",

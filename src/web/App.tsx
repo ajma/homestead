@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell.js";
 import { ProtectedRoute } from "./components/ProtectedRoute.js";
+import { CreateProject } from "./routes/CreateProject.js";
 import { Dashboard } from "./routes/Dashboard.js";
 import { Login } from "./routes/Login.js";
 import { NotFound } from "./routes/NotFound.js";
@@ -51,6 +52,12 @@ export function App() {
       >
         <Route path="/" element={<Dashboard />} />
         <Route path="/projects" element={<ProjectList />} />
+        {/* Ranked above `/projects/:slug` by the router itself — a static
+            segment always beats a dynamic one — so the position here is for
+            readers, not for matching. "new" is in `RESERVED_SLUGS`, which is
+            what stops the form creating a project this route would shadow;
+            any static child added beside it needs the same entry. */}
+        <Route path="/projects/new" element={<CreateProject />} />
         {projectDetailRoute}
         {/* Nested, so an unknown path is still behind ProtectedRoute and still
             renders inside the shell — a mistyped URL keeps its navigation. */}

@@ -1,5 +1,5 @@
 import type { OperationKind } from "@shared/projects.js";
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
   Link,
   Navigate,
@@ -8,9 +8,11 @@ import {
   useMatch,
   useParams,
 } from "react-router-dom";
+import { DeleteProjectDialog } from "../components/DeleteProjectDialog.js";
 import { OperationPanel } from "../components/OperationPanel.js";
 import {
   Button,
+  Dialog,
   EmptyState,
   Panel,
   Spinner,
@@ -27,6 +29,7 @@ import {
   useProject,
   useProjectOperations,
 } from "../lib/queries.js";
+import { Edit } from "./project/Edit.js";
 import { Logs } from "./project/Logs.js";
 import { Overview } from "./project/Overview.js";
 import { projectStatus } from "./project/status.js";
@@ -88,23 +91,6 @@ function BackLink() {
   );
 }
 
-function Placeholder({ title, children }: { title: string; children: string }) {
-  return (
-    <Panel title={title}>
-      <p className="text-sm text-muted">{children}</p>
-    </Panel>
-  );
-}
-
-/** Replaced by the compose editor in Plan 4. */
-function ComposeEditorRoute() {
-  return (
-    <Placeholder title="Compose editor">
-      Editing the compose file is not available yet.
-    </Placeholder>
-  );
-}
-
 /**
  * Overview is rendered by {@link ProjectDetail} itself, because at `lg` and
  * above it is a sidebar that stays put while the other tabs change. This route
@@ -136,46 +122,18 @@ export function ProjectDetail() {
   } | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(true);
   const [confirmingDown, setConfirmingDown] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const overviewId = useId();
-  const confirmId = useId();
   const busyId = useId();
+  const descId = useId();
   const downRef = useRef<HTMLButtonElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-
-  // Focus lands on Cancel, never on the destructive button: opening a
-  // confirmation with the "yes" already focused turns a stray Enter into the
-  // very action the confirmation exists to prevent.
-  useEffect(() => {
-    if (confirmingDown) cancelRef.current?.focus();
-  }, [confirmingDown]);
-
-  // Escape on the document, not on the dialog: this confirmation is not modal,
-  // so focus can be anywhere on the page — a click on the background, or a Tab
-  // out of it — and a dismissal key that silently stops working once focus
-  // leaves is worse than none, because the user believes they cancelled.
-  useEffect(() => {
-    if (!confirmingDown) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") cancelDownRef.current();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [confirmingDown]);
 
   const run = (verb: OperationKind) =>
     lifecycle.mutate(verb, {
       onSuccess: (id) => setActiveOperation({ id, kind: verb }),
     });
 
-  /** Dismissing a confirmation returns focus to what opened it. */
-  const cancelDown = () => {
-    setConfirmingDown(false);
-    downRef.current?.focus();
-  };
-  // Read through a ref so the document listener above is bound once per open
-  // rather than re-bound on every render.
-  const cancelDownRef = useRef(cancelDown);
-  cancelDownRef.current = cancelDown;
+  const cancelDown = () => setConfirmingDown(false);
 
   if (detail.isPending)
     return (
@@ -275,40 +233,63 @@ export function ProjectDetail() {
             {BUSY_REASON}
           </p>
         )}
-        {confirmingDown && (
-          <div
-            role="alertdialog"
-            aria-labelledby={confirmId}
-            className="mt-3 rounded-md border border-danger bg-raised p-3"
+        {/* Outside the lifecycle toolbar on purpose. Deleting the directory is
+            not a fourth verb — it is the one action here that no later verb
+            can undo — and grouping it with Restart invites the mis-tap. */}
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button
+            variant="ghost"
+            className="text-danger"
+            disabled={busy}
+            aria-describedby={busy ? busyId : undefined}
+            title={busy ? BUSY_REASON : undefined}
+            onClick={() => setDeleting(true)}
           >
-            <p id={confirmId} className="text-sm text-text">
-              Stop and remove <strong>{slug}</strong>? This deletes its
-              containers and networks. Named volumes are kept; anything written
-              inside a container is lost.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                variant="danger"
-                // Gated on exactly what the toolbar is gated on: someone else
-                // can start an operation between opening this and confirming
-                // it, and an ungated confirm turns that into an unanticipated
-                // 409.
-                disabled={busy}
-                aria-describedby={busy ? busyId : undefined}
-                title={busy ? BUSY_REASON : undefined}
-                onClick={() => {
-                  setConfirmingDown(false);
-                  run("down");
-                }}
-              >
-                Yes, stop and remove
-              </Button>
-              <Button ref={cancelRef} onClick={cancelDown}>
-                Cancel
-              </Button>
-            </div>
-          </div>
+            Delete project…
+          </Button>
+        </div>
+        {/* Mounted only while open: the dialog's typed-slug field and its
+            "already confirmed once" flag are local state, and unmounting is
+            what guarantees a reopened dialog starts from the first question
+            rather than resuming one the user escaped out of. */}
+        {deleting && (
+          <DeleteProjectDialog
+            open
+            onClose={() => setDeleting(false)}
+            detail={data}
+          />
         )}
+        <Dialog
+          open={confirmingDown}
+          onClose={cancelDown}
+          title={`Stop and remove ${slug}?`}
+          describedBy={descId}
+          role="alertdialog"
+        >
+          <p id={descId} className="text-sm text-text">
+            This deletes its containers and networks. Named volumes are kept;
+            anything written inside a container is lost.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button onClick={cancelDown}>Cancel</Button>
+            <Button
+              variant="danger"
+              // Gated on exactly what the toolbar is gated on: someone else
+              // can start an operation between opening this and confirming
+              // it, and an ungated confirm turns that into an unanticipated
+              // 409.
+              disabled={busy}
+              aria-describedby={busy ? busyId : undefined}
+              title={busy ? BUSY_REASON : undefined}
+              onClick={() => {
+                setConfirmingDown(false);
+                run("down");
+              }}
+            >
+              Yes, stop and remove
+            </Button>
+          </div>
+        </Dialog>
         {lifecycle.isError && (
           <p role="alert" className="mt-2 text-sm text-danger">
             {lifecycleErrorMessage(lifecycle.error)}
@@ -436,7 +417,7 @@ export const projectDetailRoute = (
   <Route path="/projects/:slug" element={<KeyedProjectDetail />}>
     <Route index element={<Navigate to="overview" replace />} />
     <Route path="overview" element={<OverviewRoute />} />
-    <Route path="edit" element={<ComposeEditorRoute />} />
+    <Route path="edit" element={<Edit />} />
     <Route path="logs" element={<Logs />} />
   </Route>
 );

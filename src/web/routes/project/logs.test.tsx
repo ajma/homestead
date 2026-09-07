@@ -29,6 +29,7 @@ function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
     parseError: null,
     states: [],
     statesError: null,
+    hasHomestead: true,
     snapshots: [],
     ...over,
   };

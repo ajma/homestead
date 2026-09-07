@@ -1452,16 +1452,89 @@ Expected: FAIL — module not found.
 
 - [ ] **Step 4: Implement**
 
+**Split this into two files.** `CodeEditor.tsx` owns the CodeMirror lifecycle and knows nothing about YAML; `ComposeEditor.tsx` supplies the language, the linter and the touch toolbar. Task 9's raw `.env` view is the second consumer — spec §4.2 requires the raw toggle to be CodeMirror, and duplicating the mount/teardown/reconcile logic there is how the two drift apart.
+
+`src/web/components/CodeEditor.tsx`:
+
+```typescript
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { EditorState, type Extension } from "@codemirror/state";
+import { EditorView, keymap, lineNumbers } from "@codemirror/view";
+import { useEffect, useRef } from "react";
+
+export function CodeEditor({
+  value, onChange, extensions = [], ariaLabel, viewRef,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  extensions?: Extension[];
+  ariaLabel: string;
+  /** Lets a parent run commands (indent/outdent) against the live view. */
+  viewRef?: { current: EditorView | null };
+}) {
+  const host = useRef<HTMLDivElement>(null);
+  const view = useRef<EditorView | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    if (!host.current) return;
+    const editor = new EditorView({
+      parent: host.current,
+      state: EditorState.create({
+        doc: value,
+        extensions: [
+          lineNumbers(),
+          history(),
+          keymap.of([...defaultKeymap, ...historyKeymap]),
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+          }),
+          EditorView.theme({ "&": { fontSize: "14px" }, ".cm-content": { fontFamily: "monospace" } }),
+          EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
+          ...extensions,
+        ],
+      }),
+    });
+    view.current = editor;
+    if (viewRef) viewRef.current = editor;
+    return () => {
+      editor.destroy();
+      view.current = null;
+      if (viewRef) viewRef.current = null;
+    };
+    // Mount once. Recreating the view per keystroke would destroy the cursor
+    // and the undo history; external changes are reconciled below.
+  }, []);
+
+  useEffect(() => {
+    const editor = view.current;
+    if (!editor) return;
+    const current = editor.state.doc.toString();
+    if (current === value) return;
+    editor.dispatch({ changes: { from: 0, to: current.length, insert: value } });
+  }, [value]);
+
+  return (
+    <div
+      ref={host}
+      className="overflow-auto rounded-md border border-border bg-surface"
+      style={{ maxHeight: "60vh" }}
+    />
+  );
+}
+```
+
 `src/web/components/ComposeEditor.tsx`:
 
 ```typescript
-import { defaultKeymap, history, historyKeymap, indentLess, indentMore } from "@codemirror/commands";
+import { indentLess, indentMore } from "@codemirror/commands";
 import { yaml } from "@codemirror/lang-yaml";
 import { lintGutter, linter } from "@codemirror/lint";
-import { EditorState } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers } from "@codemirror/view";
-import { useEffect, useRef } from "react";
+import type { EditorView } from "@codemirror/view";
+import { useRef } from "react";
 import { parseDocument } from "yaml";
+import { CodeEditor } from "./CodeEditor.js";
 import { Button } from "./ui/index.js";
 
 /**
@@ -1489,48 +1562,7 @@ export function ComposeEditor({
   onSave: () => void;
   dirty: boolean;
 }) {
-  const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
-
-  useEffect(() => {
-    if (!host.current) return;
-    const editor = new EditorView({
-      parent: host.current,
-      state: EditorState.create({
-        doc: value,
-        extensions: [
-          lineNumbers(),
-          history(),
-          yaml(),
-          yamlLint,
-          lintGutter(),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
-          EditorView.updateListener.of((u) => {
-            if (u.docChanged) onChangeRef.current(u.state.doc.toString());
-          }),
-          EditorView.theme({ "&": { fontSize: "14px" }, ".cm-content": { fontFamily: "monospace" } }),
-        ],
-      }),
-    });
-    view.current = editor;
-    return () => {
-      editor.destroy();
-      view.current = null;
-    };
-    // Mount once. `value` is the initial document; later external changes are
-    // reconciled by the effect below, because recreating the view on every
-    // keystroke would destroy the cursor and the undo history.
-  }, []);
-
-  useEffect(() => {
-    const editor = view.current;
-    if (!editor) return;
-    const current = editor.state.doc.toString();
-    if (current === value) return;
-    editor.dispatch({ changes: { from: 0, to: current.length, insert: value } });
-  }, [value]);
 
   const run = (command: (v: EditorView) => boolean) => () => {
     const editor = view.current;
@@ -1547,10 +1579,12 @@ export function ComposeEditor({
         <Button onClick={run(indentLess)} aria-label="Outdent">Outdent</Button>
         <Button onClick={onSave} disabled={!dirty} aria-label="Save">Save</Button>
       </div>
-      <div
-        ref={host}
-        className="overflow-auto rounded-md border border-border bg-surface"
-        style={{ maxHeight: "60vh" }}
+      <CodeEditor
+        value={value}
+        onChange={onChange}
+        extensions={[yaml(), yamlLint, lintGutter()]}
+        ariaLabel="Compose file"
+        viewRef={view}
       />
     </div>
   );
@@ -1698,12 +1732,11 @@ export function EnvEditor({
     return (
       <EmptyState
         title="No .env file"
-        body="This project has no .env yet. Creating one lets compose substitute variables into its file."
-      >
-        {/* The first save writes it; writeProjectFile takes no snapshot when
-            the target does not exist, which is already the correct behaviour. */}
-        <Button onClick={() => onChange("")}>Create .env</Button>
-      </EmptyState>
+        description="This project has no .env yet. Creating one lets compose substitute variables into its file."
+        // The first save writes it; writeProjectFile takes no snapshot when
+        // the target does not exist, which is already the correct behaviour.
+        action={<Button onClick={() => onChange("")}>Create .env</Button>}
+      />
     );
 
   const lines = parseEnv(value);
@@ -1721,12 +1754,11 @@ export function EnvEditor({
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <SegmentedControl
-          name="env-view"
           value={view}
           onChange={(v) => setView(v as "form" | "raw")}
-          options={[
-            { value: "form", label: "Form" },
-            { value: "raw", label: "Raw" },
+          items={[
+            { id: "form", label: "Form" },
+            { id: "raw", label: "Raw" },
           ]}
         />
         <Button onClick={onSave} disabled={!dirty}>Save</Button>
@@ -1735,12 +1767,9 @@ export function EnvEditor({
       {view === "raw" ? (
         // The escape hatch §4.2 requires: multi-line values and exotic quoting
         // stay editable rather than becoming unreachable through the form.
-        <textarea
-          aria-label="Raw .env contents"
-          className="min-h-64 rounded-md border border-border bg-surface p-2 font-mono text-sm text-text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        // CodeMirror rather than a textarea, per §4.2 — line numbers are what
+        // you want when hunting the quoting problem the form could not model.
+        <CodeEditor value={value} onChange={onChange} ariaLabel="Raw .env contents" />
       ) : (
         <>
           <ul className="flex flex-col gap-2">
@@ -1976,12 +2005,11 @@ export function CreateProject() {
       </label>
 
       <SegmentedControl
-        name="create-source"
         value={source}
         onChange={(v) => setSource(v as "blank" | "paste")}
-        options={[
-          { value: "blank", label: "Blank" },
-          { value: "paste", label: "Paste a compose file" },
+        items={[
+          { id: "blank", label: "Blank" },
+          { id: "paste", label: "Paste a compose file" },
         ]}
       />
 

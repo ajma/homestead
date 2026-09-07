@@ -103,3 +103,47 @@ export type Operation = {
   startedAt: number;
   finishedAt: number | null;
 };
+
+/**
+ * Slugs the router would shadow, so a project created at one could never be
+ * opened again.
+ *
+ * Only *static siblings* of `/projects/:slug` belong here. The tabs under a
+ * project (`edit`, `logs`, `overview`) sit one segment deeper, so a project
+ * named `edit` lives happily at `/projects/edit/edit`; reserving those would
+ * refuse valid names for no gain. Whoever adds the next static child of
+ * `/projects` has to add it here too.
+ *
+ * Case-insensitive because {@link isValidSlug}'s character rule is.
+ */
+export const RESERVED_SLUGS: readonly string[] = ["new"];
+
+/**
+ * Naming policy for a project being **created**, and deliberately not part of
+ * {@link isValidSlug}.
+ *
+ * The distinction is load-bearing. `new` is a perfectly safe path segment, so
+ * folding this into the path-safety predicate would also gate `GET` and
+ * `DELETE` — and an *adopted* directory named `new`, sitting on the NAS before
+ * Homestead ever saw it, would go from merely unopenable in the UI to
+ * unmanageable through the API as well. A rule about names we are about to
+ * mint must not be applied to data that already exists.
+ */
+export function isReservedSlug(slug: string): boolean {
+  return RESERVED_SLUGS.includes(slug.toLowerCase());
+}
+
+/**
+ * Purely a path-safety predicate: is this string safe to join onto the
+ * projects root? Nothing about routing, and nothing about policy — see
+ * {@link isReservedSlug} for that.
+ */
+export function isValidSlug(slug: string): boolean {
+  return (
+    slug.length > 0 &&
+    slug.length <= 64 &&
+    /^[a-z0-9][a-z0-9._-]*$/i.test(slug) &&
+    !slug.startsWith(".") &&
+    !slug.includes("..")
+  );
+}

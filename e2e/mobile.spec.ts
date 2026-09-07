@@ -159,7 +159,9 @@ test.describe("at phone width", () => {
     // which is precisely what "a tab, not a sidebar" means.
     await page.getByRole("tab", { name: "Edit" }).click();
     await expect(page).toHaveURL(new RegExp(`/projects/${BUSY}/edit$`));
-    await expect(page.getByText(/not available yet/i)).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Edit project files" }),
+    ).toBeVisible();
     await expect(overview).toBeHidden();
   });
 
@@ -222,9 +224,11 @@ test.describe("at phone width", () => {
     await expectNoHorizontalScroll(page, "the overview tab");
 
     // The Edit tab is the other half of the route: the parse-error panel and
-    // the placeholder render there, and the overview rail does not.
+    // the editor render there, and the overview rail does not.
     await page.getByRole("tab", { name: "Edit" }).click();
-    await expect(page.getByText(/not available yet/i)).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Edit project files" }),
+    ).toBeVisible();
     await expectNoHorizontalScroll(page, "the edit tab");
   });
 

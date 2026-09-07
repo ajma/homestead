@@ -10,8 +10,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import type { ScanEntry } from "@shared/projects.js";
+import { join, resolve, sep } from "node:path";
+import { isValidSlug, type ScanEntry } from "@shared/projects.js";
+import { blankScaffold, injectHomesteadBlock } from "./doc.js";
 
 /** Compose's own precedence order. */
 const COMPOSE_FILENAMES = [
@@ -23,22 +24,21 @@ const COMPOSE_FILENAMES = [
 
 /** Re-exported for the server's own callers; defined in the shared boundary. */
 export type { ScanEntry };
-
-export function isValidSlug(slug: string): boolean {
-  return (
-    /^[a-z0-9][a-z0-9._-]*$/i.test(slug) &&
-    !slug.startsWith(".") &&
-    !slug.includes("..")
-  );
-}
+export { isValidSlug };
 
 export function projectPath(projectsDir: string, slug: string): string {
   if (!isValidSlug(slug))
     throw new Error(`invalid project slug: ${JSON.stringify(slug)}`);
-  const path = resolve(projectsDir, slug);
-  if (path !== join(projectsDir, slug))
+  const resolvedRoot = resolve(projectsDir);
+  const resolvedPath = resolve(projectsDir, slug);
+  // Containment: the resolved path must be inside the projects root.
+  // This catches relative traversal (../evil) even if isValidSlug is bypassed.
+  if (
+    resolvedPath !== resolvedRoot &&
+    !resolvedPath.startsWith(resolvedRoot + sep)
+  )
     throw new Error(`slug escapes the projects root: ${slug}`);
-  return path;
+  return resolvedPath;
 }
 
 export async function findComposeFile(dir: string): Promise<string | null> {
@@ -205,4 +205,40 @@ export async function writeProjectFile(
     await rm(tmp, { force: true });
     throw err;
   }
+}
+
+export class ProjectExistsError extends Error {
+  constructor(slug: string) {
+    super(`project already exists: ${slug}`);
+    this.name = "ProjectExistsError";
+  }
+}
+
+export async function createProject(
+  projectsDir: string,
+  slug: string,
+  source: { kind: "blank" } | { kind: "paste"; content: string },
+): Promise<void> {
+  // Throws on a slug that escapes the root — the same boundary every other
+  // path-taking function in this file goes through.
+  const dir = projectPath(projectsDir, slug);
+  try {
+    await mkdir(dir, { recursive: false });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST")
+      throw new ProjectExistsError(slug);
+    throw err;
+  }
+  const content =
+    source.kind === "blank"
+      ? blankScaffold(slug)
+      : injectHomesteadBlock(source.content, { kind: "paste" });
+  await writeFile(join(dir, "docker-compose.yml"), content, "utf8");
+}
+
+export async function deleteProjectDir(
+  projectsDir: string,
+  slug: string,
+): Promise<void> {
+  await rm(projectPath(projectsDir, slug), { recursive: true, force: true });
 }

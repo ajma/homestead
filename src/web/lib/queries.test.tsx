@@ -16,10 +16,14 @@ import {
   projectsPollInterval,
   queryKeys,
   refetchUnlessRefused,
+  useCreateProject,
+  useDeleteProject,
   useLifecycle,
   useProject,
+  useProjectFile,
   useProjectOperations,
   useProjects,
+  useSaveProjectFile,
 } from "./queries.js";
 
 afterEach(() => {
@@ -28,6 +32,13 @@ afterEach(() => {
   // Undo any focus the test forced; focusManager is module-level state.
   focusManager.setFocused(undefined);
 });
+
+/**
+ * Render a hook with the app's query client.
+ */
+function renderHookWithClient<T>(hook: () => T) {
+  return renderHook(hook, { wrapper: wrapper(testClient()) });
+}
 
 /** Alt-tab away and back. */
 async function refocusWindow() {
@@ -476,5 +487,197 @@ describe("lifecycleErrorMessage", () => {
     expect(lifecycleErrorMessage(new Error("network down"))).toMatch(
       /network down/,
     );
+  });
+});
+
+describe("useProjectFile", () => {
+  it("returns null rather than throwing when the file does not exist", async () => {
+    // A project with no .env is normal, and the route renders it as 404.
+    // Throwing would make the editor show an error for an ordinary state.
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(404, { error: "not_found" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() =>
+      useProjectFile("media", "env"),
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects/media/file/env");
+    expect(result.current.data).toBeNull();
+  });
+
+  it("returns the content on success", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(200, { content: "A=1\n" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() =>
+      useProjectFile("media", "env"),
+    );
+    await waitFor(() =>
+      expect(result.current.data).toEqual({ content: "A=1\n" }),
+    );
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects/media/file/env");
+  });
+
+  it("still surfaces a 403 as an error", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(403, { error: "forbidden" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() =>
+      useProjectFile("media", "compose"),
+    );
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/projects/media/file/compose",
+    );
+  });
+});
+
+describe("useSaveProjectFile", () => {
+  it("PUTs the content to the file route", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(200, { ok: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() =>
+      useSaveProjectFile("media", "compose"),
+    );
+    await act(async () => {
+      await result.current.mutateAsync("services: {}\n");
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/projects/media/file/compose",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("PUT");
+    const body = fetchMock.mock.calls[0]?.[1]?.body;
+    expect(JSON.parse(body as string)).toEqual({ content: "services: {}\n" });
+  });
+
+  it("invalidates the file cache and the project detail", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(200, { ok: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = testClient();
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const { result } = renderHook(
+      () => useSaveProjectFile("media", "compose"),
+      {
+        wrapper: wrapper(client),
+      },
+    );
+    await act(async () => {
+      await result.current.mutateAsync("services: {}\n");
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.file("media", "compose"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.project("media"),
+    });
+  });
+});
+
+describe("useCreateProject", () => {
+  it("reports an invalid paste as data, not as a failure", async () => {
+    // 201 with valid:false — the project exists and the user must reach its
+    // editor, so this must not land in the error branch.
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(201, {
+        slug: "broken",
+        valid: false,
+        error: "services must be a mapping",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() => useCreateProject());
+    let out: unknown;
+    await act(async () => {
+      out = await result.current.mutateAsync({
+        slug: "broken",
+        source: "paste",
+        content: "x",
+      });
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects");
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    const body = fetchMock.mock.calls[0]?.[1]?.body;
+    expect(JSON.parse(body as string)).toEqual({
+      slug: "broken",
+      source: "paste",
+      content: "x",
+    });
+    expect(out).toMatchObject({ slug: "broken", valid: false });
+  });
+
+  it("surfaces a 409 as an ApiError carrying the code", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(409, { error: "project_exists" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() => useCreateProject());
+    await expect(
+      result.current.mutateAsync({ slug: "media", source: "blank" }),
+    ).rejects.toMatchObject({ status: 409, code: "project_exists" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects");
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    const body = fetchMock.mock.calls[0]?.[1]?.body;
+    expect(JSON.parse(body as string)).toEqual({
+      slug: "media",
+      source: "blank",
+    });
+  });
+
+  it("invalidates the projects list on success", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(201, { slug: "media", valid: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = testClient();
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const { result } = renderHook(() => useCreateProject(), {
+      wrapper: wrapper(client),
+    });
+    await act(async () => {
+      await result.current.mutateAsync({ slug: "media", source: "blank" });
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.projects,
+    });
+  });
+});
+
+describe("useDeleteProject", () => {
+  it("DELETEs the project", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(200, { ok: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHookWithClient(() => useDeleteProject());
+    await act(async () => {
+      await result.current.mutateAsync("media");
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects/media");
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("DELETE");
+  });
+
+  it("invalidates the projects list on success", async () => {
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      json(200, { ok: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = testClient();
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const { result } = renderHook(() => useDeleteProject(), {
+      wrapper: wrapper(client),
+    });
+    await act(async () => {
+      await result.current.mutateAsync("media");
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: queryKeys.projects,
+    });
   });
 });

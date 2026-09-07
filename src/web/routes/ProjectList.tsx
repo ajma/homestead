@@ -9,6 +9,16 @@ import {
 } from "../components/ui/index.js";
 import { isRefusal, useProjects } from "../lib/queries.js";
 
+/**
+ * A `Link` styled as the primary button, not a `Button` that navigates.
+ *
+ * It goes somewhere, so it must be middle-clickable, long-pressable and
+ * copyable like every other destination in the app. `min-h-11` and `px-4`
+ * match `Button`'s `md` sizing so the sweep sees a 44px target.
+ */
+const NEW_PROJECT =
+  "inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-accent px-4 text-sm font-medium text-accent-contrast transition hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+
 /** 44px minimum touch target; the whole row is the target, not the name. */
 const ROW =
   "flex min-h-11 w-full items-center gap-3 px-4 py-2 text-sm transition focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
@@ -67,7 +77,12 @@ export function ProjectList() {
 
   return (
     <main className="mx-auto w-full max-w-3xl p-4 sm:p-8">
-      <h1 className="text-2xl font-semibold text-text">Projects</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold text-text">Projects</h1>
+        <Link to="/projects/new" className={NEW_PROJECT}>
+          New project
+        </Link>
+      </div>
       <Body data={data} error={error} isPending={isPending} />
     </main>
   );
@@ -119,7 +134,12 @@ function Body({
       {data.length === 0 ? (
         <EmptyState
           title="No projects yet"
-          description="Homestead lists every directory in HOMESTEAD_PROJECTS. Create a directory with a compose file there and it will appear here."
+          description="Homestead lists every directory in HOMESTEAD_PROJECTS. Create one here, or drop a directory with a compose file in there and it will appear."
+          action={
+            <Link to="/projects/new" className={NEW_PROJECT}>
+              New project
+            </Link>
+          }
         />
       ) : (
         <ul className="mt-6 divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface">

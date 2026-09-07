@@ -1,5 +1,6 @@
 export { Badge } from "./Badge.js";
 export { Button } from "./Button.js";
+export { Dialog } from "./Dialog.js";
 export { EmptyState } from "./EmptyState.js";
 export { IconButton } from "./IconButton.js";
 export { Input } from "./Input.js";

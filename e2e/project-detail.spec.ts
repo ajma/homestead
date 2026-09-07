@@ -110,7 +110,9 @@ test("the tabs navigate and the URL follows", async ({ page }) => {
 
   await page.getByRole("tab", { name: "Edit" }).click();
   await expect(page).toHaveURL(new RegExp(`/projects/${STACK}/edit$`));
-  await expect(page.getByText(/not available yet/i)).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Edit project files" }),
+  ).toBeVisible();
 
   await page.getByRole("tab", { name: "Overview" }).click();
   await expect(page).toHaveURL(new RegExp(`/projects/${STACK}/overview$`));

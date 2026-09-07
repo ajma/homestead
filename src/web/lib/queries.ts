@@ -20,6 +20,8 @@ export const queryKeys = {
   project: (slug: string) => ["project", slug] as const,
   /** A prefix of `project(slug)`, so invalidating the detail invalidates this. */
   projectOperations: (slug: string) => ["project", slug, "operations"] as const,
+  file: (slug: string, name: "compose" | "env") =>
+    ["project", slug, "file", name] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -129,6 +131,16 @@ export type ProjectDetailData = ScanEntry & {
   parseError: string | null;
   states: ContainerState[];
   statesError: string | null;
+  /**
+   * True when the compose file carries an `x-homestead` block — i.e. Homestead
+   * created this project. Absence is the provenance marker for an adopted
+   * directory (§3.7), which is why the delete dialog asks twice for one.
+   *
+   * Required, not optional: the server always sends it, and an optional field
+   * would let a missing flag read as "adopted" and silently soften a
+   * confirmation that exists to protect a user's data.
+   */
+  hasHomestead: boolean;
   snapshots: string[];
 };
 
@@ -224,4 +236,68 @@ export function lifecycleErrorMessage(error: unknown): string {
   return error instanceof Error
     ? `Could not start the operation. ${error.message}`
     : "Could not start the operation.";
+}
+
+export function useProjectFile(slug: string, name: "compose" | "env") {
+  return useQuery({
+    queryKey: queryKeys.file(slug, name),
+    queryFn: async () => {
+      try {
+        return await apiFetch<{ content: string }>(
+          `/api/projects/${slug}/file/${name}`,
+        );
+      } catch (err) {
+        // A project with no `.env` is an ordinary state, not a failure: the
+        // editor offers to create one. Every other status still throws.
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
+    },
+  });
+}
+
+export function useSaveProjectFile(slug: string, name: "compose" | "env") {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (content: string) => {
+      await apiFetch(`/api/projects/${slug}/file/${name}`, {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      });
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.file(slug, name) });
+      client.invalidateQueries({ queryKey: queryKeys.project(slug) });
+    },
+  });
+}
+
+export function useCreateProject() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      slug: string;
+      source: "blank" | "paste";
+      content?: string;
+    }) => {
+      const res = await apiFetch<{
+        slug: string;
+        valid: boolean;
+        error?: string;
+      }>("/api/projects", { method: "POST", body: JSON.stringify(body) });
+      if (!res) throw new Error("create returned no body");
+      return res;
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.projects }),
+  });
+}
+
+export function useDeleteProject() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (slug: string) => {
+      await apiFetch(`/api/projects/${slug}`, { method: "DELETE" });
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.projects }),
+  });
 }

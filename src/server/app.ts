@@ -46,13 +46,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(authPlugin, { auth: deps.auth });
   await app.register(onboardingRoutes, { db: deps.db, auth: deps.auth });
   await app.register(statusRoutes, { db: deps.db });
+  // One registry for both plugins: its per-slug lock is only a lock if delete
+  // and the lifecycle verbs contend for the same one.
+  const registry = createRegistry(deps.db);
   await app.register(projectRoutes, {
     projectsDir: deps.projectsDir,
     projectsHostDir: deps.projectsHostDir,
     dataDir: deps.dataDir,
+    registry,
     docker: deps.docker,
   });
-  const registry = createRegistry(deps.db);
   await app.register(operationRoutes, {
     projectsDir: deps.projectsDir,
     projectsHostDir: deps.projectsHostDir,

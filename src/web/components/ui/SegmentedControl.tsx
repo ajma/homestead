@@ -35,7 +35,7 @@ export function SegmentedControl({
             key={item.id}
             htmlFor={inputId}
             className={`
-              min-h-11 px-4 py-2 text-sm font-medium rounded-md transition cursor-pointer
+              relative inline-flex min-h-11 items-center justify-center px-4 py-2 text-sm font-medium rounded-md transition cursor-pointer
               focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-accent
               ${
                 isChecked
@@ -44,6 +44,13 @@ export function SegmentedControl({
               }
             `}
           >
+            {/* Transparent and stretched over the label, not `sr-only`.
+                `sr-only` renders a 1×1 box: the tap-target sweep measured the
+                radio itself and reported an 8px control, and every pointer
+                event landed on the label instead of the input, so Playwright
+                could never click it. Filling the label makes the real hit area
+                and the element's own box the same 44px rectangle, which is
+                what both the sweep and a thumb are actually asking about. */}
             <input
               type="radio"
               id={inputId}
@@ -51,7 +58,7 @@ export function SegmentedControl({
               value={item.id}
               checked={isChecked}
               onChange={() => onChange(item.id)}
-              className="sr-only"
+              className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
             />
             {item.label}
           </label>

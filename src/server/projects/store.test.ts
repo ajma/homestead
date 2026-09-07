@@ -9,8 +9,11 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "../test-support/tmp.js";
 import {
+  createProject,
+  deleteProjectDir,
   isValidSlug,
   listSnapshots,
+  ProjectExistsError,
   projectPath,
   readProjectFile,
   SNAPSHOT_RETENTION,
@@ -144,14 +147,30 @@ describe("slug safety", () => {
     expect(isValidSlug("media-stack_2")).toBe(true);
   });
 
-  it("rejects traversal and separators", () => {
+  it("rejects traversal and separators via isValidSlug", () => {
     for (const bad of ["..", "a/b", "/abs", ".hidden", "", "a b", "a\\b"]) {
       expect(isValidSlug(bad)).toBe(false);
     }
   });
 
-  it("projectPath throws rather than escaping the root", () => {
+  it("projectPath throws on relative traversal", () => {
+    // Caught by isValidSlug first, but containment would catch them too
+    // (verified by temporarily bypassing isValidSlug during development).
     expect(() => projectPath(root, "../etc")).toThrow();
+    expect(() => projectPath(root, "../evil")).toThrow();
+    expect(() => projectPath(root, "..")).toThrow();
+  });
+
+  it("projectPath throws on embedded traversal", () => {
+    // a/../../x would normalize to ../x outside the root — caught by
+    // isValidSlug's "/" rejection, but containment would catch it too.
+    expect(() => projectPath(root, "a/../../x")).toThrow();
+  });
+
+  it("projectPath throws on absolute paths", () => {
+    // Caught by isValidSlug's "/" rejection and by containment.
+    expect(() => projectPath(root, "/etc")).toThrow();
+    expect(() => projectPath(root, "/tmp/evil")).toThrow();
   });
 });
 
@@ -259,5 +278,56 @@ describe("writeProjectFile", () => {
     await writeProjectFile(root, "jellyfin", "compose", "x\n");
     const names = await readdir(join(root, "jellyfin"));
     expect(names.filter((n) => n.includes(".tmp"))).toEqual([]);
+  });
+});
+
+describe("createProject", () => {
+  it("writes a valid blank scaffold into a new directory", async () => {
+    const root = await tempDir("hs-create-");
+    await createProject(root, "media", { kind: "blank" });
+    const content = await readProjectFile(root, "media", "compose");
+    expect(content).toContain("name: media");
+    expect(content).toContain("services: {}");
+  });
+
+  it("stores a pasted file with provenance injected and comments intact", async () => {
+    const root = await tempDir("hs-create-");
+    await createProject(root, "immich", {
+      kind: "paste",
+      content: "# keep me\nservices:\n  web:\n    image: nginx\n",
+    });
+    const content = (await readProjectFile(root, "immich", "compose")) ?? "";
+    expect(content).toContain("# keep me");
+    expect(content).toContain("kind: paste");
+  });
+
+  it("refuses to overwrite an existing directory", async () => {
+    const root = await tempDir("hs-create-");
+    await createProject(root, "media", { kind: "blank" });
+    await expect(
+      createProject(root, "media", { kind: "blank" }),
+    ).rejects.toBeInstanceOf(ProjectExistsError);
+  });
+
+  it("rejects a slug that would escape the projects root", async () => {
+    const root = await tempDir("hs-create-");
+    await expect(
+      createProject(root, "../evil", { kind: "blank" }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("deleteProjectDir", () => {
+  it("removes the directory and everything in it", async () => {
+    const root = await tempDir("hs-delete-");
+    await createProject(root, "media", { kind: "blank" });
+    await writeProjectFile(root, "media", "env", "A=1\n");
+    await deleteProjectDir(root, "media");
+    expect(await scanProjects(root)).toEqual([]);
+  });
+
+  it("rejects a slug that would escape the projects root", async () => {
+    const root = await tempDir("hs-delete-");
+    await expect(deleteProjectDir(root, "../..")).rejects.toThrow();
   });
 });

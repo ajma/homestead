@@ -183,8 +183,30 @@ export function createRegistry(db: Db) {
     finishedAt: operations.finishedAt,
   };
 
+  /**
+   * The same per-slug lock {@link start} takes, for work that must not
+   * interleave with a lifecycle operation but is not one itself.
+   *
+   * Deletion is the case, and the reason it cannot just call `start`: its
+   * dangerous step is the `rm -rf`, not the `down`. Without holding the lock
+   * across *both*, an `up` begun in another tab finishes between them and
+   * recreates the containers — leaving them running and holding host ports
+   * with no compose file left to stop them by. It deliberately writes no
+   * operation row: a delete is not lifecycle history, and the project it would
+   * be filed under is about to stop existing.
+   *
+   * Returns `null` when the project is already busy; otherwise a release
+   * function the caller must call in a `finally`.
+   */
+  function acquire(slug: string): (() => void) | null {
+    if (busy.has(slug)) return null;
+    busy.add(slug);
+    return () => busy.delete(slug);
+  }
+
   return {
     start,
+    acquire,
     get: (id: string) => live.get(id)?.op,
     /**
      * In-memory first, database second. Memory holds only the newest 50 and
