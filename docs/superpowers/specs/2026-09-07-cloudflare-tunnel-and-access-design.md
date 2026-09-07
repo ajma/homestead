@@ -275,7 +275,7 @@ where a mistake hands over the machine; the change is two lines and nothing else
 | Someone hand-edited the allow policy | Sync halts, adopt-or-overwrite prompt |
 | A second `cloudflared` is already running | Offered for adoption rather than competing |
 | Exposure points at a port that does not speak HTTP | Created, since Homestead cannot reliably know in advance, but the probe fails and says why. Access cannot protect a non-HTTP origin, so this reads as a misconfiguration rather than a supported mode |
-| Cloudflare API unreachable | Local state unchanged; the exposure is marked out-of-sync and retried, never silently dropped |
+| Cloudflare API unreachable | Local state unchanged; the **instance** is marked out-of-sync and retried, never silently dropped. Sync state is per-instance rather than per-exposure because ingress is pushed as one whole array — a failed push leaves every exposure unpushed together, and a per-row flag would imply a granularity the API does not have |
 
 ---
 
