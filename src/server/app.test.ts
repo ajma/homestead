@@ -17,6 +17,7 @@ async function boot() {
   return buildApp({
     db,
     auth,
+    secretKey: Buffer.alloc(32),
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
@@ -40,6 +41,7 @@ describe("app", () => {
     const quiet = await buildApp({
       db,
       auth,
+      secretKey: Buffer.alloc(32),
       projectsDir: tmpDir,
       projectsHostDir: tmpDir,
       dataDir: tmpDir,
@@ -47,6 +49,7 @@ describe("app", () => {
     const loud = await buildApp({
       db,
       auth,
+      secretKey: Buffer.alloc(32),
       logger: true,
       projectsDir: tmpDir,
       projectsHostDir: tmpDir,

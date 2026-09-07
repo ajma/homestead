@@ -4,6 +4,7 @@ import { ConfigError, loadConfig } from "./config.js";
 import { ensureSecretKey } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
 import { dockerChecks } from "./docker/preflight.js";
+import { createRunner } from "./monitoring/runner.js";
 import { dataDirChecks, runChecks } from "./preflight.js";
 
 async function main(): Promise<void> {
@@ -38,11 +39,35 @@ async function main(): Promise<void> {
   const app = await buildApp({
     db,
     auth,
+    secretKey: key,
     logger: true,
     projectsDir: config.projectsDir,
     projectsHostDir: config.projectsHostDir,
     dataDir: config.dataDir,
   });
+
+  // Start the monitor runner AFTER buildApp, so route tests never start it
+  const runner = createRunner({
+    db,
+    now: () => Date.now(),
+    setTimer: (fn, ms) => {
+      const id = setInterval(fn, ms);
+      return { cancel: () => clearInterval(id) };
+    },
+  });
+  runner.start();
+
+  // Register shutdown handlers
+  const shutdown = async () => {
+    console.log("Shutting down...");
+    runner.stop();
+    await app.close();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
   await app.listen({ port: config.port, host: "0.0.0.0" });
 }
 

@@ -4,14 +4,17 @@ import { authPlugin } from "./auth/plugin.js";
 import type { Db } from "./db/client.js";
 import type { DockerRunner } from "./docker/run.js";
 import { createRegistry } from "./ops/registry.js";
+import { deviceRoutes } from "./routes/devices.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
 import { operationRoutes } from "./routes/operations.js";
 import { projectRoutes } from "./routes/projects.js";
 import { statusRoutes } from "./routes/status.js";
+import type { TailscaleClient } from "./tailscale/client.js";
 
 export type AppDeps = {
   db: Db;
   auth: Auth;
+  secretKey: Buffer;
   /**
    * Enable Fastify's request logger. Off by default so unit tests stay quiet;
    * the real server turns it on, otherwise `request.log` is a no-op and every
@@ -27,6 +30,10 @@ export type AppDeps = {
    * process, let alone reconcile a compose project on the host.
    */
   docker?: DockerRunner;
+  /**
+   * Tailscale client factory. Injected so tests never reach the network.
+   */
+  tailscale?: (opts: { tailnet: string; token: string }) => TailscaleClient;
 };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -46,6 +53,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(authPlugin, { auth: deps.auth });
   await app.register(onboardingRoutes, { db: deps.db, auth: deps.auth });
   await app.register(statusRoutes, { db: deps.db });
+  await app.register(deviceRoutes, {
+    db: deps.db,
+    secretKey: deps.secretKey,
+    tailscale: deps.tailscale,
+  });
   // One registry for both plugins: its per-slug lock is only a lock if delete
   // and the lifecycle verbs contend for the same one.
   const registry = createRegistry(deps.db);

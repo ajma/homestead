@@ -58,6 +58,7 @@ async function build(options: Parameters<typeof createFakeDocker>[0]) {
   app = await buildApp({
     db,
     auth,
+    secretKey: Buffer.alloc(32),
     projectsDir: root,
     projectsHostDir: root,
     dataDir: root,

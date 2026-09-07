@@ -1,4 +1,10 @@
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
 
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
@@ -26,6 +32,92 @@ export const operations = sqliteTable(
       t.startedAt,
     ),
   ],
+);
+
+export const devices = sqliteTable("devices", {
+  id: text("id").primaryKey(),
+  /** Null for a manually added device — a printer, a switch, an old NAS. */
+  tailscaleNodeId: text("tailscale_node_id"),
+  name: text("name").notNull(),
+  kind: text("kind").notNull(),
+  notes: text("notes"),
+  hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
+  lastSyncedAt: integer("last_synced_at"),
+  // Synced Tailscale fields. `lastSeen` is null while the device is online —
+  // Tailscale omits it when `connectedToControl` is true — so online-ness is
+  // read from `connectedToControl`, never from the age of `lastSeen`.
+  hostname: text("hostname"),
+  os: text("os"),
+  addresses: text("addresses"),
+  user: text("user"),
+  clientVersion: text("client_version"),
+  updateAvailable: integer("update_available", { mode: "boolean" }),
+  tags: text("tags"),
+  isEphemeral: integer("is_ephemeral", { mode: "boolean" }),
+  isExternal: integer("is_external", { mode: "boolean" }),
+  blocksIncomingConnections: integer("blocks_incoming_connections", {
+    mode: "boolean",
+  }),
+  connectedToControl: integer("connected_to_control", { mode: "boolean" }),
+  lastSeen: integer("last_seen"),
+});
+
+export const monitors = sqliteTable(
+  "monitors",
+  {
+    id: text("id").primaryKey(),
+    targetType: text("target_type").notNull(),
+    /**
+     * Text, not a foreign key. A device is a uuid, but an app is keyed by its
+     * published host port (product design §9.2), so one column holds both
+     * without a migration or a nullable column per target kind.
+     */
+    targetId: text("target_id").notNull(),
+    type: text("type").notNull(),
+    config: text("config").notNull(),
+    intervalSeconds: integer("interval_seconds").notNull(),
+    timeoutMs: integer("timeout_ms").notNull(),
+    retries: integer("retries").notNull().default(0),
+    required: integer("required", { mode: "boolean" }).notNull().default(true),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    nextDueAt: integer("next_due_at").notNull().default(0),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    lastPushAt: integer("last_push_at"),
+  },
+  // The runner's hot query is `WHERE enabled = 1 AND next_due_at <= ?`, and the
+  // status rollup is `WHERE target_type = ? AND target_id = ?`.
+  (t) => [
+    index("monitors_due_idx").on(t.enabled, t.nextDueAt),
+    index("monitors_target_idx").on(t.targetType, t.targetId),
+  ],
+);
+
+export const checks = sqliteTable(
+  "checks",
+  {
+    id: text("id").primaryKey(),
+    monitorId: text("monitor_id").notNull(),
+    at: integer("at").notNull(),
+    up: integer("up", { mode: "boolean" }).notNull(),
+    /** Measured to enforce the timeout; stored because discarding it would be
+     *  a choice, not a saving. Nothing reads it yet (spec §1). */
+    durationMs: integer("duration_ms"),
+    error: text("error"),
+  },
+  // Every read is `WHERE monitor_id = ? AND at >= ? ORDER BY at`, and the prune
+  // is `WHERE at < ?`.
+  (t) => [index("checks_monitor_at_idx").on(t.monitorId, t.at)],
+);
+
+export const checkRollups = sqliteTable(
+  "check_rollups",
+  {
+    monitorId: text("monitor_id").notNull(),
+    hourStartedAt: integer("hour_started_at").notNull(),
+    upCount: integer("up_count").notNull(),
+    downCount: integer("down_count").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.monitorId, t.hourStartedAt] })],
 );
 
 export * from "./auth-schema.js";

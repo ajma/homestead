@@ -4,6 +4,8 @@ import { AppShell } from "./components/AppShell.js";
 import { ProtectedRoute } from "./components/ProtectedRoute.js";
 import { CreateProject } from "./routes/CreateProject.js";
 import { Dashboard } from "./routes/Dashboard.js";
+import { DeviceDetail } from "./routes/DeviceDetail.js";
+import { Devices } from "./routes/Devices.js";
 import { Login } from "./routes/Login.js";
 import { NotFound } from "./routes/NotFound.js";
 import { projectDetailRoute } from "./routes/ProjectDetail.js";
@@ -59,6 +61,8 @@ export function App() {
             any static child added beside it needs the same entry. */}
         <Route path="/projects/new" element={<CreateProject />} />
         {projectDetailRoute}
+        <Route path="/devices" element={<Devices />} />
+        <Route path="/devices/:id" element={<DeviceDetail />} />
         {/* Nested, so an unknown path is still behind ProtectedRoute and still
             renders inside the shell — a mistyped URL keeps its navigation. */}
         <Route path="*" element={<NotFound />} />

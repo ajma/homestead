@@ -5,13 +5,21 @@ import type { HTMLAttributes } from "react";
  * a free-form Docker state into it is checked by the compiler rather than
  * guessing at strings.
  */
-export type State = "running" | "exited" | "restarting" | "unknown";
+export type State =
+  | "running"
+  | "exited"
+  | "restarting"
+  | "unknown"
+  | "up"
+  | "down";
 
 const STATE_STYLES: Record<State, string> = {
   running: "bg-success",
   exited: "bg-muted",
   restarting: "bg-warning",
   unknown: "bg-muted",
+  up: "bg-success",
+  down: "bg-danger",
 };
 
 export function StatusDot({

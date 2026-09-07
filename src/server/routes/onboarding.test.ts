@@ -28,6 +28,7 @@ beforeEach(async () => {
   app = await buildApp({
     db,
     auth,
+    secretKey: Buffer.alloc(32),
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,

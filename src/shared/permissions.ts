@@ -6,4 +6,6 @@ export const homesteadStatement = {
   logs: ["read"],
   stats: ["read"],
   settings: ["read", "write"],
+  device: ["read", "create", "update", "delete"],
+  monitor: ["read", "create", "update", "delete"],
 } as const;

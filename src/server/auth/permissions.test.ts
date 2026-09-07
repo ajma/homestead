@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adminRole, viewerRole } from "./permissions.js";
+import { adminRole, roles, viewerRole } from "./permissions.js";
 
 describe("roles", () => {
   it("lets an admin write compose files", () => {
@@ -24,5 +24,31 @@ describe("roles", () => {
 
   it("keeps the admin plugin's built-in user permissions", () => {
     expect(adminRole.authorize({ user: ["create"] }).success).toBe(true);
+  });
+
+  it("grants an admin the new device and monitor verbs", () => {
+    for (const verb of ["read", "create", "update", "delete"] as const) {
+      expect(
+        adminRole.authorize({ device: [verb] }).success,
+        `device:${verb}`,
+      ).toBe(true);
+      expect(
+        adminRole.authorize({ monitor: [verb] }).success,
+        `monitor:${verb}`,
+      ).toBe(true);
+    }
+  });
+
+  it("grants a viewer neither, and still only app:read", () => {
+    expect(viewerRole.authorize({ device: ["read"] }).success).toBe(false);
+    expect(viewerRole.authorize({ monitor: ["read"] }).success).toBe(false);
+    // A device list showing when each phone was last connected is a presence
+    // signal. Keeping it admin-only is the decision, not an oversight.
+    expect(viewerRole.authorize({ app: ["read"] }).success).toBe(true);
+    expect(viewerRole.authorize({ project: ["read"] }).success).toBe(false);
+  });
+
+  it("exposes exactly the two roles", () => {
+    expect(Object.keys(roles).sort()).toEqual(["admin", "viewer"]);
   });
 });

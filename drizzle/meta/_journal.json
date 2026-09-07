@@ -36,6 +36,20 @@
       "when": 1788678407820,
       "tag": "0004_add_operations_project_started_index",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788762966182,
+      "tag": "0005_regular_lockjaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788766951335,
+      "tag": "0006_flippant_mister_fear",
+      "breakpoints": true
     }
   ]
 }

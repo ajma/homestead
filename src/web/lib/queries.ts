@@ -1,4 +1,11 @@
 import type {
+  DeviceSummary,
+  HistoryBucket,
+  MonitorSummary,
+  MonitorType,
+  UptimeWindow,
+} from "@shared/monitoring.js";
+import type {
   ContainerState,
   Operation,
   OperationKind,
@@ -22,6 +29,8 @@ export const queryKeys = {
   projectOperations: (slug: string) => ["project", slug, "operations"] as const,
   file: (slug: string, name: "compose" | "env") =>
     ["project", slug, "file", name] as const,
+  devices: ["devices"] as const,
+  device: (id: string) => ["device", id] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -299,5 +308,135 @@ export function useDeleteProject() {
       await apiFetch(`/api/projects/${slug}`, { method: "DELETE" });
     },
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.projects }),
+  });
+}
+
+export function useDevices() {
+  return useQuery({
+    queryKey: queryKeys.devices,
+    queryFn: async () => {
+      const body = await apiFetch<{ devices: DeviceSummary[] }>("/api/devices");
+      return body?.devices ?? [];
+    },
+  });
+}
+
+export function useCreateDevice() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { name: string; kind: string }) => {
+      const res = await apiFetch<DeviceSummary>("/api/devices", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!res) throw new Error("create returned no body");
+      return res;
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.devices }),
+  });
+}
+
+export function useUpdateDevice() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { id: string; hidden: boolean }) => {
+      await apiFetch(`/api/devices/${body.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ hidden: body.hidden }),
+      });
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.devices }),
+  });
+}
+
+export function useDeleteDevice() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await apiFetch(`/api/devices/${id}`, { method: "DELETE" });
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.devices }),
+  });
+}
+
+export function useConfigureTailscale() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { tailnet: string; token: string }) => {
+      const res = await apiFetch<{ deviceCount: number }>(
+        "/api/settings/tailscale",
+        {
+          method: "POST",
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res) throw new Error("configure returned no body");
+      return res;
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.devices }),
+  });
+}
+
+export type DeviceDetailData = {
+  device: DeviceSummary;
+  monitors: MonitorSummary[];
+  uptime: UptimeWindow[];
+  history: HistoryBucket[];
+};
+
+export function useDeviceDetail(id: string) {
+  return useQuery({
+    queryKey: queryKeys.device(id),
+    queryFn: () =>
+      apiFetch<DeviceDetailData>(`/api/devices/${encodeURIComponent(id)}`),
+    enabled: id !== "",
+  });
+}
+
+export function useCreateMonitor(deviceId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { type: MonitorType }) => {
+      const res = await apiFetch(`/api/devices/${deviceId}/monitors`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return res;
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.device(deviceId) });
+    },
+  });
+}
+
+export function useUpdateMonitor(deviceId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      id: string;
+      required?: boolean;
+      enabled?: boolean;
+    }) => {
+      const { id, ...patch } = body;
+      await apiFetch(`/api/monitors/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.device(deviceId) });
+    },
+  });
+}
+
+export function useDeleteMonitor(deviceId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await apiFetch(`/api/monitors/${id}`, { method: "DELETE" });
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.device(deviceId) });
+    },
   });
 }
