@@ -1,9 +1,11 @@
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { Auth } from "./auth/index.js";
 import { authPlugin } from "./auth/plugin.js";
+import type { CloudflareClient } from "./cloudflare/client.js";
 import type { Db } from "./db/client.js";
 import type { DockerRunner } from "./docker/run.js";
 import { createRegistry } from "./ops/registry.js";
+import { cloudflareRoutes } from "./routes/cloudflare.js";
 import { deviceRoutes } from "./routes/devices.js";
 import { onboardingRoutes } from "./routes/onboarding.js";
 import { operationRoutes } from "./routes/operations.js";
@@ -34,6 +36,10 @@ export type AppDeps = {
    * Tailscale client factory. Injected so tests never reach the network.
    */
   tailscale?: (opts: { tailnet: string; token: string }) => TailscaleClient;
+  /**
+   * Cloudflare client factory. Injected so tests never reach the network.
+   */
+  cloudflare?: (opts: { token: string }) => CloudflareClient;
 };
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -57,6 +63,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     db: deps.db,
     secretKey: deps.secretKey,
     tailscale: deps.tailscale,
+  });
+  await app.register(cloudflareRoutes, {
+    db: deps.db,
+    secretKey: deps.secretKey,
+    cloudflare: deps.cloudflare,
   });
   // One registry for both plugins: its per-slug lock is only a lock if delete
   // and the lifecycle verbs contend for the same one.

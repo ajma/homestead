@@ -65,12 +65,24 @@ const NAV_ITEMS: {
       </Glyph>
     ),
   },
+  {
+    to: "/exposures",
+    label: "Exposures",
+    end: false,
+    icon: (
+      <Glyph>
+        <path d="M3 3v18h18" />
+        <path d="M18 9l-5 5-4-4-6 6" />
+      </Glyph>
+    ),
+  },
 ];
 
-// 44px minimum touch target, and px-2 at phone width so both links plus both
-// menu triggers fit inside 390px without the header overflowing.
+// Icon-only navigation below sm: breakpoint (min-w-11 min-h-11 = 44×44 touch
+// targets) fits any number of items in 390px without overflow. Labels remain
+// accessible via aria-label on each NavLink.
 const NAV_LINK =
-  "inline-flex min-h-11 items-center gap-2 rounded-md px-2 text-sm transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:px-3";
+  "inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-md px-2 text-sm transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent sm:px-3";
 
 export function AppShell() {
   const { data } = useSession();
@@ -126,12 +138,13 @@ export function AppShell() {
                   key={item.to}
                   to={item.to}
                   end={item.end}
+                  aria-label={item.label}
                   className={({ isActive }) =>
                     `${NAV_LINK} ${isActive ? "text-accent" : "text-text hover:text-accent"}`
                   }
                 >
                   {item.icon}
-                  <span>{item.label}</span>
+                  <span className="hidden sm:inline">{item.label}</span>
                 </NavLink>
               ))}
             </nav>

@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { MonitorType } from "@shared/monitoring.js";
 import { and, eq, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { checks, devices, monitors } from "../db/schema.js";
 import { type CheckExecutor, executors as defaultExecutors } from "./checks.js";
 import { rollUpAndPrune } from "./rollup.js";
-
-type MonitorType = "push" | "tailscale" | "tcp" | "http" | "dns";
 
 export type RunnerDeps = {
   db: Db;
@@ -17,10 +16,13 @@ export type RunnerDeps = {
     db: Db,
     now: number,
   ) => Promise<{ rolled: number; pruned: number }>;
+  /** Syncs Cloudflare Access allow policy to Homestead users every 5 minutes. */
+  syncUsers?: (now: number) => Promise<void>;
 };
 
 const TICK_INTERVAL_MS = 10_000;
 const ROLLUP_INTERVAL_MS = 3_600_000; // 1 hour
+const SYNC_USERS_INTERVAL_MS = 300_000; // 5 minutes
 const MAX_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes
 const POOL_SIZE = 8;
 
@@ -35,9 +37,11 @@ export function createRunner(deps: RunnerDeps): {
     setTimer,
     executors = defaultExecutors,
     maintain = rollUpAndPrune,
+    syncUsers,
   } = deps;
   let timer: { cancel: () => void } | null = null;
   let lastRollupAt = 0;
+  let lastSyncUsersAt = 0;
   let tickInFlight = false;
 
   function computeNextDue(
@@ -101,6 +105,19 @@ export function createRunner(deps: RunnerDeps): {
           lastRollupAt = currentTime;
         } catch (err) {
           console.error("Maintenance failed:", err);
+        }
+      }
+
+      // Sync Cloudflare Access users at most once per 5 minutes
+      if (
+        syncUsers &&
+        currentTime - lastSyncUsersAt >= SYNC_USERS_INTERVAL_MS
+      ) {
+        try {
+          await syncUsers(currentTime);
+          lastSyncUsersAt = currentTime;
+        } catch (err) {
+          console.error("User sync failed:", err);
         }
       }
     } finally {

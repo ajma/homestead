@@ -8,4 +8,5 @@ export const homesteadStatement = {
   settings: ["read", "write"],
   device: ["read", "create", "update", "delete"],
   monitor: ["read", "create", "update", "delete"],
+  exposure: ["read", "create", "update", "delete"],
 } as const;

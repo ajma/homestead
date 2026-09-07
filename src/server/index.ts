@@ -1,8 +1,11 @@
 import { buildApp } from "./app.js";
 import { createAuth } from "./auth/index.js";
+import { createCloudflareClient } from "./cloudflare/client.js";
+import { syncAllowPolicy } from "./cloudflare/sync-users.js";
 import { ConfigError, loadConfig } from "./config.js";
-import { ensureSecretKey } from "./crypto/secrets.js";
+import { decrypt, ensureSecretKey } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
+import { settings } from "./db/schema.js";
 import { dockerChecks } from "./docker/preflight.js";
 import { createRunner } from "./monitoring/runner.js";
 import { dataDirChecks, runChecks } from "./preflight.js";
@@ -46,6 +49,35 @@ async function main(): Promise<void> {
     dataDir: config.dataDir,
   });
 
+  // Build the user sync function for the runner
+  const syncUsersToCloudflare = async (_now: number): Promise<void> => {
+    const settingsRows = await db.select().from(settings);
+    const settingsMap = new Map(settingsRows.map((r) => [r.key, r.value]));
+
+    const accountId = settingsMap.get("cloudflare.accountId");
+    const policyAllowId = settingsMap.get("cloudflare.policyAllowId");
+    const idpId = settingsMap.get("cloudflare.idpId");
+    const encryptedToken = settingsMap.get("cloudflare.apiToken");
+
+    if (!accountId || !policyAllowId || !idpId || !encryptedToken) {
+      return; // Not configured yet
+    }
+
+    const token = decrypt(encryptedToken, key);
+    const client = createCloudflareClient({ token });
+    const result = await syncAllowPolicy(
+      db,
+      client,
+      accountId,
+      policyAllowId,
+      idpId,
+    );
+
+    if (!result.synced) {
+      console.warn(`Cloudflare user sync conflict: ${result.conflict}`);
+    }
+  };
+
   // Start the monitor runner AFTER buildApp, so route tests never start it
   const runner = createRunner({
     db,
@@ -54,8 +86,17 @@ async function main(): Promise<void> {
       const id = setInterval(fn, ms);
       return { cancel: () => clearInterval(id) };
     },
+    syncUsers: syncUsersToCloudflare,
   });
   runner.start();
+
+  // Run initial sync at startup
+  try {
+    await syncUsersToCloudflare(Date.now());
+    console.log("Cloudflare allow policy synced");
+  } catch (err) {
+    console.error("Failed to sync Cloudflare allow policy at startup:", err);
+  }
 
   // Register shutdown handlers
   const shutdown = async () => {

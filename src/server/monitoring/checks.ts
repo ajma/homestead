@@ -47,6 +47,12 @@ const dnsConfigSchema = z.object({
   hostname: z.string(),
 });
 
+const reachabilityConfigSchema = z.object({
+  url: z.string(),
+  clientId: z.string(),
+  clientSecret: z.string(),
+});
+
 async function pushExecutor(
   config: unknown,
   _timeoutMs: number,
@@ -278,10 +284,89 @@ async function dnsExecutor(
   }
 }
 
+async function reachabilityExecutor(
+  config: unknown,
+  timeoutMs: number,
+  _ctx: CheckContext,
+): Promise<CheckResult> {
+  const start = performance.now();
+  const parsed = reachabilityConfigSchema.safeParse(config);
+
+  if (!parsed.success) {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: `Invalid config: ${parsed.error.message}`,
+    };
+  }
+
+  const { url, clientId, clientSecret } = parsed.data;
+
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
+      headers: {
+        "CF-Access-Client-Id": clientId,
+        "CF-Access-Client-Secret": clientSecret,
+      },
+    });
+
+    // 2xx is up
+    if (response.ok) {
+      return {
+        up: true,
+        durationMs: performance.now() - start,
+        error: null,
+      };
+    }
+
+    // 3xx redirect to cloudflareaccess.com means Access rejected the token
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location") ?? "";
+      try {
+        const locationUrl = new URL(location);
+        if (
+          locationUrl.host === "cloudflareaccess.com" ||
+          locationUrl.host.endsWith(".cloudflareaccess.com")
+        ) {
+          return {
+            up: false,
+            durationMs: performance.now() - start,
+            error: "Access authentication failed",
+          };
+        }
+      } catch {
+        // Invalid location URL, fall through to default handling
+      }
+    }
+
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: `HTTP ${response.status}`,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const isTimeout =
+      message.includes("TimeoutError") || message.includes("aborted");
+
+    // Never include the client secret in error messages
+    const sanitizedMessage = message.replace(clientSecret, "***");
+
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: isTimeout ? "Request timeout" : sanitizedMessage,
+    };
+  }
+}
+
 export const executors: Record<MonitorType, CheckExecutor> = {
   push: pushExecutor,
   tailscale: tailscaleExecutor,
   tcp: tcpExecutor,
   http: httpExecutor,
   dns: dnsExecutor,
+  reachability: reachabilityExecutor,
 };

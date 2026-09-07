@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createDb, runMigrations } from "./client.js";
-import { checks, devices, monitors } from "./schema.js";
+import { checks, devices, exposures, monitors } from "./schema.js";
 
 async function db() {
   const d = createDb(":memory:");
@@ -71,6 +71,29 @@ describe("monitoring schema", () => {
       up: false,
       durationMs: 42,
       error: "ENOTFOUND",
+    });
+  });
+});
+
+describe("cloudflare schema", () => {
+  it("stores an exposure with a nullable project and Access on by default", async () => {
+    const d = await db();
+    await d.insert(exposures).values({
+      id: "e1",
+      projectSlug: null,
+      hostPort: 8080,
+      zoneId: "z1",
+      hostname: "app.example.com",
+      scheme: "http",
+    });
+    const [row] = await d.select().from(exposures);
+    expect(row).toMatchObject({
+      projectSlug: null,
+      hostPort: 8080,
+      accessEnabled: true,
+      enabled: true,
+      noTlsVerify: false,
+      accessAppId: null,
     });
   });
 });

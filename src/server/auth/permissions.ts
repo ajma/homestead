@@ -20,6 +20,7 @@ export const adminRole = ac.newRole({
   settings: ["read", "write"],
   device: ["read", "create", "update", "delete"],
   monitor: ["read", "create", "update", "delete"],
+  exposure: ["read", "create", "update", "delete"],
 });
 
 export const viewerRole = ac.newRole({

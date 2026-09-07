@@ -1,3 +1,4 @@
+import type { ExposureSummary } from "@shared/cloudflare.js";
 import type {
   DeviceSummary,
   HistoryBucket,
@@ -31,6 +32,8 @@ export const queryKeys = {
     ["project", slug, "file", name] as const,
   devices: ["devices"] as const,
   device: (id: string) => ["device", id] as const,
+  exposures: ["exposures"] as const,
+  cloudflareStatus: ["cloudflare", "status"] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -437,6 +440,155 @@ export function useDeleteMonitor(deviceId: string) {
     },
     onSuccess: () => {
       client.invalidateQueries({ queryKey: queryKeys.device(deviceId) });
+    },
+  });
+}
+
+export type CloudflareStatus = {
+  configured: boolean;
+  accountId: string | null;
+  tunnelId: string | null;
+  runtime: { kind: string; containerId?: string; projectSlug?: string };
+  idpId: string | null;
+  syncState: string;
+};
+
+export function useExposures() {
+  return useQuery({
+    queryKey: queryKeys.exposures,
+    queryFn: async () => {
+      const body = await apiFetch<{ exposures: ExposureSummary[] }>(
+        "/api/exposures",
+      );
+      return body?.exposures ?? [];
+    },
+  });
+}
+
+export function useCloudflareStatus() {
+  return useQuery({
+    queryKey: queryKeys.cloudflareStatus,
+    queryFn: () => apiFetch<CloudflareStatus>("/api/cloudflare/status"),
+  });
+}
+
+export function useCreateExposure() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      projectSlug: string | null;
+      serviceName: string | null;
+      hostPort: number;
+      hostname: string;
+      scheme: "http" | "https";
+      noTlsVerify: boolean;
+      label: string | null;
+      enabled: boolean;
+      accessEnabled: boolean;
+    }) => {
+      const res = await apiFetch<{ id: string }>("/api/exposures", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!res) throw new Error("create returned no body");
+      return res;
+    },
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: queryKeys.exposures }),
+  });
+}
+
+export function useUpdateExposure() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      id: string;
+      enabled?: boolean;
+      accessEnabled?: boolean;
+      hostname?: string;
+      label?: string | null;
+    }) => {
+      const { id, ...patch } = body;
+      await apiFetch(`/api/exposures/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+    },
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: queryKeys.exposures }),
+  });
+}
+
+export function useDeleteExposure() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await apiFetch(`/api/exposures/${id}`, { method: "DELETE" });
+    },
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: queryKeys.exposures }),
+  });
+}
+
+export function useReconcileExposures() {
+  const client = useQueryClient();
+  return useMutation<void, ApiError, void>({
+    mutationFn: async () => {
+      await apiFetch("/api/exposures/reconcile", { method: "POST" });
+    },
+    onSuccess: () =>
+      client.invalidateQueries({ queryKey: queryKeys.exposures }),
+  });
+}
+
+export type AccountOption = { id: string; name: string };
+
+export function useVerifyToken() {
+  return useMutation({
+    mutationFn: async (token: string) => {
+      const res = await apiFetch<{ accounts: AccountOption[] }>(
+        "/api/cloudflare/token",
+        { method: "POST", body: JSON.stringify({ token }) },
+      );
+      if (!res) throw new Error("verify token returned no body");
+      return res;
+    },
+  });
+}
+
+export function useSelectAccount() {
+  return useMutation({
+    mutationFn: async (accountId: string) => {
+      const res = await apiFetch<{
+        zones: import("@shared/cloudflare.js").ZoneOption[];
+        idps: import("@shared/cloudflare.js").IdpOption[];
+      }>("/api/cloudflare/account", {
+        method: "POST",
+        body: JSON.stringify({ accountId }),
+      });
+      if (!res) throw new Error("select account returned no body");
+      return res;
+    },
+  });
+}
+
+export function useSetupTunnel() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (idpId: string) => {
+      const res = await apiFetch<{
+        tunnelId: string;
+        runtime: import("@shared/cloudflare.js").TunnelRuntime;
+      }>("/api/cloudflare/setup", {
+        method: "POST",
+        body: JSON.stringify({ idpId }),
+      });
+      if (!res) throw new Error("setup tunnel returned no body");
+      return res;
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.cloudflareStatus });
+      client.invalidateQueries({ queryKey: queryKeys.exposures });
     },
   });
 }

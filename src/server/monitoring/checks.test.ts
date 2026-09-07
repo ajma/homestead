@@ -419,3 +419,143 @@ describe("dns executor", () => {
     vi.useRealTimers();
   });
 });
+
+describe("reachability executor", () => {
+  it("sends the Access service-token headers", async () => {
+    const f = vi.fn(async () => new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", f);
+    await executors.reachability(
+      {
+        url: "https://app.example.com",
+        clientId: "cid",
+        clientSecret: "csecret",
+      },
+      1000,
+      ctx(),
+    );
+    expect(f).toHaveBeenCalledTimes(1);
+    const calls = f.mock.calls as unknown as Array<[string, RequestInit]>;
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error("Expected fetch to be called");
+    const init = firstCall[1];
+    const h = init.headers as Record<string, string>;
+    expect(h["CF-Access-Client-Id"]).toBe("cid");
+    expect(h["CF-Access-Client-Secret"]).toBe("csecret");
+    vi.unstubAllGlobals();
+  });
+
+  it("uses redirect: manual to prevent false-UP on Access redirects", async () => {
+    const f = vi.fn(async () => new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", f);
+    await executors.reachability(
+      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      1000,
+      ctx(),
+    );
+    expect(f).toHaveBeenCalledTimes(1);
+    const calls = f.mock.calls as unknown as Array<[string, RequestInit]>;
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error("Expected fetch to be called");
+    const init = firstCall[1];
+    expect(init.redirect).toBe("manual");
+    vi.unstubAllGlobals();
+  });
+
+  it("is down when Access bounces the probe to a login page", async () => {
+    // Without the service token this is what every probe would see, and calling
+    // it up would report a crashed app behind a working tunnel as healthy.
+    const f = vi.fn(
+      async () =>
+        new Response("", {
+          status: 302,
+          headers: { location: "https://x.cloudflareaccess.com/login" },
+        }),
+    );
+    vi.stubGlobal("fetch", f);
+    const r = await executors.reachability(
+      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/access/i);
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects a lookalike domain (notcloudflareaccess.com) as a plain redirect", async () => {
+    const f = vi.fn(
+      async () =>
+        new Response("", {
+          status: 302,
+          headers: { location: "https://notcloudflareaccess.com/phishing" },
+        }),
+    );
+    vi.stubGlobal("fetch", f);
+    const r = await executors.reachability(
+      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(false);
+    expect(r.error).toBe("HTTP 302");
+    expect(r.error).not.toMatch(/access/i);
+    vi.unstubAllGlobals();
+  });
+
+  it("detects Access failure on a subdomain (foo.cloudflareaccess.com)", async () => {
+    const f = vi.fn(
+      async () =>
+        new Response("", {
+          status: 302,
+          headers: {
+            location: "https://foo.cloudflareaccess.com/cdn-cgi/access/login",
+          },
+        }),
+    );
+    vi.stubGlobal("fetch", f);
+    const r = await executors.reachability(
+      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/access/i);
+    vi.unstubAllGlobals();
+  });
+
+  it("is up on a 2xx", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("", { status: 200 })),
+    );
+    const r = await executors.reachability(
+      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      1000,
+      ctx(),
+    );
+    expect(r.up).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("reports a bad config as a failed check, not a thrown error", async () => {
+    const r = await executors.reachability({ url: 123 }, 1000, ctx());
+    expect(r.up).toBe(false);
+    expect(r.error).toMatch(/config/i);
+  });
+
+  it("never puts the client secret in the error text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("Connection failed with SEKRIT credentials");
+      }),
+    );
+    const r = await executors.reachability(
+      { url: "https://app.example.com", clientId: "c", clientSecret: "SEKRIT" },
+      1000,
+      ctx(),
+    );
+    expect(r.error ?? "").not.toContain("SEKRIT");
+    vi.unstubAllGlobals();
+  });
+});

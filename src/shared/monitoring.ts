@@ -1,5 +1,11 @@
 export type TargetType = "device" | "app";
-export type MonitorType = "tailscale" | "tcp" | "http" | "dns" | "push";
+export type MonitorType =
+  | "tailscale"
+  | "tcp"
+  | "http"
+  | "dns"
+  | "push"
+  | "reachability";
 export type DeviceKind = "phone" | "laptop" | "nas" | "vm" | "other";
 
 /** A monitor's current state, derived from its most recent check. */

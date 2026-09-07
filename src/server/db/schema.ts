@@ -120,4 +120,36 @@ export const checkRollups = sqliteTable(
   (t) => [primaryKey({ columns: [t.monitorId, t.hourStartedAt] })],
 );
 
+export const exposures = sqliteTable(
+  "exposures",
+  {
+    id: text("id").primaryKey(),
+    /**
+     * Nullable: an exposure is fundamentally "host port -> hostname", so a bare
+     * host service or an unmanaged stack can be tunnelled.
+     */
+    projectSlug: text("project_slug"),
+    /**
+     * The join key across exposures, tiles and probes. No service name is
+     * stored: it is derived from `docker compose config` at read time, because
+     * storing a derivation beside its source lets the two drift.
+     */
+    hostPort: integer("host_port").notNull(),
+    zoneId: text("zone_id").notNull(),
+    hostname: text("hostname").notNull().unique(),
+    scheme: text("scheme").notNull().default("http"),
+    /** Unifi and Proxmox serve HTTPS with a self-signed cert; cloudflared refuses those by default. */
+    noTlsVerify: integer("no_tls_verify", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    label: text("label"),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    accessEnabled: integer("access_enabled", { mode: "boolean" })
+      .notNull()
+      .default(true),
+    accessAppId: text("access_app_id"),
+  },
+  (t) => [index("exposures_port_idx").on(t.hostPort)],
+);
+
 export * from "./auth-schema.js";

@@ -232,6 +232,23 @@ describe("runner tick", () => {
     expect(await db.select().from(checks)).toHaveLength(1);
   });
 
+  it("completes tick and checks monitors even when syncUsers throws", async () => {
+    const db = await seed(0);
+    const syncUsers = vi.fn(async () => {
+      throw new Error("Cloudflare API unreachable");
+    });
+    const tcp = vi.fn(async () => ({ up: true, durationMs: 5, error: null }));
+    await createRunner({
+      db,
+      now: () => 300_001,
+      setTimer: noTimer,
+      syncUsers,
+      executors: { tcp },
+    }).tick();
+    expect(tcp).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(checks)).toHaveLength(1);
+  });
+
   it("tailscale monitor reports down when device is present but disconnected", async () => {
     const db = createDb(":memory:");
     await runMigrations(db);

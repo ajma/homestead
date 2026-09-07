@@ -48,6 +48,25 @@ describe("roles", () => {
     expect(viewerRole.authorize({ project: ["read"] }).success).toBe(false);
   });
 
+  it("gives an admin full control of exposures", () => {
+    for (const action of ["read", "create", "update", "delete"] as const) {
+      expect(
+        roles.admin.authorize({ exposure: [action] }).success,
+        `admin should have exposure:${action}`,
+      ).toBe(true);
+    }
+  });
+
+  it("gives a viewer no exposure permission at all", () => {
+    // A hostname is a map of what this household runs and where it is reachable.
+    for (const action of ["read", "create", "update", "delete"] as const) {
+      expect(
+        roles.viewer.authorize({ exposure: [action] }).success,
+        `viewer must not have exposure:${action}`,
+      ).toBe(false);
+    }
+  });
+
   it("exposes exactly the two roles", () => {
     expect(Object.keys(roles).sort()).toEqual(["admin", "viewer"]);
   });

@@ -2,10 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell.js";
 import { ProtectedRoute } from "./components/ProtectedRoute.js";
+import { CloudflareSetup } from "./routes/CloudflareSetup.js";
 import { CreateProject } from "./routes/CreateProject.js";
 import { Dashboard } from "./routes/Dashboard.js";
 import { DeviceDetail } from "./routes/DeviceDetail.js";
 import { Devices } from "./routes/Devices.js";
+import { Exposures } from "./routes/Exposures.js";
 import { Login } from "./routes/Login.js";
 import { NotFound } from "./routes/NotFound.js";
 import { projectDetailRoute } from "./routes/ProjectDetail.js";
@@ -63,6 +65,8 @@ export function App() {
         {projectDetailRoute}
         <Route path="/devices" element={<Devices />} />
         <Route path="/devices/:id" element={<DeviceDetail />} />
+        <Route path="/exposures" element={<Exposures />} />
+        <Route path="/cloudflare/setup" element={<CloudflareSetup />} />
         {/* Nested, so an unknown path is still behind ProtectedRoute and still
             renders inside the shell — a mistyped URL keeps its navigation. */}
         <Route path="*" element={<NotFound />} />
