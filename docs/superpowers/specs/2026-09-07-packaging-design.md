@@ -15,10 +15,12 @@ can paste, plus the startup checks that tell them when their environment is wron
 
 ### 1.1 Not in scope
 
-- **The native install.** The product design calls Docker and native "co-equal";
-  this plan builds the container only. A systemd unit, an installer, user and
-  group setup and a Compose v2 assertion are a second delivery path to keep
-  working, and a NAS audience runs containers.
+- **The native install.** This plan builds the container only. A systemd unit,
+  an installer, user and group setup and a Compose v2 assertion are a second
+  delivery path to keep working, and a NAS audience runs containers. Product
+  design §12 originally called Docker and native "co-equal"; it has since been
+  amended to match, and now records the native install as designed but not
+  built.
 - **The path-translation preflight.** §12.3 proposed writing a nonce into the
   projects directory and asking the daemon to bind-mount the host path into a
   throwaway container to prove the two agree. Deliberately dropped: it costs a
@@ -178,7 +180,8 @@ test**, so it stays as simple as it can be — build, tag, push, nothing clever.
 
 ## 9. Handoff
 
-- The native install remains unbuilt and the product design still promises it.
-  Either build it or amend §12 — leaving a promise the code does not keep is the
-  kind of gap that costs someone an afternoon.
+- ~~The native install remains unbuilt and the product design still promises
+  it.~~ **Resolved:** §12 was amended to match what shipped — container only,
+  with the native install recorded as designed but not built, and the dropped
+  path-translation check removed from §12.3.
 - The Actions workflow is untested until a remote exists.

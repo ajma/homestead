@@ -550,8 +550,9 @@ or hand-edited settings row cannot reopen the endpoint.
 
 ## 12. Packaging
 
-Docker and native installs are co-equal. There is **no per-platform code** — the
-differences reduce to two paths, a port, and socket permissions.
+Homestead ships as a **container**. A native install is described in §12.2 but
+is not built; see the note there. There is no per-platform code — the
+differences reduce to a path, a port, and socket permissions.
 
 ### 12.1 Container
 
@@ -560,11 +561,15 @@ runtime layer so the image carries its own Compose v2 rather than inheriting the
 host's. Multi-arch build (`linux/amd64`, `linux/arm64`) — many NAS boxes are
 `aarch64`.
 
+One Node process serves the API and the built SPA from the same port, so there
+is no reverse proxy and no supervisor in the image.
+
 ```yaml
 services:
   homestead:
-    image: homestead:latest
+    image: ghcr.io/<owner>/homestead:latest
     network_mode: host          # required: probes must reach 127.0.0.1
+    restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /volume2/docker:/volume2/docker     # identity-mapped here, so no
@@ -579,26 +584,45 @@ services:
 ```
 
 `network_mode: host` is not optional: a bridged container's `127.0.0.1` is its
-own loopback, so every local probe would fail.
+own loopback, so every local probe would fail — and the symptom is every app
+reading down while the configuration looks correct.
 
-### 12.2 Native
+Published to GitHub's container registry by an Actions workflow on a version
+tag, which needs no configured secrets.
 
+### 12.2 Native — not built
+
+**This section records a design, not a shipped capability.** Were it built: a
 systemd unit with `EnvironmentFile=/etc/homestead.env`, running as a
-`homestead` user in the `docker` group. No path translation, no parity check.
-The installer **asserts Compose v2** and fails loudly if it finds only v1's
-`docker-compose` binary.
+`homestead` user in the `docker` group, with an installer that asserts Compose
+v2 and fails loudly if it finds only v1's `docker-compose` binary. No path
+translation, no parity check.
 
-### 12.3 Startup preflight
+Deferred deliberately. A NAS audience runs containers, and a second delivery
+path is a second thing to keep working for every future change.
+
+### 12.3 Startup checks
 
 - Docker socket reachable; Compose v2 present.
 - `$HOMESTEAD_DATA` writable and not on a network filesystem.
 - `$HOMESTEAD_PROJECTS` readable.
-- **Path translation check** (containerised only): write a nonce marker into
-  `$HOMESTEAD_PROJECTS`, ask the daemon to bind-mount
-  `$HOMESTEAD_PROJECTS_HOST` into a throwaway container using the Homestead
-  image, and confirm the marker is visible. Fail with a specific message rather
-  than proceeding.
 - Listen port free.
+
+**None of them blocks startup.** A misconfigured instance still comes up far
+enough to be fixed through its own UI, so failures are surfaced as a persistent
+banner rather than only written to the log — on a headless NAS those are the
+same thing.
+
+Checks carry a severity. The network-filesystem check is the only one marked
+`danger`, because it is the only one that corrupts *silently*: every other
+failure produces visible errors. Its message says data loss is possible and
+names the remedy. An unrecognised filesystem type reports nothing, since a
+false corruption warning teaches people to ignore the banner.
+
+The **path-translation check** previously specified here was dropped: it cost a
+container launch at every boot to catch a misconfiguration that only arises
+when someone departs from the documented compose file. See the packaging spec
+§1.1.
 
 ### 12.4 Configuration
 
@@ -607,8 +631,11 @@ The installer **asserts Compose v2** and fails loudly if it finds only v1's
 | `HOMESTEAD_DATA` | `/var/lib/homestead` | Local filesystem required |
 | `HOMESTEAD_PROJECTS` | `/opt/stacks` | Where Homestead reads files |
 | `HOMESTEAD_PROJECTS_HOST` | = `HOMESTEAD_PROJECTS` | What the daemon is told |
+| `HOMESTEAD_WEB_DIR` | `../web` beside the server bundle | Built SPA; the image needs no override |
 | `HOMESTEAD_SECRET_KEY` | generated to `$HOMESTEAD_DATA/secret.key`, `0600` | Encrypts all stored secrets |
-| `PORT` | configurable | Preflight checks it is free |
+| `HOMESTEAD_BASE_URL` | `http://localhost:$PORT` | The URL operators actually browse to. Better-Auth checks the browser's `Origin` against it and derives secure-cookie behaviour from its scheme, so the default suits local development only |
+| `HOMESTEAD_TRUSTED_ORIGINS` | none | Additional origins Better-Auth will accept |
+| `PORT` | `7420` | A startup check reports when it is already taken |
 
 ---
 
