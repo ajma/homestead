@@ -432,10 +432,15 @@ describe("permissions", () => {
     renderDetail();
 
     expect(await screen.findByText(/do not have access/i)).toBeInTheDocument();
+    // Count the detail request itself, not "everything else": the page also
+    // loads exposures now, and the claim being made is that a refused request
+    // is not retried — not that the page issues exactly one request.
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.filter(
-          ([p]) => !String(p).endsWith("/operations"),
+          ([p]) =>
+            String(p).includes("/api/projects/") &&
+            !String(p).endsWith("/operations"),
         ),
       ).toHaveLength(1),
     );

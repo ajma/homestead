@@ -1,3 +1,4 @@
+import type { ExposureSummary } from "@shared/cloudflare.js";
 import type { OperationKind } from "@shared/projects.js";
 import { useId, useRef, useState } from "react";
 import {
@@ -9,6 +10,10 @@ import {
   useParams,
 } from "react-router-dom";
 import { DeleteProjectDialog } from "../components/DeleteProjectDialog.js";
+import {
+  ExposureDialog,
+  type PortOption,
+} from "../components/ExposureDialog.js";
 import { OperationPanel } from "../components/OperationPanel.js";
 import {
   Button,
@@ -25,6 +30,7 @@ import {
   hasRunningOperation,
   isRefusal,
   lifecycleErrorMessage,
+  useExposures,
   useLifecycle,
   useProject,
   useProjectOperations,
@@ -109,6 +115,17 @@ export function ProjectDetail() {
   const detail = useProject(slug);
   const operations = useProjectOperations(slug);
   const lifecycle = useLifecycle(slug);
+  // Exposures are instance-wide; Overview narrows them to this project. A
+  // viewer's request is refused, and the dialog is admin-only anyway, so an
+  // empty list simply means no exposure state is shown.
+  const exposures = useExposures();
+
+  // Which exposure the dialog is editing, or the port it is being created for.
+  // Local to the page, like the operation slot above it.
+  const [exposing, setExposing] = useState<PortOption | null>(null);
+  const [editingExposure, setEditingExposure] =
+    useState<ExposureSummary | null>(null);
+  const dialogOpen = exposing !== null || editingExposure !== null;
 
   // Local, not global and not cache: this belongs to this project's page for
   // the lifetime of that page. OperationPanel takes it as props.
@@ -175,6 +192,11 @@ export function ProjectDetail() {
   }
 
   const data = detail.data;
+  // Flattened once for the exposure dialog's port picker: the service each
+  // port belongs to is what makes the option readable.
+  const projectPorts: PortOption[] = (data?.model?.services ?? []).flatMap(
+    (service) => service.ports.map((p) => ({ ...p, service: service.name })),
+  );
   if (!data)
     return (
       <main className="mx-auto w-full max-w-3xl p-4 sm:p-8">
@@ -257,6 +279,24 @@ export function ProjectDetail() {
             open
             onClose={() => setDeleting(false)}
             detail={data}
+          />
+        )}
+        {/* Mounted only while open, like the delete dialog above: the form
+            resets from its props, and a stale instance would reopen on the
+            previous port. */}
+        {dialogOpen && (
+          <ExposureDialog
+            open
+            onClose={() => {
+              setExposing(null);
+              setEditingExposure(null);
+            }}
+            exposure={editingExposure}
+            projectSlug={slug}
+            // All of the project's ports, with the clicked one selected — you
+            // may well have meant the one next to it.
+            ports={projectPorts}
+            initialPort={exposing?.hostPort}
           />
         )}
         <Dialog
@@ -370,7 +410,13 @@ export function ProjectDetail() {
               </Button>
             </div>
             <div id={overviewId} className={overviewOpen ? "" : "lg:hidden"}>
-              <Overview slug={slug} detail={data} />
+              <Overview
+                slug={slug}
+                detail={data}
+                exposures={exposures.data ?? []}
+                onExpose={setExposing}
+                onEditExposure={setEditingExposure}
+              />
             </div>
           </aside>
           {/* On the Overview tab the aside owns the whole row, so this column

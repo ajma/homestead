@@ -1,4 +1,4 @@
-import type { ExposureSummary } from "@shared/cloudflare.js";
+import type { ExposureSummary, ZoneOption } from "@shared/cloudflare.js";
 import type { DashboardData } from "@shared/dashboard.js";
 import type {
   DeviceSummary,
@@ -38,6 +38,7 @@ export const queryKeys = {
   cloudflareStatus: ["cloudflare", "status"] as const,
   dashboard: ["dashboard"] as const,
   preflight: ["preflight"] as const,
+  zones: ["cloudflare", "zones"] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -348,6 +349,23 @@ export function useDashboard() {
  * in flight. Ordering navigate before clear does not prevent it; not asking
  * does.
  */
+/**
+ * The account's zones, for the hostname picker. Effectively static for a
+ * session, and the picker is the only consumer, so it is fetched on demand
+ * rather than polled.
+ */
+export function useZones() {
+  return useQuery({
+    queryKey: queryKeys.zones,
+    queryFn: async () => {
+      const body = await apiFetch<{ zones: ZoneOption[] }>(
+        "/api/cloudflare/zones",
+      );
+      return body?.zones ?? [];
+    },
+  });
+}
+
 export function usePreflight(enabled = true) {
   return useQuery({
     queryKey: queryKeys.preflight,

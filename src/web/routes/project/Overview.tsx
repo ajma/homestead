@@ -1,6 +1,14 @@
+import type { ExposureSummary } from "@shared/cloudflare.js";
 import type { Operation, PublishedPort } from "@shared/projects.js";
 import type { ReactNode } from "react";
-import { Badge, Panel, Spinner, StatusDot } from "../../components/ui/index.js";
+import type { PortOption } from "../../components/ExposureDialog.js";
+import {
+  Badge,
+  Button,
+  Panel,
+  Spinner,
+  StatusDot,
+} from "../../components/ui/index.js";
 import {
   isRefusal,
   type ProjectDetailData,
@@ -31,32 +39,81 @@ function portLabel(port: PublishedPort): string {
   return `${port.hostIp}:${port.hostPort} → ${port.containerPort}/${port.protocol}`;
 }
 
-function Ports({ ports }: { ports: PublishedPort[] }) {
+function Ports({
+  ports,
+  service,
+  exposures,
+  onExpose,
+  onEditExposure,
+}: {
+  ports: PublishedPort[];
+  service: string;
+  exposures: ExposureSummary[];
+  onExpose: (port: PortOption) => void;
+  onEditExposure: (exposure: ExposureSummary) => void;
+}) {
   if (ports.length === 0)
     return <p className="mt-1 text-sm text-muted">No published ports</p>;
   return (
     <ul className="mt-2 flex flex-col gap-1">
-      {ports.map((port) => (
-        <li
-          key={`${port.hostIp}:${port.hostPort}/${port.protocol}`}
-          className="flex flex-wrap items-center gap-2 text-sm text-muted"
-        >
-          <span className="font-mono text-xs">{portLabel(port)}</span>
-          {/* The §7.4 distinction, stated rather than implied: a wildcard bind
+      {ports.map((port) => {
+        // Host ports are unique on a machine, so the port alone is a sound
+        // join key. The caller has already narrowed these to this project —
+        // an exposure recorded against another one is not ours to edit.
+        const exposure = exposures.find((e) => e.hostPort === port.hostPort);
+        return (
+          <li
+            key={`${port.hostIp}:${port.hostPort}/${port.protocol}`}
+            className="flex flex-wrap items-center gap-2 text-sm text-muted"
+          >
+            <span className="font-mono text-xs">{portLabel(port)}</span>
+            {/* The §7.4 distinction, stated rather than implied: a wildcard bind
               is reachable by every device on the LAN, a loopback bind is
               reachable only through the tunnel. */}
-          {port.loopbackOnly ? (
-            <Badge>tunnel-only</Badge>
-          ) : (
-            <Badge tone="warning">LAN</Badge>
-          )}
-        </li>
-      ))}
+            {port.loopbackOnly ? (
+              <Badge>tunnel-only</Badge>
+            ) : (
+              <Badge tone="warning">LAN</Badge>
+            )}
+            {exposure ? (
+              <>
+                <span className="truncate text-text">{exposure.hostname}</span>
+                {exposure.accessEnabled && <Badge>Access</Badge>}
+                <Button
+                  variant="ghost"
+                  onClick={() => onEditExposure(exposure)}
+                  aria-label={`Edit ${exposure.hostname}`}
+                >
+                  Edit
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="ghost"
+                onClick={() => onExpose({ ...port, service })}
+                aria-label={`Expose port ${port.hostPort}`}
+              >
+                Expose…
+              </Button>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
 
-function Services({ detail }: { detail: ProjectDetailData }) {
+function Services({
+  detail,
+  exposures,
+  onExpose,
+  onEditExposure,
+}: {
+  detail: ProjectDetailData;
+  exposures: ExposureSummary[];
+  onExpose: (port: PortOption) => void;
+  onEditExposure: (exposure: ExposureSummary) => void;
+}) {
   const byService = new Map(detail.states.map((s) => [s.service, s]));
   return (
     <Section title="Services">
@@ -100,7 +157,13 @@ function Services({ detail }: { detail: ProjectDetailData }) {
                 <p className="mt-1 truncate font-mono text-xs text-muted">
                   {service.image ?? "no image"}
                 </p>
-                <Ports ports={service.ports} />
+                <Ports
+                  ports={service.ports}
+                  service={service.name}
+                  exposures={exposures}
+                  onExpose={onExpose}
+                  onEditExposure={onEditExposure}
+                />
               </li>
             );
           })}
@@ -221,16 +284,29 @@ function RecentOperations({ slug }: { slug: string }) {
 export function Overview({
   slug,
   detail,
+  exposures,
+  onExpose,
+  onEditExposure,
 }: {
   slug: string;
   detail: ProjectDetailData;
+  /** Every exposure; narrowed to this project before use. */
+  exposures: ExposureSummary[];
+  onExpose: (port: PortOption) => void;
+  onEditExposure: (exposure: ExposureSummary) => void;
 }) {
   return (
     <div className="flex flex-col gap-4">
       {/* The parse error itself is rendered by ProjectDetail, above the tabs:
           this aside is hidden below `lg` on the Edit tab, which is exactly
           where someone goes to fix the file. */}
-      <Services detail={detail} />
+      <Services
+        detail={detail}
+        // Narrowed here so the port match below needs only the port number.
+        exposures={exposures.filter((e) => e.projectSlug === slug)}
+        onExpose={onExpose}
+        onEditExposure={onEditExposure}
+      />
       <Volumes detail={detail} />
       <Snapshots detail={detail} />
       <RecentOperations slug={slug} />

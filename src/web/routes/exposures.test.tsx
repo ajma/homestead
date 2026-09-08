@@ -102,6 +102,11 @@ describe("Exposures", () => {
   it("renders a refusal state on 403", async () => {
     mockFetch({
       "/api/exposures": () => new Response(null, { status: 403 }),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       "/api/cloudflare/status": () =>
         new Response(
           JSON.stringify({
@@ -130,6 +135,11 @@ describe("Exposures", () => {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       "/api/cloudflare/status": () =>
         new Response(
           JSON.stringify({
@@ -153,6 +163,55 @@ describe("Exposures", () => {
     });
   });
 
+  it("asks for a label and a zone, not a whole hostname", async () => {
+    // A free-text FQDN invites a domain the account does not hold; the zones
+    // are a closed set Cloudflare already defines.
+    mockFetch({
+      "/api/exposures": () =>
+        new Response(JSON.stringify({ exposures: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({
+            zones: [
+              { id: "z1", name: "example.com" },
+              { id: "z2", name: "other.org" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      "/api/cloudflare/status": () =>
+        new Response(
+          JSON.stringify({
+            configured: true,
+            accountId: "acc123",
+            tunnelId: "tun123",
+            runtime: { kind: "none" },
+            idpId: "idp123",
+            syncState: "synced",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const { user } = renderExposures();
+    await user.click(await screen.findByRole("button", { name: /add/i }));
+
+    const label = await screen.findByLabelText(/^name$/i);
+    const zone = await screen.findByLabelText(/^domain$/i);
+    expect(zone).toBeVisible();
+    expect(
+      await screen.findByRole("option", { name: "example.com" }),
+    ).toBeVisible();
+
+    // The full hostname is shown as it is assembled, so there is no guessing.
+    await user.type(label, "metube");
+    await user.selectOptions(zone, "example.com");
+    expect(await screen.findByText("https://metube.example.com")).toBeVisible();
+  });
+
   it("offers no Service field, which the server does not store", async () => {
     // There is no service_name column; GET /api/exposures always returns null
     // for it, derived instead from docker compose config at read time. The form
@@ -164,6 +223,11 @@ describe("Exposures", () => {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       "/api/cloudflare/status": () =>
         new Response(
           JSON.stringify({
@@ -181,7 +245,7 @@ describe("Exposures", () => {
     const { user } = renderExposures();
     await user.click(await screen.findByRole("button", { name: /add/i }));
 
-    expect(await screen.findByLabelText(/hostname/i)).toBeVisible();
+    expect(await screen.findByLabelText(/^name$/i)).toBeVisible();
     expect(screen.queryByLabelText(/^service/i)).toBeNull();
   });
 
@@ -196,6 +260,11 @@ describe("Exposures", () => {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       "/api/cloudflare/status": () =>
         new Response(
           JSON.stringify({
@@ -212,7 +281,7 @@ describe("Exposures", () => {
 
     const { user } = renderExposures();
     await user.click(await screen.findByRole("button", { name: /add/i }));
-    await screen.findByLabelText(/hostname/i);
+    await screen.findByLabelText(/^name$/i);
 
     const http = screen.getByRole("radio", { name: "HTTP" });
     expect(http).toBeChecked();
@@ -238,6 +307,11 @@ describe("Exposures", () => {
               },
             ],
           }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
       "/api/cloudflare/status": () =>
@@ -303,6 +377,11 @@ describe("Exposures", () => {
               },
             ],
           }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
       "/api/cloudflare/status": () =>
@@ -398,6 +477,11 @@ describe("Exposures", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       },
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       "/api/cloudflare/status": () =>
         new Response(
           JSON.stringify({
@@ -483,6 +567,11 @@ describe("Exposures", () => {
           headers: { "content-type": "application/json" },
         });
       },
+      "/api/cloudflare/zones": () =>
+        new Response(
+          JSON.stringify({ zones: [{ id: "z1", name: "example.com" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
       "/api/cloudflare/status": () =>
         new Response(
           JSON.stringify({
