@@ -65,6 +65,59 @@ describe("CloudflareSetup", () => {
     });
   });
 
+  it("names every permission the token actually needs, and links to the page", async () => {
+    // This text claimed "Account:Read, Zone:Read, DNS:Edit, Cloudflare
+    // Tunnel:Edit". Account:Read is not a requirement, and the two Access
+    // permissions and Memberships were missing — so a token built from these
+    // instructions failed, twice, in two different places. Nothing tested it.
+    mockFetch({
+      "/api/cloudflare/status": () =>
+        new Response(
+          JSON.stringify({
+            configured: false,
+            accountId: null,
+            tunnelId: null,
+            runtime: { kind: "none" },
+            idpId: null,
+            syncState: "synced",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    renderSetup();
+
+    await screen.findByPlaceholderText(/api token/i);
+
+    for (const permission of [
+      /Cloudflare Tunnel · Edit/,
+      /Access: Apps and Policies · Edit/,
+      /Access: Service Tokens · Edit/,
+      /Zone · Zone · Read/,
+      /Zone · DNS · Edit/,
+      /User · Memberships · Read/,
+    ]) {
+      expect(
+        screen.getByText(permission),
+        `${permission} missing`,
+      ).toBeVisible();
+    }
+
+    // The permission everyone hunts for in the wrong section.
+    expect(screen.getByText(/User · Memberships · Read/).textContent).toMatch(
+      /not Account or Zone/,
+    );
+
+    const link = screen.getByRole("link", { name: /API Tokens/i });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://dash.cloudflare.com/profile/api-tokens",
+    );
+    // An external target without noopener hands the new tab a window.opener
+    // reference back into an authenticated session.
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+  });
+
   it("clears the token from state after submission", async () => {
     mockFetch({
       "/api/cloudflare/status": () =>
