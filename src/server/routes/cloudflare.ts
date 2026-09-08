@@ -16,11 +16,18 @@ import { deleteDnsRecord } from "../cloudflare/tunnel.js";
 import { decrypt, encrypt } from "../crypto/secrets.js";
 import type { Db } from "../db/client.js";
 import { exposures, settings } from "../db/schema.js";
+import { listContainers } from "../docker/engine.js";
+import { type DockerRunner, dockerRunner } from "../docker/run.js";
+import { writeProjectFiles } from "../projects/store.js";
 
 type Opts = {
   db: Db;
   secretKey: Buffer;
   cloudflare?: (opts: { token: string }) => CloudflareClient;
+  /** Where the cloudflared stack is written, as an ordinary project. */
+  projectsDir: string;
+  /** The only route to `docker`; a fake in tests. */
+  docker?: DockerRunner;
 };
 
 async function getDecryptedToken(
@@ -257,9 +264,16 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         accountId,
         idpId,
         secretKey: opts.secretKey,
+        // Real dependencies. These were stubs — `async () => []` and a no-op
+        // — from the day the module was written, so adoption could never see a
+        // running cloudflared and deploy never put a file on disk, while setup
+        // still reported a runtime. Nothing caught it because runtime.test.ts
+        // injects its own fakes and no test drove this call site.
         runtimeDeps: {
-          listContainers: async () => [],
-          writeProject: async () => {},
+          listContainers: () =>
+            listContainers((opts.docker ?? dockerRunner).run),
+          writeProject: (slug, files) =>
+            writeProjectFiles(opts.projectsDir, slug, files),
         },
       });
 

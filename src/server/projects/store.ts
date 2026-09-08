@@ -242,3 +242,44 @@ export async function deleteProjectDir(
 ): Promise<void> {
   await rm(projectPath(projectsDir, slug), { recursive: true, force: true });
 }
+
+/**
+ * Writes files into a project directory, creating it if needed.
+ *
+ * Used to lay down the `cloudflared` stack as an ordinary Homestead project so
+ * it inherits logs, restart and image updates rather than becoming a second
+ * kind of thing to operate.
+ *
+ * Overwrites deliberately: a half-written tunnel project is exactly the state
+ * someone re-runs setup from.
+ */
+export async function writeProjectFiles(
+  projectsDir: string,
+  slug: string,
+  files: Record<string, string>,
+): Promise<void> {
+  // Throws on a slug that escapes the root, same as every other path-taking
+  // function here.
+  const dir = projectPath(projectsDir, slug);
+
+  for (const name of Object.keys(files)) {
+    // The slug is guarded above; the filenames are not, and a caller passing
+    // "../x" would land outside the project it named.
+    if (
+      name === "" ||
+      name.includes("/") ||
+      name.includes(sep) ||
+      name.includes("..")
+    ) {
+      throw new Error(`invalid filename: ${JSON.stringify(name)}`);
+    }
+  }
+
+  await mkdir(dir, { recursive: true });
+  for (const [name, content] of Object.entries(files)) {
+    // .env carries the tunnel run token, which is what authorises a connector
+    // to attach. Same posture as the instance secret key.
+    const mode = name === ".env" ? 0o600 : 0o644;
+    await writeFile(join(dir, name), content, { encoding: "utf8", mode });
+  }
+}

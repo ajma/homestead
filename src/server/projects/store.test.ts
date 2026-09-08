@@ -2,6 +2,7 @@ import {
   mkdir,
   readFile as read,
   readdir,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -19,6 +20,7 @@ import {
   SNAPSHOT_RETENTION,
   scanProjects,
   writeProjectFile,
+  writeProjectFiles,
 } from "./store.js";
 
 let root: string;
@@ -329,5 +331,60 @@ describe("deleteProjectDir", () => {
   it("rejects a slug that would escape the projects root", async () => {
     const root = await tempDir("hs-delete-");
     await expect(deleteProjectDir(root, "../..")).rejects.toThrow();
+  });
+});
+
+describe("writeProjectFiles", () => {
+  it("creates the directory and writes each file", async () => {
+    await writeProjectFiles(root, "homestead-tunnel", {
+      "compose.yaml": "services: {}\n",
+      ".env": "TUNNEL_TOKEN=abc\n",
+    });
+    expect(
+      await read(join(root, "homestead-tunnel", "compose.yaml"), "utf8"),
+    ).toBe("services: {}\n");
+    expect(await read(join(root, "homestead-tunnel", ".env"), "utf8")).toBe(
+      "TUNNEL_TOKEN=abc\n",
+    );
+  });
+
+  it("produces a directory the scanner recognises as a project", async () => {
+    // The whole point of writing it here is that it becomes an ordinary
+    // Homestead project — logs, restart, image updates. A file the scanner
+    // does not accept as compose would be an inert directory instead.
+    await writeProjectFiles(root, "homestead-tunnel", {
+      "compose.yaml": "services: {}\n",
+    });
+    const found = await scanProjects(root);
+    expect(found.map((e) => e.slug)).toContain("homestead-tunnel");
+  });
+
+  it("keeps a written .env private", async () => {
+    // It holds the tunnel run token, which is what authorises a connector.
+    await writeProjectFiles(root, "homestead-tunnel", { ".env": "T=1\n" });
+    const { mode } = await stat(join(root, "homestead-tunnel", ".env"));
+    expect(mode & 0o077).toBe(0);
+  });
+
+  it("refuses a filename that climbs out of the project", async () => {
+    await expect(
+      writeProjectFiles(root, "homestead-tunnel", { "../escaped": "x" }),
+    ).rejects.toThrow(/filename/i);
+  });
+
+  it("refuses a slug that escapes the projects root", async () => {
+    await expect(
+      writeProjectFiles(root, "../evil", { "compose.yaml": "x" }),
+    ).rejects.toThrow(/slug/i);
+  });
+
+  it("overwrites an existing file rather than failing", async () => {
+    // Re-running setup must be safe; a half-written tunnel project is exactly
+    // the state someone retries from.
+    await writeProjectFiles(root, "homestead-tunnel", { ".env": "T=old\n" });
+    await writeProjectFiles(root, "homestead-tunnel", { ".env": "T=new\n" });
+    expect(await read(join(root, "homestead-tunnel", ".env"), "utf8")).toBe(
+      "T=new\n",
+    );
   });
 });

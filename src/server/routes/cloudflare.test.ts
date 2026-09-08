@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -470,6 +470,113 @@ describe("POST /api/cloudflare/setup", () => {
       .from(settings)
       .where(eq(settings.key, "cloudflare.tunnelId"));
     expect(tunnelRow).toBeUndefined();
+  });
+
+  // The runtime dependencies were `async () => []` and a no-op from the day
+  // this module was written. runtime.test.ts covers adopt-vs-deploy thoroughly
+  // with its own fakes, so both stayed green while the real call site could
+  // neither see a running cloudflared nor write a file. These two drive the
+  // wiring itself.
+  function fullSetupMock(): CloudflareClient {
+    return {
+      detectTokenKind: async () => "account" as const,
+      verifyToken: async () => ({ ok: true }),
+      listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
+      listZones: async () => [{ id: "zone-abc", name: "example.com" }],
+      listIdentityProviders: async () => [
+        { id: "idp-xyz", name: "Google OAuth", type: "google" },
+      ],
+      request: async (method, path) => {
+        if (method === "POST" && path.includes("/cfd_tunnel"))
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          return { id: "tunnel-123" } as any;
+        if (method === "GET" && path.includes("/token"))
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          return "tunnel-run-token-abc" as any;
+        if (method === "POST" && path.includes("/access/service_tokens"))
+          return {
+            id: "st-1",
+            client_id: "client-abc",
+            client_secret: PLAINTEXT_SERVICE_SECRET,
+            // biome-ignore lint/suspicious/noExplicitAny: test mock
+          } as any;
+        // biome-ignore lint/suspicious/noExplicitAny: test mock
+        return { id: `x-${randomUUID()}` } as any;
+      },
+    };
+  }
+
+  /** A docker runner that answers `ps` with the given "id\timage" lines. */
+  function dockerWith(lines: string[]) {
+    return {
+      run: async () => ({ stdout: lines.join("\n"), stderr: "", code: 0 }),
+      stream: async () => 0,
+    };
+  }
+
+  async function bootForSetup(docker: ReturnType<typeof dockerWith>) {
+    await app.close();
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: fullSetupMock,
+      docker,
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: PLAINTEXT_TOKEN },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/account",
+      headers: { cookie: adminCookie },
+      payload: { accountId: "acc-123" },
+    });
+    return app.inject({
+      method: "POST",
+      url: "/api/cloudflare/setup",
+      headers: { cookie: adminCookie },
+      payload: { idpId: "idp-xyz" },
+    });
+  }
+
+  it("writes the cloudflared stack to disk when nothing is running", async () => {
+    const res = await bootForSetup(dockerWith([]));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().runtime).toEqual({
+      kind: "deployed",
+      projectSlug: "homestead-tunnel",
+    });
+
+    // The files, on the real projects directory — not a fake's record of them.
+    const dir = join(root, "homestead-tunnel");
+    const compose = await readFile(join(dir, "compose.yaml"), "utf8");
+    expect(compose).toContain("cloudflare/cloudflared");
+    expect(compose).toContain("network_mode: host");
+    const env = await readFile(join(dir, ".env"), "utf8");
+    expect(env).toContain("tunnel-run-token-abc");
+  });
+
+  it("adopts a cloudflared already running instead of writing a second one", async () => {
+    const res = await bootForSetup(
+      dockerWith(["c0ffee\tcloudflare/cloudflared:latest"]),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.json().runtime).toEqual({
+      kind: "adopted",
+      containerId: "c0ffee",
+    });
+    // Adoption exists so two daemons do not compete for one tunnel; writing
+    // the project anyway would invite exactly that.
+    await expect(
+      readFile(join(root, "homestead-tunnel", "compose.yaml"), "utf8"),
+    ).rejects.toThrow();
   });
 
   it("creates tunnel, policies, service token, and runtime", async () => {

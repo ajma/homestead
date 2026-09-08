@@ -9,7 +9,7 @@ import {
   createServiceToken,
 } from "./access.js";
 import type { CloudflareClient } from "./client.js";
-import { deployTunnel, type RuntimeDeps } from "./runtime.js";
+import { deployTunnel, detectRuntime, type RuntimeDeps } from "./runtime.js";
 import { createTunnel, getTunnelToken } from "./tunnel.js";
 
 type SetupDeps = {
@@ -162,7 +162,16 @@ export async function runSetup(
     throw new Error("Run token missing after setup");
   }
   const decryptedRunToken = decrypt(runTokenRow.value, secretKey);
-  const runtime = await deployTunnel(runtimeDeps, decryptedRunToken);
+
+  // Adopt before deploying. detectRuntime was written, exported and tested and
+  // then called from nowhere, so setup always wrote its own stack — which is
+  // how two cloudflared daemons end up competing for one tunnel on a box that
+  // already had one.
+  const detected = await detectRuntime(runtimeDeps);
+  const runtime =
+    detected.kind === "none"
+      ? await deployTunnel(runtimeDeps, decryptedRunToken)
+      : detected;
 
   return { tunnelId, runtime };
 }

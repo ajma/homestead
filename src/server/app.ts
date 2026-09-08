@@ -89,6 +89,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     db: deps.db,
     secretKey: deps.secretKey,
     cloudflare: deps.cloudflare,
+    projectsDir: deps.projectsDir,
+    docker: deps.docker,
   });
   // One registry for both plugins: its per-slug lock is only a lock if delete
   // and the lifecycle verbs contend for the same one.
