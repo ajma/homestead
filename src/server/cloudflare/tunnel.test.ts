@@ -6,6 +6,7 @@ import {
   getTunnelToken,
   type IngressRule,
   putIngress,
+  tunnelExists,
   upsertDnsRecord,
 } from "./tunnel.js";
 
@@ -67,6 +68,57 @@ it("fails by name when the run token is missing entirely", async () => {
   // inside a cipher.
   const c = fakeClient({ "GET /accounts/a/cfd_tunnel/t1/token": null });
   await expect(getTunnelToken(c, "a", "t1")).rejects.toThrow(/t1/);
+});
+
+it("sees a live tunnel as present", async () => {
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1": { id: "t1", deleted_at: null },
+  });
+  await expect(tunnelExists(c, "a", "t1")).resolves.toBe(true);
+});
+
+it("sees a soft-deleted tunnel as gone", async () => {
+  // Cloudflare keeps deleted tunnels and marks them, so a 200 is not proof of
+  // a usable tunnel. Reusing one means a run token no connector can register
+  // with, and setup reporting success.
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1": {
+      id: "t1",
+      deleted_at: "2026-09-08T05:00:00Z",
+    },
+  });
+  await expect(tunnelExists(c, "a", "t1")).resolves.toBe(false);
+});
+
+it("sees a 404 as gone", async () => {
+  const c = fakeClient({});
+  c.request = async () => {
+    throw new Error("Cloudflare API error (404): Not found");
+  };
+  await expect(tunnelExists(c, "a", "t1")).resolves.toBe(false);
+});
+
+it("sees a null result as gone", async () => {
+  const c = fakeClient({ "GET /accounts/a/cfd_tunnel/t1": null });
+  await expect(tunnelExists(c, "a", "t1")).resolves.toBe(false);
+});
+
+it("refuses to call a network failure a missing tunnel", async () => {
+  // The dangerous direction. Reporting "gone" on a blip makes setup create a
+  // second tunnel and abandon the first, which nothing then cleans up.
+  const c = fakeClient({});
+  c.request = async () => {
+    throw new Error("Cloudflare API network error: ETIMEDOUT");
+  };
+  await expect(tunnelExists(c, "a", "t1")).rejects.toThrow(/network/i);
+});
+
+it("refuses to call a permission failure a missing tunnel", async () => {
+  const c = fakeClient({});
+  c.request = async () => {
+    throw new Error("Cloudflare API error (403): Authentication error");
+  };
+  await expect(tunnelExists(c, "a", "t1")).rejects.toThrow(/403/);
 });
 
 it("reads a freshly created tunnel as having no ingress", async () => {

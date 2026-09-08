@@ -10,7 +10,7 @@ import {
 } from "./access.js";
 import type { CloudflareClient } from "./client.js";
 import { deployTunnel, detectRuntime, type RuntimeDeps } from "./runtime.js";
-import { createTunnel, getTunnelToken } from "./tunnel.js";
+import { createTunnel, getTunnelToken, tunnelExists } from "./tunnel.js";
 
 type SetupDeps = {
   db: Db;
@@ -43,11 +43,25 @@ export async function runSetup(
     .from(settings)
     .where(eq(settings.key, "cloudflare.tunnelId"));
 
+  // A recorded tunnel is reused rather than duplicated — but only if it is
+  // still there. Deleting it in Cloudflare leaves this id, and the run token
+  // stored beside it, pointing at nothing; cloudflared then starts, never
+  // registers, and setup reports success. tunnelExists throws rather than
+  // guessing on a timeout, so a blip cannot orphan a live tunnel here.
+  const stillThere =
+    existingTunnelRow !== undefined &&
+    (await tunnelExists(client, accountId, existingTunnelRow.value));
+
   let tunnelId: string;
-  if (existingTunnelRow) {
+  if (existingTunnelRow && stillThere) {
     tunnelId = existingTunnelRow.value;
   } else {
-    // Create tunnel and store immediately
+    if (existingTunnelRow) {
+      // The run token belongs to the tunnel that has gone. Left in place, the
+      // fetch below is skipped and the dead token is written into the
+      // cloudflared stack — the exact failure this check exists to prevent.
+      await db.delete(settings).where(eq(settings.key, "cloudflare.runToken"));
+    }
     const tunnel = await createTunnel(client, accountId, "homestead");
     tunnelId = tunnel.id;
     await upsertSetting(db, "cloudflare.tunnelId", tunnelId);

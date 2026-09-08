@@ -202,3 +202,37 @@ export async function deleteDnsRecord(
     );
   }
 }
+
+/**
+ * Whether a tunnel Homestead has recorded still exists and is usable.
+ *
+ * Setup reuses a stored tunnel id rather than creating a second tunnel, which
+ * is right until someone deletes the tunnel in Cloudflare. Then the id, and
+ * the run token stored beside it, refer to nothing: `cloudflared` starts,
+ * never registers, and setup reports success.
+ *
+ * Only an explicit "not found" counts as gone. A timeout or a permission error
+ * is not evidence, and treating it as one would have setup create a second
+ * tunnel and abandon the first — an orphan nothing cleans up.
+ */
+export async function tunnelExists(
+  c: CloudflareClient,
+  accountId: string,
+  tunnelId: string,
+): Promise<boolean> {
+  let result: { deleted_at?: string | null } | null;
+  try {
+    result = await c.request<{ deleted_at?: string | null } | null>(
+      "GET",
+      `/accounts/${accountId}/cfd_tunnel/${tunnelId}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("(404)") || /not found/i.test(message)) return false;
+    throw error;
+  }
+
+  if (!result) return false;
+  // Cloudflare soft-deletes: a deleted tunnel is still returned, marked.
+  return result.deleted_at == null;
+}

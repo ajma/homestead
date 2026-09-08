@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import type { CloudflareClient } from "../cloudflare/client.js";
+import { encrypt } from "../crypto/secrets.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { exposures, settings, user } from "../db/schema.js";
 
@@ -545,6 +546,69 @@ describe("POST /api/cloudflare/setup", () => {
       payload: { idpId: "idp-xyz" },
     });
   }
+
+  it("replaces a tunnel deleted in Cloudflare, and its run token with it", async () => {
+    // Deleting the tunnel upstream leaves the stored id and run token pointing
+    // at nothing. Reusing them writes a dead token into the cloudflared stack:
+    // the daemon starts, never registers, and setup reports success. Dropping
+    // the token matters as much as the id — leaving it makes the fetch below
+    // get skipped.
+    await db.insert(settings).values([
+      { key: "cloudflare.tunnelId", value: "tunnel-deleted" },
+      { key: "cloudflare.runToken", value: encrypt("stale", Buffer.alloc(32)) },
+    ]);
+
+    await app.close();
+    const base = fullSetupMock();
+    const mock = (): CloudflareClient => ({
+      ...base,
+      request: async (method, path, body) => {
+        // The tunnel is gone upstream.
+        if (method === "GET" && /\/cfd_tunnel\/tunnel-deleted$/.test(path)) {
+          throw new Error("Cloudflare API error (404): Not found");
+        }
+        return base.request(method, path, body);
+      },
+    });
+
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mock,
+      docker: dockerWith([]),
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: PLAINTEXT_TOKEN },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/account",
+      headers: { cookie: adminCookie },
+      payload: { accountId: "acc-123" },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/setup",
+      headers: { cookie: adminCookie },
+      payload: { idpId: "idp-xyz" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // A fresh tunnel, not the deleted one.
+    expect(res.json().tunnelId).toBe("tunnel-123");
+
+    // And the stack carries the new tunnel's token, not the stale one.
+    const env = await readFile(join(root, "homestead-tunnel", ".env"), "utf8");
+    expect(env).toContain("tunnel-run-token-abc");
+    expect(env).not.toContain("stale");
+  });
 
   it("writes the cloudflared stack to disk when nothing is running", async () => {
     const res = await bootForSetup(dockerWith([]));
