@@ -84,34 +84,24 @@ export function projectsPollInterval(error: unknown): number | false {
 }
 
 /**
- * Focus refetching is an independent switch from the poll interval, and an
- * errored query has no `dataUpdatedAt`, so it is always considered stale: left
- * at the default, a viewer who alt-tabs 200 times issues 200 requests that are
- * all guaranteed to 403. Same rule as the poll, applied to the other trigger.
- *
- * Typed structurally rather than as `Query<…>` so one function serves every
- * query in the app regardless of its data and error types.
- */
-export function refetchUnlessRefused(query: {
-  state: { error: unknown };
-}): boolean {
-  return !isRefusal(query.state.error);
-}
-
-/**
  * The behaviour every Homestead query gets **by default**, not by remembering.
  *
  * This was first applied to `useProjects` alone; the next task added two more
  * hooks and neither inherited it, so a viewer opening a shared project link
  * took two guaranteed-403s and two more on every alt-tab. A rule that has to
  * be re-typed at each call site is a rule that will be missed, so it lives on
- * the client instead: a hook added tomorrow that sets no options at all is
- * refusal-aware, and `queries.test.tsx` pins exactly that with a query no hook
- * in this file owns.
+ * the client instead: a hook added tomorrow that sets no options at all gets
+ * the same defaults, and `queries.test.tsx` pins exactly that with a query no
+ * hook in this file owns.
+ *
+ * `refetchOnWindowFocus` is deliberately left at the library default (`true`)
+ * rather than also suppressed on a refusal: unlike a poll tick, a focus event
+ * means a person is looking right now, and a 401/403 is not always standing —
+ * a session can renew, a role can change — between when it happened and when
+ * they come back to check. Retrying then is one request, not a leak.
  */
 export const queryDefaults = {
   retry: retryUnlessRefused,
-  refetchOnWindowFocus: refetchUnlessRefused,
 } as const;
 
 /**

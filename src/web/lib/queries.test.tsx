@@ -15,7 +15,6 @@ import {
   POLL_MS,
   projectsPollInterval,
   queryKeys,
-  refetchUnlessRefused,
   useCreateProject,
   useDeleteProject,
   useLifecycle,
@@ -120,30 +119,15 @@ describe("isRefusal", () => {
   });
 });
 
-describe("refetchUnlessRefused", () => {
-  const query = (error: unknown) => ({ state: { error } });
-
-  it("refetches on focus while healthy but not after a refusal", () => {
-    expect(refetchUnlessRefused(query(null))).toBe(true);
-    expect(refetchUnlessRefused(query(new ApiError(500, "boom")))).toBe(true);
-    expect(refetchUnlessRefused(query(new ApiError(403, "forbidden")))).toBe(
-      false,
-    );
-    expect(
-      refetchUnlessRefused(query(new ApiError(401, "unauthenticated"))),
-    ).toBe(false);
-  });
-});
-
 /**
  * The rule, not the call sites.
  *
- * P3-R16 made `useProjects` refusal-aware on window focus; the next task added
- * two hooks and neither inherited it, because inheriting it meant remembering
- * it. These two tests use a query that **no hook in this file owns** and that
- * sets no options at all — the shape a hook added next month will have. They
- * fail if the defaults are ever taken off the client, which is the only way
- * the regression can happen again.
+ * P3-R16 made `useProjects` refusal-aware on retry; the next task added two
+ * hooks and neither inherited it, because inheriting it meant remembering it.
+ * These tests use a query that **no hook in this file owns** and that sets no
+ * options at all — the shape a hook added next month will have. They fail if
+ * the defaults are ever taken off the client, which is the only way the
+ * regression can happen again.
  */
 describe("the client every hook inherits from", () => {
   function useFutureHook() {
@@ -153,7 +137,7 @@ describe("the client every hook inherits from", () => {
     });
   }
 
-  it("gives a hook that asks for nothing refusal-aware retry and focus", async () => {
+  it("gives a hook that asks for nothing refusal-aware retry", async () => {
     const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
     vi.stubGlobal("fetch", fetchMock);
     const { result } = renderHook(useFutureHook, {
@@ -162,13 +146,26 @@ describe("the client every hook inherits from", () => {
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(fetchMock, "a refusal is not retried").toHaveBeenCalledOnce();
+  });
+
+  it("refetches on focus even after a refusal, since a refusal may not be standing", async () => {
+    // A session that renews, or a role that changes, invalidates the 403 the
+    // exact same way a network blip invalidates a 500 — the query just has no
+    // way to learn that on its own. Coming back to the tab is the signal.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json(403, { error: "forbidden" }))
+      .mockResolvedValue(json(200, { ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { result } = renderHook(useFutureHook, {
+      wrapper: wrapper(testClient()),
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(fetchMock).toHaveBeenCalledOnce();
 
     await refocusWindow();
-    await refocusWindow();
-    expect(
-      fetchMock,
-      "a refusal is not refetched on focus",
-    ).toHaveBeenCalledOnce();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
   it("still retries and still refetches on focus when the failure is transient", async () => {
@@ -224,24 +221,6 @@ describe("useProjects", () => {
 
     await refocusWindow();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-  });
-
-  it("does not refetch on focus once the server has refused", async () => {
-    // Focus refetching is a separate switch from the poll interval, and an
-    // errored query has no dataUpdatedAt so it always counts as stale. A
-    // viewer who leaves this tab open and alt-tabs 200 times would otherwise
-    // issue 200 requests that are all guaranteed to 403.
-    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useProjects(), {
-      wrapper: wrapper(testClient()),
-    });
-    await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(fetchMock).toHaveBeenCalledOnce();
-
-    await refocusWindow();
-    await refocusWindow();
-    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("refetches on the poll interval", async () => {
@@ -327,22 +306,6 @@ describe("useProject", () => {
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(fetchMock).toHaveBeenCalledOnce();
   });
-
-  it("does not refetch on focus once the server has refused", async () => {
-    // A viewer following a project link an admin sent them lands here. Left at
-    // the default this issued a guaranteed 403 on every single alt-tab, for as
-    // long as the tab stayed open.
-    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useProject("jellyfin"), {
-      wrapper: wrapper(testClient()),
-    });
-    await waitFor(() => expect(result.current.isError).toBe(true));
-
-    await refocusWindow();
-    await refocusWindow();
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
 });
 
 describe("useProjectOperations", () => {
@@ -368,20 +331,6 @@ describe("useProjectOperations", () => {
       wrapper: wrapper(testClient()),
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it("does not refetch on focus once the server has refused", async () => {
-    // The second of the two requests a viewer's alt-tab used to cost.
-    const fetchMock = vi.fn(async () => json(403, { error: "forbidden" }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { result } = renderHook(() => useProjectOperations("jellyfin"), {
-      wrapper: wrapper(testClient()),
-    });
-    await waitFor(() => expect(result.current.isError).toBe(true));
-
-    await refocusWindow();
-    await refocusWindow();
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
