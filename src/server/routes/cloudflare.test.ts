@@ -136,6 +136,46 @@ describe("GET /api/cloudflare/status", () => {
   });
 });
 
+describe("GET /api/cloudflare/zones", () => {
+  it("lists the account's zones for the hostname picker", async () => {
+    await db.insert(settings).values([
+      { key: "cloudflare.accountId", value: "acc-123" },
+      {
+        key: "cloudflare.apiToken",
+        value: encrypt(PLAINTEXT_TOKEN, Buffer.alloc(32)),
+      },
+    ]);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/cloudflare/zones",
+      headers: { cookie: adminCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().zones).toEqual([{ id: "zone-abc", name: "example.com" }]);
+  });
+
+  it("says Cloudflare is not configured rather than failing obscurely", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/cloudflare/zones",
+      headers: { cookie: adminCookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("tunnel_not_configured");
+  });
+
+  it("is refused for a viewer", async () => {
+    // Zone names are account structure, and every other Cloudflare route here
+    // is admin-only.
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/cloudflare/zones",
+      headers: { cookie: viewerCookie },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+});
+
 describe("POST /api/cloudflare/token", () => {
   it("verifies and stores encrypted token, returns accounts", async () => {
     const res = await app.inject({
@@ -610,6 +650,169 @@ describe("POST /api/cloudflare/setup", () => {
     const [row] = await db.select().from(exposures);
     expect(row?.zoneId).toBe("zone-abc");
     expect(row?.hostPort).toBe(8081);
+  });
+
+  it("reports a DNS conflict in the response, not just the server log", async () => {
+    // upsertDnsRecord refuses to repoint a hostname that already resolves
+    // elsewhere — correct, and destructive to do otherwise. But it threw, and
+    // the 5xx handler masks every unhandled error to {"error":"internal_error"}
+    // to avoid leaking paths, so the one thing worth saying — which record is
+    // in the way — reached only the log.
+    await app.close();
+    const base = fullSetupMock();
+    const mock = (): CloudflareClient => ({
+      ...base,
+      request: async (method, path, body) => {
+        if (method === "GET" && path.includes("/dns_records")) {
+          const records = [
+            {
+              id: "r1",
+              name: "metube.example.com",
+              type: "A",
+              content: "192.0.2.1",
+            },
+          ];
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          return records as any;
+        }
+        return base.request(method, path, body);
+      },
+    });
+
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mock,
+      docker: noDocker,
+    });
+
+    await db.insert(settings).values([
+      { key: "cloudflare.accountId", value: "acc-123" },
+      { key: "cloudflare.tunnelId", value: "tunnel-123" },
+      {
+        key: "cloudflare.apiToken",
+        value: encrypt(PLAINTEXT_TOKEN, Buffer.alloc(32)),
+      },
+      { key: "cloudflare.policyAllowId", value: "pol-allow" },
+      { key: "cloudflare.policyProbeId", value: "pol-probe" },
+    ]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/exposures",
+      headers: { cookie: adminCookie },
+      payload: {
+        hostname: "metube.example.com",
+        hostPort: 8081,
+        scheme: "http",
+        noTlsVerify: false,
+        projectSlug: null,
+        label: null,
+        enabled: true,
+        accessEnabled: true,
+      },
+    });
+
+    // A conflict, not a crash: 4xx so the error handler does not mask it.
+    expect(res.statusCode).toBe(409);
+    const body = res.json();
+    expect(body.detail).toContain("metube.example.com");
+    expect(body.detail).toContain("192.0.2.1");
+  });
+
+  it("keeps provisioning the other exposures when one hostname conflicts", async () => {
+    // The loop aborted on the first throw, so one bad hostname stopped DNS and
+    // Access for every exposure after it.
+    await app.close();
+    const seen: string[] = [];
+    const base = fullSetupMock();
+    const mock = (): CloudflareClient => ({
+      ...base,
+      request: async (method, path, body) => {
+        if (method === "GET" && path.includes("/dns_records")) {
+          const records = [
+            {
+              id: "r1",
+              name: "bad.example.com",
+              type: "A",
+              content: "1.2.3.4",
+            },
+          ];
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          return records as any;
+        }
+        if (method === "POST" && path.includes("/dns_records")) {
+          seen.push((body as { name: string }).name);
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          return { id: "new" } as any;
+        }
+        return base.request(method, path, body);
+      },
+    });
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mock,
+      docker: noDocker,
+    });
+
+    await db.insert(settings).values([
+      { key: "cloudflare.accountId", value: "acc-123" },
+      { key: "cloudflare.tunnelId", value: "tunnel-123" },
+      {
+        key: "cloudflare.apiToken",
+        value: encrypt(PLAINTEXT_TOKEN, Buffer.alloc(32)),
+      },
+      { key: "cloudflare.policyAllowId", value: "pol-allow" },
+      { key: "cloudflare.policyProbeId", value: "pol-probe" },
+    ]);
+    await db.insert(exposures).values([
+      {
+        id: "e-bad",
+        projectSlug: null,
+        hostPort: 9001,
+        zoneId: "zone-abc",
+        hostname: "bad.example.com",
+        scheme: "http",
+        noTlsVerify: false,
+        label: null,
+        enabled: true,
+        accessEnabled: false,
+        accessAppId: null,
+      },
+      {
+        id: "e-good",
+        projectSlug: null,
+        hostPort: 9002,
+        zoneId: "zone-abc",
+        hostname: "good.example.com",
+        scheme: "http",
+        noTlsVerify: false,
+        label: null,
+        enabled: true,
+        accessEnabled: false,
+        accessAppId: null,
+      },
+    ]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/exposures/reconcile",
+      headers: { cookie: adminCookie },
+    });
+
+    expect(res.statusCode).toBe(409);
+    // The healthy one was still created.
+    expect(seen).toContain("good.example.com");
+    expect(res.json().detail).toContain("bad.example.com");
   });
 
   it("says which zone is missing rather than a bare invalid_body", async () => {
@@ -1514,12 +1717,16 @@ describe("POST /api/exposures", () => {
       },
     });
 
-    expect(res.statusCode).toBe(500);
+    // 409, not 500: drift is the operator's to resolve, and a 5xx body is
+    // masked to {"error":"internal_error"} so the conflict would not survive
+    // the trip to the browser.
+    expect(res.statusCode).toBe(409);
     const body = res.json();
-    expect(body.error).toBe("reconcile_failed");
+    expect(body.error).toBe("reconcile_conflict");
     expect(body.conflict).toBe(
       "Remote configuration has been modified outside of Homestead",
     );
+    expect(body.detail).toContain("modified outside of Homestead");
 
     // Verify no PUT was attempted
     const putCall = calls.find(

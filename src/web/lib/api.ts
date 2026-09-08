@@ -14,7 +14,12 @@ export class ApiError extends Error {
   readonly detail?: string;
 
   constructor(status: number, code?: string, detail?: string) {
-    super(code ? `${status} ${code}` : `HTTP ${status}`);
+    // The detail first, because `message` is what components render. This read
+    // "409 reconcile_conflict" — a status and a slug — while the server had
+    // already sent a sentence naming the DNS record standing in the way.
+    // Falling back to the code keeps something identifiable when a route sends
+    // no detail; `code` and `detail` stay available for callers that branch.
+    super(detail ?? (code ? `${status} ${code}` : `HTTP ${status}`));
     this.name = "ApiError";
     this.status = status;
     this.code = code;

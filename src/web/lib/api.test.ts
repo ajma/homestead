@@ -146,3 +146,36 @@ describe("apiFetch", () => {
     });
   });
 });
+
+describe("ApiError message", () => {
+  it("reads as the server's explanation when there is one", () => {
+    // Every component that renders error.message was showing "409
+    // reconcile_conflict" — a status and a slug. The server had already sent
+    // a sentence saying which DNS record was in the way; nothing displayed it.
+    const e = new ApiError(
+      409,
+      "reconcile_conflict",
+      "metube.example.com already has an A record pointing to 192.0.2.1",
+    );
+    expect(e.message).toBe(
+      "metube.example.com already has an A record pointing to 192.0.2.1",
+    );
+  });
+
+  it("falls back to the code when the server sent no detail", () => {
+    expect(new ApiError(403, "forbidden").message).toBe("403 forbidden");
+  });
+
+  it("falls back to the status when there is neither", () => {
+    expect(new ApiError(500).message).toBe("HTTP 500");
+  });
+
+  it("keeps the code and detail available separately", () => {
+    // Components branch on code; humans read detail. Folding one into message
+    // must not remove the other.
+    const e = new ApiError(409, "reconcile_conflict", "a sentence");
+    expect(e.code).toBe("reconcile_conflict");
+    expect(e.detail).toBe("a sentence");
+    expect(e.status).toBe(409);
+  });
+});

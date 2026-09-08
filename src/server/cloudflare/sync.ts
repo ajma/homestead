@@ -119,31 +119,45 @@ export async function reconcileExposures(
         set: { value: newFingerprint },
       });
 
-    // Ensure DNS and Access apps exist for all enabled exposures
+    // Ensure DNS and Access apps exist for all enabled exposures.
+    //
+    // Per-exposure failures are collected rather than thrown. A hostname whose
+    // DNS is already taken is a conflict the operator can act on, and it used
+    // to escape as an unhandled error — masked to {"error":"internal_error"}
+    // by the 5xx handler, so the one useful fact went only to the log. It also
+    // aborted the loop, so one bad hostname stopped every exposure after it.
+    const conflicts: string[] = [];
     for (const exposure of allExposures) {
       if (!exposure.enabled) continue;
 
-      // Ensure DNS record exists
-      await upsertDnsRecord(
-        client,
-        exposure.zoneId,
-        exposure.hostname,
-        tunnelId,
-      );
+      try {
+        await upsertDnsRecord(
+          client,
+          exposure.zoneId,
+          exposure.hostname,
+          tunnelId,
+        );
 
-      // Ensure Access app exists if requested
-      if (exposure.accessEnabled && policyAllowId && policyProbeId) {
-        if (!exposure.accessAppId) {
-          const app = await createApp(client, accountId, exposure.hostname, [
-            policyAllowId,
-            policyProbeId,
-          ]);
-          await db
-            .update(exposures)
-            .set({ accessAppId: app.id })
-            .where(eq(exposures.id, exposure.id));
+        // Ensure Access app exists if requested
+        if (exposure.accessEnabled && policyAllowId && policyProbeId) {
+          if (!exposure.accessAppId) {
+            const app = await createApp(client, accountId, exposure.hostname, [
+              policyAllowId,
+              policyProbeId,
+            ]);
+            await db
+              .update(exposures)
+              .set({ accessAppId: app.id })
+              .where(eq(exposures.id, exposure.id));
+          }
         }
+      } catch (error) {
+        conflicts.push(error instanceof Error ? error.message : String(error));
       }
+    }
+
+    if (conflicts.length > 0) {
+      return { ok: false, conflict: conflicts.join("; ") };
     }
 
     return { ok: true };

@@ -86,6 +86,29 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     },
   );
 
+  app.get(
+    "/api/cloudflare/zones",
+    { preHandler: requirePermission({ tunnel: ["read"] }) },
+    async (_request, reply) => {
+      // Feeds the hostname picker: an exposure's zone is derived from its
+      // hostname, so the form offers the zones rather than asking for a
+      // fully-qualified name and hoping it lands in one.
+      const [accountRow] = await db
+        .select()
+        .from(settings)
+        .where(eq(settings.key, "cloudflare.accountId"));
+      const token = await getDecryptedToken(db, opts.secretKey);
+
+      if (!accountRow || !token) {
+        return reply.status(400).send({ error: "tunnel_not_configured" });
+      }
+
+      const clientFactory = opts.cloudflare ?? createCloudflareClient;
+      const client = clientFactory({ token });
+      return { zones: await client.listZones(accountRow.value) };
+    },
+  );
+
   app.post(
     "/api/cloudflare/token",
     { preHandler: requirePermission({ tunnel: ["create"] }) },
@@ -426,11 +449,13 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       );
 
       if (!result.ok) {
-        return reply.status(500).send({
-          error: "reconcile_failed",
+        // 409, not 500: this is a conflict the operator can resolve, and a
+        // 5xx body is masked to {"error":"internal_error"} — which is how the
+        // one useful fact, the record standing in the way, went missing.
+        return reply.status(409).send({
+          error: "reconcile_conflict",
           conflict: result.conflict,
-          detail:
-            "Exposure created in database but remote sync failed. Run POST /api/exposures/reconcile to retry.",
+          detail: `Exposure saved, but Cloudflare was not updated: ${result.conflict}. Resolve it and retry with Reconcile.`,
         });
       }
 
@@ -530,11 +555,10 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       );
 
       if (!result.ok) {
-        return reply.status(500).send({
-          error: "reconcile_failed",
+        return reply.status(409).send({
+          error: "reconcile_conflict",
           conflict: result.conflict,
-          detail:
-            "Exposure updated in database but remote sync failed. Run POST /api/exposures/reconcile to retry.",
+          detail: `Exposure saved, but Cloudflare was not updated: ${result.conflict}. Resolve it and retry with Reconcile.`,
         });
       }
 
@@ -608,11 +632,10 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       );
 
       if (!result.ok) {
-        return reply.status(500).send({
-          error: "reconcile_failed",
+        return reply.status(409).send({
+          error: "reconcile_conflict",
           conflict: result.conflict,
-          detail:
-            "Exposure deleted but remote sync failed. Run POST /api/exposures/reconcile to retry.",
+          detail: `Exposure deleted, but Cloudflare was not updated: ${result.conflict}. Resolve it and retry with Reconcile.`,
         });
       }
 
@@ -656,7 +679,11 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       );
 
       if (!result.ok) {
-        return reply.status(409).send({ conflict: result.conflict });
+        return reply.status(409).send({
+          error: "reconcile_conflict",
+          conflict: result.conflict,
+          detail: `Cloudflare was not fully updated: ${result.conflict}`,
+        });
       }
 
       return { ok: true };
@@ -696,7 +723,11 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       );
 
       if (!result.synced) {
-        return reply.status(409).send({ conflict: result.conflict });
+        return reply.status(409).send({
+          error: "reconcile_conflict",
+          conflict: result.conflict,
+          detail: `Cloudflare was not fully updated: ${result.conflict}`,
+        });
       }
 
       return { ok: true };
