@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { CloudflareClient } from "./client.js";
 import {
   createTunnel,
+  getTunnelToken,
   type IngressRule,
   putIngress,
   upsertDnsRecord,
@@ -39,6 +40,32 @@ it("creates a remotely-managed tunnel", async () => {
   const r = await createTunnel(c, "a", "homestead");
   expect(r.id).toBe("t1");
   expect(c.calls[0]?.body).toMatchObject({ config_src: "cloudflare" });
+});
+
+it("reads the run token from a bare string result", async () => {
+  // Cloudflare returns the run token as the result itself, not wrapped in an
+  // object. Reading result.token gave undefined, which reached encrypt() and
+  // died there as "data argument must be of type string" — three frames away
+  // from the cause, at the last step of tunnel setup.
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1/token": "eyJhIjoiYWJjIn0=",
+  });
+  await expect(getTunnelToken(c, "a", "t1")).resolves.toBe("eyJhIjoiYWJjIn0=");
+});
+
+it("still reads a run token wrapped in an object", async () => {
+  // Defensive: the shape is undocumented enough that it was got wrong once.
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1/token": { token: "wrapped-token" },
+  });
+  await expect(getTunnelToken(c, "a", "t1")).resolves.toBe("wrapped-token");
+});
+
+it("fails by name when the run token is missing entirely", async () => {
+  // Better here, where the tunnel id is in the message, than four frames later
+  // inside a cipher.
+  const c = fakeClient({ "GET /accounts/a/cfd_tunnel/t1/token": null });
+  await expect(getTunnelToken(c, "a", "t1")).rejects.toThrow(/t1/);
 });
 
 it("always ends the ingress array with a catch-all", async () => {

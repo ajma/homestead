@@ -498,8 +498,11 @@ describe("POST /api/cloudflare/setup", () => {
           path.includes("/cfd_tunnel") &&
           path.includes("/token")
         ) {
+          // A bare string, which is what Cloudflare actually returns. The
+          // object form this mock used to return is why the wrong shape
+          // shipped.
           // biome-ignore lint/suspicious/noExplicitAny: test mock
-          return { token: "tunnel-run-token-abc" } as any;
+          return "tunnel-run-token-abc" as any;
         }
         if (method === "POST" && path.includes("/access/policies")) {
           policyCreated = true;
@@ -605,7 +608,7 @@ describe("POST /api/cloudflare/setup", () => {
           path.includes("/token")
         ) {
           // biome-ignore lint/suspicious/noExplicitAny: test mock
-          return { token: "tunnel-run-token-def" } as any;
+          return "tunnel-run-token-def" as any; // bare string: the real Cloudflare shape
         }
         if (method === "POST" && path.includes("/access/service_tokens")) {
           serviceTokenCreateCount++;
@@ -723,7 +726,7 @@ describe("POST /api/cloudflare/setup", () => {
           path.includes("/token")
         ) {
           // biome-ignore lint/suspicious/noExplicitAny: test mock
-          return { token: "tunnel-run-token-789" } as any;
+          return "tunnel-run-token-789" as any; // bare string: the real Cloudflare shape
         }
         if (method === "POST" && path.includes("/access/service_tokens")) {
           return {

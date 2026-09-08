@@ -40,6 +40,15 @@ export async function ensureSecretKey(
 }
 
 export function encrypt(plaintext: string, key: Buffer): string {
+  // Callers reach here holding something they believe is a secret. When that
+  // belief is wrong the cipher's own error names neither the value nor the
+  // caller — a real failure surfaced as "data argument must be of type string"
+  // with nothing to say which secret was missing.
+  if (typeof plaintext !== "string" || plaintext === "") {
+    throw new TypeError(
+      `encrypt() needs a non-empty string, received ${plaintext === "" ? "an empty string" : typeof plaintext}`,
+    );
+  }
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);

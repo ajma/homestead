@@ -33,11 +33,21 @@ export async function getTunnelToken(
   tunnelId: string,
 ): Promise<string> {
   try {
-    const result = await c.request<{ token: string }>(
+    // Cloudflare returns the run token as the result itself — a bare string,
+    // not an object with a token field. Reading `.token` produced undefined,
+    // which travelled as far as encrypt() before failing, three frames from
+    // the cause. The object form is accepted too: this was got wrong once, so
+    // do not assume the other shape never appears.
+    const result = await c.request<string | { token?: string } | null>(
       "GET",
       `/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`,
     );
-    return result.token;
+    const token =
+      typeof result === "string" ? result : (result?.token ?? undefined);
+    if (!token) {
+      throw new Error("Cloudflare returned no run token");
+    }
+    return token;
   } catch (error) {
     throw new Error(
       `Failed to get token for tunnel ${tunnelId}: ${error instanceof Error ? error.message : String(error)}`,
