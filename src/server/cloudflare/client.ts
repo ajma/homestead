@@ -6,7 +6,10 @@ type CloudflareEnvelope<T> = {
   errors: { code: number; message: string }[];
 };
 
+export type TokenKind = "account" | "user";
+
 export type CloudflareClient = {
+  detectTokenKind(): Promise<TokenKind>;
   verifyToken(): Promise<{ ok: true } | { ok: false; missingScopes: string[] }>;
   listAccounts(): Promise<{ id: string; name: string }[]>;
   listZones(accountId: string): Promise<ZoneOption[]>;
@@ -81,6 +84,35 @@ export function createCloudflareClient(opts: {
 
   return {
     request,
+
+    /**
+     * Homestead is a long-lived service, so it wants an account-owned token:
+     * a user token dies with the user's access to the account, taking every
+     * exposed hostname's management with it.
+     *
+     * Cloudflare prefixes the two kinds — `cfat_` for account, `cfut_` for
+     * user — so most tokens settle it without a request. Tokens issued before
+     * that format have no prefix, and for those the tell is behavioural: only
+     * a user token has a user context, so only a user token can read
+     * memberships.
+     */
+    async detectTokenKind(): Promise<TokenKind> {
+      if (opts.token.startsWith("cfat_")) return "account";
+      if (opts.token.startsWith("cfut_")) return "user";
+
+      try {
+        await request("GET", "/memberships");
+        return "user";
+      } catch (error) {
+        // A refusal means no user context, which is the answer. Anything else
+        // — a timeout, DNS failure, a 500 — is not evidence, and treating it
+        // as "account-owned" would wave a user token through whenever
+        // Cloudflare hiccups.
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("network error")) throw error;
+        return "account";
+      }
+    },
 
     async verifyToken() {
       const probes: { scope: string; path: string }[] = [

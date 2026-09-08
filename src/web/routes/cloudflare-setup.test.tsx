@@ -95,7 +95,6 @@ describe("CloudflareSetup", () => {
       /Access: Service Tokens · Edit/,
       /Zone · Zone · Read/,
       /Zone · DNS · Edit/,
-      /User · Memberships · Read/,
     ]) {
       expect(
         screen.getByText(permission),
@@ -103,16 +102,19 @@ describe("CloudflareSetup", () => {
       ).toBeVisible();
     }
 
-    // The permission everyone hunts for in the wrong section.
-    expect(screen.getByText(/User · Memberships · Read/).textContent).toMatch(
-      /not Account or Zone/,
-    );
+    // Memberships is a user-token permission and does not exist for the
+    // account-owned token Homestead requires. Listing it sent someone hunting
+    // for a permission that could not fix their problem.
+    expect(screen.queryByText(/Memberships/)).toBeNull();
 
-    const link = screen.getByRole("link", { name: /API Tokens/i });
-    expect(link).toHaveAttribute(
-      "href",
-      "https://dash.cloudflare.com/profile/api-tokens",
-    );
+    // The distinction is the whole point: naming only the permissions, without
+    // saying which kind of token carries them, is what caused the wrong one to
+    // be created.
+    expect(screen.getByText(/account-owned/i)).toBeVisible();
+    expect(screen.getByText(/Account API Tokens/)).toBeVisible();
+
+    const link = screen.getByRole("link", { name: /cloudflare dashboard/i });
+    expect(link).toHaveAttribute("href", "https://dash.cloudflare.com");
     // An external target without noopener hands the new tab a window.opener
     // reference back into an authenticated session.
     expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));

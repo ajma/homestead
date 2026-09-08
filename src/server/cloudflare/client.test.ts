@@ -17,6 +17,76 @@ describe("createCloudflareClient", () => {
     );
   });
 
+  describe("detectTokenKind", () => {
+    it("calls nothing when the prefix already settles it", async () => {
+      // cfut_ is Cloudflare's documented user-token prefix. Spending a request
+      // to learn what the string already says is waste.
+      const f = vi.fn<typeof fetch>(async () => ok([]));
+      const kind = await createCloudflareClient({
+        token: "cfut_abc123",
+        fetch: f,
+      }).detectTokenKind();
+      expect(kind).toBe("user");
+      expect(f).not.toHaveBeenCalled();
+    });
+
+    it("recognises an account-owned token by its prefix", async () => {
+      const f = vi.fn<typeof fetch>(async () => ok([]));
+      const kind = await createCloudflareClient({
+        token: "cfat_abc123",
+        fetch: f,
+      }).detectTokenKind();
+      expect(kind).toBe("account");
+      expect(f).not.toHaveBeenCalled();
+    });
+
+    it("probes memberships for a token predating the prefix format", async () => {
+      // Older tokens carry no prefix. Only a user token has a user context, so
+      // /memberships answering at all is the tell.
+      const f = vi.fn<typeof fetch>(async () => ok([{ id: "m1" }]));
+      const kind = await createCloudflareClient({
+        token: "0123456789abcdef0123456789abcdef01234567",
+        fetch: f,
+      }).detectTokenKind();
+      expect(kind).toBe("user");
+      expect(String(f.mock.calls[0]?.[0])).toContain("/memberships");
+    });
+
+    it("treats a refused memberships probe as account-owned", async () => {
+      const f = vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              success: false,
+              errors: [
+                { code: 9109, message: "Unauthorized to access resource" },
+              ],
+            }),
+            { status: 403 },
+          ),
+      );
+      const kind = await createCloudflareClient({
+        token: "0123456789abcdef0123456789abcdef01234567",
+        fetch: f,
+      }).detectTokenKind();
+      expect(kind).toBe("account");
+    });
+
+    it("does not call a network failure an account token", async () => {
+      // Misreading a timeout as "account-owned" would let a user token through
+      // whenever Cloudflare is briefly unreachable.
+      const f = vi.fn<typeof fetch>(async () => {
+        throw new TypeError("fetch failed");
+      });
+      await expect(
+        createCloudflareClient({
+          token: "0123456789abcdef0123456789abcdef01234567",
+          fetch: f,
+        }).detectTokenKind(),
+      ).rejects.toThrow(/network/i);
+    });
+  });
+
   it("falls back to memberships when /accounts comes back empty", async () => {
     // Verified against a real token: /accounts answers 200 with an empty array
     // and total_count 0, while /memberships returns the account perfectly well.

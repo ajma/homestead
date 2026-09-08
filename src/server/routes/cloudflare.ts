@@ -90,6 +90,21 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       const clientFactory = opts.cloudflare ?? createCloudflareClient;
       const client = clientFactory({ token });
 
+      // Homestead outlives the person who set it up. A user token stops
+      // working the day its owner loses access to the account, and every
+      // exposed hostname becomes unmanageable with it — so refuse one here
+      // rather than let setup succeed and rot later.
+      if ((await client.detectTokenKind()) === "user") {
+        return reply.status(400).send({
+          error: "user_token",
+          detail:
+            "This is a user API token. Homestead needs an account-owned " +
+            "token so it keeps working if you lose access to the account. " +
+            "Create one under Manage Account → Account API Tokens (it " +
+            "requires Super Administrator and its value starts with cfat_).",
+        });
+      }
+
       const verification = await client.verifyToken();
       if (!verification.ok) {
         return reply.status(400).send({

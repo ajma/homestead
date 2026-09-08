@@ -45,6 +45,7 @@ beforeEach(async () => {
 
   // Default mock cloudflare client (returns success)
   const mockCloudflare = (): CloudflareClient => ({
+    detectTokenKind: async () => "account" as const,
     verifyToken: async () => ({ ok: true }),
     listAccounts: async () => [
       { id: "acc-123", name: "Test Account" },
@@ -145,6 +146,7 @@ describe("POST /api/cloudflare/token", () => {
     // Replace app with one that returns missing scopes
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({
         ok: false,
         missingScopes: ["Account:Read", "Zone:Read"],
@@ -186,12 +188,90 @@ describe("POST /api/cloudflare/token", () => {
     expect(row).toBeUndefined();
   });
 
+  it("refuses a user token and says how to make an account one", async () => {
+    // Homestead runs unattended for years. A user token goes inactive the day
+    // its owner loses access to the account, taking management of every
+    // exposed hostname with it. Cloudflare's own guidance is that durable
+    // integrations use an account-owned token.
+    await app.close();
+    const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "user",
+      verifyToken: async () => ({ ok: true }),
+      listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
+      listZones: async () => [],
+      listIdentityProviders: async () => [],
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      request: async () => ({}) as any,
+    });
+
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mockCloudflare,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: "cfut_a-user-token" },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error).toBe("user_token");
+    expect(body.detail).toMatch(/account-owned/i);
+    expect(body.detail).toMatch(/Account API Tokens/);
+
+    // Rejected means rejected: a user token must not be left behind.
+    const [row] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, "cloudflare.apiToken"));
+    expect(row).toBeUndefined();
+  });
+
+  it("never leaks the token back in the rejection", async () => {
+    await app.close();
+    const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "user",
+      verifyToken: async () => ({ ok: true }),
+      listAccounts: async () => [],
+      listZones: async () => [],
+      listIdentityProviders: async () => [],
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      request: async () => ({}) as any,
+    });
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mockCloudflare,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: "cfut_secret-value-here" },
+    });
+    expect(res.body).not.toContain("secret-value-here");
+  });
+
   it("explains an empty account list instead of accepting the token", async () => {
     // Cloudflare answers GET /accounts with 200 and an empty array when the
     // token lacks User → Memberships → Read, so verifyToken sees nothing wrong.
     // Storing it leaves setup on an empty dropdown with no way to learn why.
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -289,6 +369,7 @@ describe("POST /api/cloudflare/setup", () => {
     // Replace app with one that returns empty IdP list
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
       listZones: async () => [],
@@ -347,6 +428,7 @@ describe("POST /api/cloudflare/setup", () => {
     // Replace app with full mock implementation
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
       listZones: async () => [{ id: "zone-abc", name: "example.com" }],
@@ -452,6 +534,7 @@ describe("POST /api/cloudflare/setup", () => {
     await app.close();
     let shouldFail = true;
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
       listZones: async () => [{ id: "zone-abc", name: "example.com" }],
@@ -569,6 +652,7 @@ describe("POST /api/cloudflare/setup", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [{ id: "acc-789", name: "Test Account" }],
       listZones: async () => [{ id: "zone-def", name: "example.org" }],
@@ -747,6 +831,7 @@ describe("POST /api/exposures", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -841,6 +926,7 @@ describe("POST /api/exposures", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -937,6 +1023,7 @@ describe("POST /api/exposures", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1026,6 +1113,7 @@ describe("POST /api/exposures", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1116,6 +1204,7 @@ describe("POST /api/exposures", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1227,6 +1316,7 @@ describe("POST /api/exposures", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1365,6 +1455,7 @@ describe("PATCH /api/exposures/:id", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1478,6 +1569,7 @@ describe("DELETE /api/exposures/:id", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1610,6 +1702,7 @@ describe("DELETE /api/exposures/:id", () => {
 
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1743,6 +1836,7 @@ describe("POST /api/exposures/reconcile", () => {
     const calls: Array<{ method: string; path: string }> = [];
     await app.close();
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       listAccounts: async () => [],
       listZones: async () => [],
@@ -1794,6 +1888,7 @@ describe("POST /api/cloudflare/sync-users", () => {
 
     // Mock that returns a valid policy structure
     const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
       verifyToken: async () => ({ ok: true }),
       // Non-empty: this test seeds a token through the real route, which now
       // refuses a token that can list no accounts.

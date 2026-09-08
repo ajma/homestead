@@ -149,19 +149,18 @@ function TokenStep({
         />
         <div className="mt-2 text-xs text-muted">
           <p>
-            Create one at{" "}
+            Homestead needs an <strong>account-owned</strong> token, not a user
+            token. Open{" "}
             <a
-              href="https://dash.cloudflare.com/profile/api-tokens"
+              href="https://dash.cloudflare.com"
               target="_blank"
               rel="noopener noreferrer"
               className="text-accent underline"
             >
-              My Profile → API Tokens
-            </a>
-            . Choose <strong>Create Token</strong>, then{" "}
-            <strong>Create Custom Token</strong> — it is the “Get started”
-            button below the templates, not one of the templates — and add these
-            six permissions:
+              the Cloudflare dashboard
+            </a>{" "}
+            and go to <strong>Manage Account → Account API Tokens</strong>, then{" "}
+            <strong>Create Token</strong>, and add these five permissions:
           </p>
           <ul className="mt-1 list-disc space-y-0.5 pl-5">
             <li>Account · Cloudflare Tunnel · Edit</li>
@@ -169,18 +168,17 @@ function TokenStep({
             <li>Account · Access: Service Tokens · Edit</li>
             <li>Zone · Zone · Read</li>
             <li>Zone · DNS · Edit</li>
-            <li>
-              User · Memberships · Read{" "}
-              <span className="text-muted">
-                — under <strong>User</strong>, not Account or Zone. Without it
-                Homestead cannot list your accounts.
-              </span>
-            </li>
           </ul>
           <p className="mt-1">
-            Set Account Resources to the account you are configuring, and Zone
-            Resources to the zones you will expose. It must be a user token: an
-            account-owned token cannot grant the Memberships permission.
+            Scope Zone Resources to the zones you will expose. Creating the
+            token needs the Super Administrator role, and its value begins with{" "}
+            <code>cfat_</code>.
+          </p>
+          <p className="mt-1">
+            A user token — created under My Profile, beginning{" "}
+            <code>cfut_</code> — is rejected. It stops working the day its owner
+            loses access to the account, which would leave every published
+            hostname unmanageable.
           </p>
         </div>
       </div>

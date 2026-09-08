@@ -32,6 +32,9 @@ function fakeClient(
       }
       return response as T;
     },
+    async detectTokenKind() {
+      return "account" as const;
+    },
     async verifyToken() {
       return { ok: true as const };
     },

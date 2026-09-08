@@ -26,6 +26,7 @@ function fakeClient(
       const result = canned[key];
       return result as T;
     },
+    detectTokenKind: async () => "account" as const,
     verifyToken: async () => ({ ok: true }),
     listAccounts: async () => [],
     listZones: async () => [],
