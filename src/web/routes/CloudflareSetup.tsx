@@ -114,6 +114,7 @@ function TokenStep({
   // would catch that.
   const [token, setToken] = useState("");
   const verify = useVerifyToken();
+  const selectAccount = useSelectAccount();
   const tokenId = useId();
 
   async function handleSubmit(e: React.FormEvent) {
@@ -122,6 +123,25 @@ function TokenStep({
       const result = await verify.mutateAsync(token);
       // Clear token from state immediately after successful submission
       setToken("");
+
+      // An account-owned token belongs to exactly one account, so the picker
+      // would offer a list of one — a question with a single possible answer.
+      // Two or more still asks: auto-advance means "there is only one answer",
+      // never "take the first".
+      const only = result.accounts.length === 1 ? result.accounts[0] : null;
+      if (only) {
+        const picked = await selectAccount.mutateAsync(only.id);
+        setState({
+          ...state,
+          step: "identity-provider",
+          accounts: result.accounts,
+          selectedAccountId: only.id,
+          zones: picked.zones,
+          idps: picked.idps,
+        });
+        return;
+      }
+
       setState({
         ...state,
         step: "account",

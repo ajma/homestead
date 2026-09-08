@@ -8,6 +8,7 @@ import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { devices, manualApps, monitors, user } from "../db/schema.js";
+import { createFakeDocker } from "../docker/fake.js";
 
 const TEST_AUTH = {
   secret: "test-secret-value-at-least-32-chars",
@@ -46,6 +47,7 @@ beforeEach(async () => {
     projectsDir: root,
     projectsHostDir: root,
     dataDir: root,
+    docker: createFakeDocker().runner,
   });
 
   const a = await auth.api.signUpEmail({

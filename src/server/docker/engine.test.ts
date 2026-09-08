@@ -18,13 +18,30 @@ describe("listContainers", () => {
     expect(args).toContain("--format");
   });
 
-  it("parses id and image from each line", async () => {
+  it("parses id, image and compose project from each line", async () => {
+    // The compose project is what tells a cloudflared Homestead deployed from
+    // one someone else started — the difference between "deployed" and
+    // "adopted", which the setup screen reports separately.
     const run = runner(
-      "abc123\tcloudflare/cloudflared:latest\ndef456\tnginx:alpine\n",
+      "abc123\tcloudflare/cloudflared:latest\thomestead-tunnel\n" +
+        "def456\tnginx:alpine\tsomething-else\n",
     );
     await expect(listContainers(run)).resolves.toEqual([
-      { id: "abc123", image: "cloudflare/cloudflared:latest" },
-      { id: "def456", image: "nginx:alpine" },
+      {
+        id: "abc123",
+        image: "cloudflare/cloudflared:latest",
+        project: "homestead-tunnel",
+      },
+      { id: "def456", image: "nginx:alpine", project: "something-else" },
+    ]);
+  });
+
+  it("treats a container with no compose project as unlabelled", async () => {
+    // A plain `docker run` container has no project label; the field is empty
+    // rather than the line being dropped.
+    const run = runner("abc123\tcloudflare/cloudflared:latest\t\n");
+    await expect(listContainers(run)).resolves.toEqual([
+      { id: "abc123", image: "cloudflare/cloudflared:latest", project: "" },
     ]);
   });
 
@@ -37,7 +54,7 @@ describe("listContainers", () => {
     // entry with an empty id could be handed to a later docker command.
     const run = runner("abc123\tnginx\ngarbage-with-no-tab\n\t\n");
     await expect(listContainers(run)).resolves.toEqual([
-      { id: "abc123", image: "nginx" },
+      { id: "abc123", image: "nginx", project: "" },
     ]);
   });
 

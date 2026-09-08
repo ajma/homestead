@@ -11,12 +11,25 @@ import { type Runner, runDocker } from "./run.js";
  * must still finish on a box with no socket; the startup checks already say so
  * plainly, and failing here would only repeat that in a worse place.
  */
+export type RunningContainer = {
+  id: string;
+  image: string;
+  /** Compose project, or "" for a container started outside compose. */
+  project: string;
+};
+
 export async function listContainers(
   run: Runner = runDocker,
-): Promise<{ id: string; image: string }[]> {
+): Promise<RunningContainer[]> {
   let stdout: string;
   try {
-    const result = await run(["ps", "--format", "{{.ID}}\t{{.Image}}"]);
+    const result = await run([
+      "ps",
+      "--format",
+      // The compose project distinguishes a cloudflared Homestead deployed
+      // from one someone else started, which is the deployed/adopted split.
+      '{{.ID}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}',
+    ]);
     if (result.code !== 0) return [];
     stdout = result.stdout;
   } catch {
@@ -26,8 +39,12 @@ export async function listContainers(
   return stdout
     .split("\n")
     .map((line) => {
-      const [id, image] = line.split("\t");
-      return { id: id?.trim() ?? "", image: image?.trim() ?? "" };
+      const [id, image, project] = line.split("\t");
+      return {
+        id: id?.trim() ?? "",
+        image: image?.trim() ?? "",
+        project: project?.trim() ?? "",
+      };
     })
     .filter((c) => c.id !== "" && c.image !== "");
 }

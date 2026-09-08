@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createDb, runMigrations } from "../db/client.js";
+import { createFakeDocker } from "../docker/fake.js";
 import { tempDir } from "../test-support/tmp.js";
 import { createAuth } from "./index.js";
 
@@ -30,6 +31,7 @@ async function boot() {
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
+    docker: createFakeDocker().runner,
   });
   await auth.api.signUpEmail({
     body: {

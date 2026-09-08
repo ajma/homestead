@@ -10,10 +10,22 @@ import type { CloudflareClient } from "../cloudflare/client.js";
 import { encrypt } from "../crypto/secrets.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { exposures, settings, user } from "../db/schema.js";
+import { createFakeDocker } from "../docker/fake.js";
 
 const TEST_AUTH = {
   secret: "test-secret-value-at-least-32-chars",
   baseURL: "http://localhost:7420",
+};
+
+/**
+ * Every app in this file gets a docker runner. Without one, buildApp falls
+ * back to the real `docker`, and setup's startProject genuinely brought a
+ * cloudflared container up on the developer's machine from a /tmp compose
+ * file. Tests do not start containers.
+ */
+const noDocker = {
+  run: async () => ({ stdout: "", stderr: "", code: 0 }),
+  stream: async () => 0,
 };
 
 let db: Db;
@@ -68,6 +80,7 @@ beforeEach(async () => {
     projectsHostDir: root,
     dataDir: root,
     cloudflare: mockCloudflare,
+    docker: noDocker,
   });
 
   const a = await auth.api.signUpEmail({
@@ -167,6 +180,7 @@ describe("POST /api/cloudflare/token", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -213,6 +227,7 @@ describe("POST /api/cloudflare/token", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -255,6 +270,7 @@ describe("POST /api/cloudflare/token", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -294,6 +310,7 @@ describe("POST /api/cloudflare/token", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     await app.inject({
@@ -341,6 +358,7 @@ describe("POST /api/cloudflare/token", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -439,6 +457,7 @@ describe("POST /api/cloudflare/setup", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Store a token first
@@ -546,6 +565,101 @@ describe("POST /api/cloudflare/setup", () => {
       payload: { idpId: "idp-xyz" },
     });
   }
+
+  it("reports a running connector in status instead of a hardcoded none", async () => {
+    // status returned { kind: "none" } unconditionally, with a comment saying
+    // real detection needed docker access. It has had that since listContainers
+    // landed, and until now the screen said nothing was running while a healthy
+    // connector sat there.
+    await app.close();
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      docker: dockerWith([
+        "c0ffee\tcloudflare/cloudflared:latest\thomestead-tunnel",
+      ]),
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/cloudflare/status",
+      headers: { cookie: adminCookie },
+    });
+    expect(res.json().runtime).toEqual({
+      kind: "deployed",
+      projectSlug: "homestead-tunnel",
+    });
+  });
+
+  it("reports none in status when no connector is running", async () => {
+    await app.close();
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      docker: dockerWith([]),
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/cloudflare/status",
+      headers: { cookie: adminCookie },
+    });
+    expect(res.json().runtime).toEqual({ kind: "none" });
+  });
+
+  it("starts the stack it just wrote", async () => {
+    // Writing the files is not a running tunnel. Leaving the start manual is
+    // what left every hostname dead behind a screen saying "Setup complete".
+    const calls: string[][] = [];
+    await app.close();
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: fullSetupMock,
+      docker: {
+        run: async (args: string[]) => {
+          calls.push(args);
+          return { stdout: "", stderr: "", code: 0 };
+        },
+        stream: async () => 0,
+      },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: PLAINTEXT_TOKEN },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/account",
+      headers: { cookie: adminCookie },
+      payload: { accountId: "acc-123" },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/setup",
+      headers: { cookie: adminCookie },
+      payload: { idpId: "idp-xyz" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const up = calls.find((a) => a.includes("up"));
+    expect(up, `no compose up in ${JSON.stringify(calls)}`).toBeDefined();
+    expect(up).toContain("-d");
+    expect(up?.join(" ")).toContain("homestead-tunnel");
+  });
 
   it("replaces a tunnel deleted in Cloudflare, and its run token with it", async () => {
     // Deleting the tunnel upstream leaves the stored id and run token pointing
@@ -702,6 +816,7 @@ describe("POST /api/cloudflare/setup", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Store a token first
@@ -811,6 +926,7 @@ describe("POST /api/cloudflare/setup", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Store a token first
@@ -942,6 +1058,7 @@ describe("POST /api/cloudflare/setup", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Store a token
@@ -1095,6 +1212,7 @@ describe("POST /api/exposures", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -1190,6 +1308,7 @@ describe("POST /api/exposures", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -1284,6 +1403,7 @@ describe("POST /api/exposures", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -1382,6 +1502,7 @@ describe("POST /api/exposures", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -1475,6 +1596,7 @@ describe("POST /api/exposures", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Fire two creates concurrently
@@ -1603,6 +1725,7 @@ describe("POST /api/exposures", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Create exposure - reconcile will push and re-read normalized variant
@@ -1724,6 +1847,7 @@ describe("PATCH /api/exposures/:id", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const createRes = await app.inject({
@@ -1855,6 +1979,7 @@ describe("DELETE /api/exposures/:id", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Create an exposure with Access enabled
@@ -1988,6 +2113,7 @@ describe("DELETE /api/exposures/:id", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Create an exposure with Access enabled
@@ -2088,6 +2214,7 @@ describe("POST /api/exposures/reconcile", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -2141,6 +2268,7 @@ describe("POST /api/cloudflare/sync-users", () => {
       projectsHostDir: root,
       dataDir: root,
       cloudflare: mockCloudflare,
+      docker: createFakeDocker().runner,
     });
 
     // Ensure users have emailVerified set (better-auth doesn't set this by default)

@@ -137,6 +137,87 @@ describe("CloudflareSetup", () => {
     expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
   });
 
+  it("skips the account step when the token has exactly one account", async () => {
+    // An account-owned token belongs to one account by construction, so the
+    // picker offers a list of one and asks a question with a single answer.
+    mockFetch({
+      "/api/cloudflare/status": () =>
+        new Response(
+          JSON.stringify({
+            configured: false,
+            accountId: null,
+            tunnelId: null,
+            runtime: { kind: "none" },
+            idpId: null,
+            syncState: "synced",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      "/api/cloudflare/token": () =>
+        new Response(
+          JSON.stringify({ accounts: [{ id: "acc1", name: "Only Account" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      "/api/cloudflare/account": () =>
+        new Response(
+          JSON.stringify({
+            zones: [{ id: "z1", name: "example.com" }],
+            idps: [{ id: "idp1", name: "Google", type: "google" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const { user } = renderSetup();
+    await user.type(
+      await screen.findByPlaceholderText(/api token/i),
+      "cfat_token",
+    );
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    // Straight to the identity provider, without stopping to choose.
+    expect(await screen.findByText(/Google/)).toBeVisible();
+    expect(screen.queryByText("Only Account")).toBeNull();
+  });
+
+  it("still asks when a token somehow sees more than one account", async () => {
+    // Auto-advance must be "there is only one answer", not "take the first".
+    mockFetch({
+      "/api/cloudflare/status": () =>
+        new Response(
+          JSON.stringify({
+            configured: false,
+            accountId: null,
+            tunnelId: null,
+            runtime: { kind: "none" },
+            idpId: null,
+            syncState: "synced",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      "/api/cloudflare/token": () =>
+        new Response(
+          JSON.stringify({
+            accounts: [
+              { id: "acc1", name: "First Account" },
+              { id: "acc2", name: "Second Account" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const { user } = renderSetup();
+    await user.type(
+      await screen.findByPlaceholderText(/api token/i),
+      "cfat_token",
+    );
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    expect(await screen.findByText("First Account")).toBeVisible();
+    expect(screen.getByText("Second Account")).toBeVisible();
+  });
+
   it("clears the token from state after submission", async () => {
     mockFetch({
       "/api/cloudflare/status": () =>
@@ -154,7 +235,12 @@ describe("CloudflareSetup", () => {
       "/api/cloudflare/token": () =>
         new Response(
           JSON.stringify({
-            accounts: [{ id: "acc1", name: "Test Account" }],
+            // Two, so the picker still appears: one account now auto-advances,
+            // and this test is about the step after it, not about that.
+            accounts: [
+              { id: "acc1", name: "Test Account" },
+              { id: "acc2", name: "Other Account" },
+            ],
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
@@ -297,7 +383,12 @@ describe("CloudflareSetup", () => {
       "/api/cloudflare/token": () =>
         new Response(
           JSON.stringify({
-            accounts: [{ id: "acc1", name: "Test Account" }],
+            // Two, so the picker still appears: one account now auto-advances,
+            // and this test is about the step after it, not about that.
+            accounts: [
+              { id: "acc1", name: "Test Account" },
+              { id: "acc2", name: "Other Account" },
+            ],
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),

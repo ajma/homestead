@@ -5,6 +5,7 @@ import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { user } from "../db/schema.js";
+import { createFakeDocker } from "../docker/fake.js";
 import { tempDir } from "../test-support/tmp.js";
 
 const TEST_AUTH = {
@@ -26,6 +27,7 @@ const baseDeps = () => ({
   projectsDir: root,
   projectsHostDir: root,
   dataDir: root,
+  docker: createFakeDocker().runner,
 });
 
 /** Server-side sign-in: bypasses the HTTP rate limiter (5/min per file). */

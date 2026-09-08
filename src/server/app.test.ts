@@ -4,6 +4,7 @@ import { describe, expect, it, onTestFinished } from "vitest";
 import { buildApp } from "./app.js";
 import { createAuth } from "./auth/index.js";
 import { createDb, runMigrations } from "./db/client.js";
+import { createFakeDocker } from "./docker/fake.js";
 import { tempDir } from "./test-support/tmp.js";
 
 const TEST_AUTH = {
@@ -23,6 +24,7 @@ async function boot() {
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
+    docker: createFakeDocker().runner,
   });
 }
 
@@ -38,6 +40,8 @@ async function makeBaseDeps() {
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
+
+    docker: createFakeDocker().runner,
   };
 }
 
@@ -62,6 +66,7 @@ describe("app", () => {
       projectsDir: tmpDir,
       projectsHostDir: tmpDir,
       dataDir: tmpDir,
+      docker: createFakeDocker().runner,
     });
     const loud = await buildApp({
       db,
@@ -71,6 +76,7 @@ describe("app", () => {
       projectsDir: tmpDir,
       projectsHostDir: tmpDir,
       dataDir: tmpDir,
+      docker: createFakeDocker().runner,
     });
     // With logging disabled Fastify installs an abstract no-op logger, which
     // has no level and silently discards every error we record. A real Pino

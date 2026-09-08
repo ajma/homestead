@@ -31,11 +31,14 @@ export type AppDeps = {
   projectsHostDir: string;
   dataDir: string;
   /**
-   * The only way this app reaches `docker`. Defaults to the real one; tests
-   * pass a fake so no test outside `*.integration.test.ts` can spawn a child
-   * process, let alone reconcile a compose project on the host.
+   * The only way this app reaches `docker`.
+   *
+   * Required, not optional. It was optional with a real default, and a test
+   * that simply forgot it brought a cloudflared container up on a developer's
+   * machine from a compose file in /tmp. An omission should not silently mean
+   * "use the real daemon" — the compiler asks every call site to decide.
    */
-  docker?: DockerRunner;
+  docker: DockerRunner;
   /**
    * Tailscale client factory. Injected so tests never reach the network.
    */
@@ -90,6 +93,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     secretKey: deps.secretKey,
     cloudflare: deps.cloudflare,
     projectsDir: deps.projectsDir,
+    projectsHostDir: deps.projectsHostDir,
+    dataDir: deps.dataDir,
     docker: deps.docker,
   });
   // One registry for both plugins: its per-slug lock is only a lock if delete

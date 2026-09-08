@@ -9,6 +9,7 @@ import {
   type CloudflareClient,
   createCloudflareClient,
 } from "../cloudflare/client.js";
+import { detectRuntime } from "../cloudflare/runtime.js";
 import { runSetup } from "../cloudflare/setup.js";
 import { reconcileExposures } from "../cloudflare/sync.js";
 import { syncAllowPolicy } from "../cloudflare/sync-users.js";
@@ -16,6 +17,7 @@ import { deleteDnsRecord } from "../cloudflare/tunnel.js";
 import { decrypt, encrypt } from "../crypto/secrets.js";
 import type { Db } from "../db/client.js";
 import { exposures, settings } from "../db/schema.js";
+import { argsFor } from "../docker/compose.js";
 import { listContainers } from "../docker/engine.js";
 import { type DockerRunner, dockerRunner } from "../docker/run.js";
 import { writeProjectFiles } from "../projects/store.js";
@@ -26,6 +28,8 @@ type Opts = {
   cloudflare?: (opts: { token: string }) => CloudflareClient;
   /** Where the cloudflared stack is written, as an ordinary project. */
   projectsDir: string;
+  projectsHostDir: string;
+  dataDir: string;
   /** The only route to `docker`; a fake in tests. */
   docker?: DockerRunner;
 };
@@ -61,8 +65,12 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       const idpId = settingsMap.get("cloudflare.idpId") ?? null;
       const syncState = settingsMap.get("cloudflare.syncState") ?? "synced";
 
-      // For now, return a static runtime - real detection would require docker access
-      const runtime = { kind: "none" as const };
+      // Real detection. This was hardcoded to none, so the screen reported
+      // nothing running while a healthy connector was attached — and, worse,
+      // reported "Setup complete" over a tunnel with no connector at all.
+      const runtime = await detectRuntime({
+        listContainers: () => listContainers((opts.docker ?? dockerRunner).run),
+      });
 
       const configured = accountId !== null && tunnelId !== null;
 
@@ -274,6 +282,19 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
             listContainers((opts.docker ?? dockerRunner).run),
           writeProject: (slug, files) =>
             writeProjectFiles(opts.projectsDir, slug, files),
+          startProject: async (slug) => {
+            const args = await argsFor(
+              {
+                projectsDir: opts.projectsDir,
+                projectsHostDir: opts.projectsHostDir,
+                dataDir: opts.dataDir,
+                slug,
+              },
+              null,
+              ["up", "-d"],
+            );
+            await (opts.docker ?? dockerRunner).run(args);
+          },
         },
       });
 

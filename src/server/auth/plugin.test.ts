@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { user } from "../db/schema.js";
+import { createFakeDocker } from "../docker/fake.js";
 import { tempDir } from "../test-support/tmp.js";
 import { requirePermission } from "./guard.js";
 import { type Auth, createAuth } from "./index.js";
@@ -29,6 +30,7 @@ beforeEach(async () => {
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
+    docker: createFakeDocker().runner,
   });
 });
 

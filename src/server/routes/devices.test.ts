@@ -15,6 +15,7 @@ import {
   settings,
   user,
 } from "../db/schema.js";
+import { createFakeDocker } from "../docker/fake.js";
 import type { TailscaleClient } from "../tailscale/client.js";
 
 const TEST_AUTH = {
@@ -59,6 +60,7 @@ beforeEach(async () => {
     projectsHostDir: root,
     dataDir: root,
     tailscale: mockTailscale,
+    docker: createFakeDocker().runner,
   });
 
   const a = await auth.api.signUpEmail({
@@ -1182,6 +1184,7 @@ describe("POST /api/settings/tailscale", () => {
       projectsHostDir: root,
       dataDir: root,
       tailscale: () => mockClient,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({
@@ -1231,6 +1234,7 @@ describe("POST /api/settings/tailscale", () => {
       projectsHostDir: root,
       dataDir: root,
       tailscale: () => mockClient,
+      docker: createFakeDocker().runner,
     });
 
     const res = await app.inject({

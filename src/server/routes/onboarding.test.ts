@@ -4,6 +4,7 @@ import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
 import { settings, user } from "../db/schema.js";
+import { createFakeDocker } from "../docker/fake.js";
 import { tempDir } from "../test-support/tmp.js";
 
 let db: Db;
@@ -32,6 +33,7 @@ beforeEach(async () => {
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
+    docker: createFakeDocker().runner,
   });
 });
 

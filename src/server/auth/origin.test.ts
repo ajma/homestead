@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
+import { createFakeDocker } from "../docker/fake.js";
 import { tempDir } from "../test-support/tmp.js";
 import { type Auth, createAuth } from "./index.js";
 
@@ -33,6 +34,7 @@ async function bootAt(baseURL: string): Promise<void> {
     projectsDir: tmpDir,
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
+    docker: createFakeDocker().runner,
   });
   await auth.api.signUpEmail({ body: { ...CREDENTIALS, name: "Admin" } });
 }

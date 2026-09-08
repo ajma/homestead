@@ -13,6 +13,7 @@ import { createDb, runMigrations } from "./db/client.js";
 import { exposures, settings } from "./db/schema.js";
 import { composeConfig } from "./docker/compose.js";
 import { dockerChecks } from "./docker/preflight.js";
+import { dockerRunner } from "./docker/run.js";
 import { createRunner } from "./monitoring/runner.js";
 import { dataDirChecks, portCheck, runChecks } from "./preflight.js";
 import { scanProjects } from "./projects/store.js";
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
     dataDir: config.dataDir,
     webDir,
     preflight: results,
+    docker: dockerRunner,
   });
 
   // Build the user sync function for the runner
