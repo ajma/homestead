@@ -89,6 +89,9 @@ describe("CloudflareSetup", () => {
 
     await screen.findByPlaceholderText(/api token/i);
 
+    // This exact set was verified against a live account-owned token: with
+    // these five and nothing else, /accounts, /zones, cfd_tunnel, access apps,
+    // policies, service tokens and identity providers all answered.
     for (const permission of [
       /Cloudflare Tunnel · Edit/,
       /Access: Apps and Policies · Edit/,
@@ -106,6 +109,15 @@ describe("CloudflareSetup", () => {
     // account-owned token Homestead requires. Listing it sent someone hunting
     // for a permission that could not fix their problem.
     expect(screen.queryByText(/Memberships/)).toBeNull();
+
+    // Verified empirically: a five-permission account token listed its account
+    // without it. Asking for a permission that changes nothing is how the last
+    // two rounds of this went.
+    expect(screen.queryByText(/Account Settings/)).toBeNull();
+
+    // "Argo Tunnel" only exists in the user-token builder, so seeing it means
+    // you are in the wrong place — which is a useful thing to be told.
+    expect(screen.getByText(/Argo Tunnel/)).toBeVisible();
 
     // The distinction is the whole point: naming only the permissions, without
     // saying which kind of token carries them, is what caused the wrong one to

@@ -170,6 +170,11 @@ function TokenStep({
             <li>Zone · DNS · Edit</li>
           </ul>
           <p className="mt-1">
+            If the list offers <strong>Argo Tunnel</strong> rather than
+            Cloudflare Tunnel, you are in the user-token builder under My
+            Profile. Account tokens are created under Manage Account.
+          </p>
+          <p className="mt-1">
             Scope Zone Resources to the zones you will expose. Creating the
             token needs the Super Administrator role, and its value begins with{" "}
             <code>cfat_</code>.
