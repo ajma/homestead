@@ -95,9 +95,17 @@ export function Dialog({
         aria-describedby={describedBy}
         ref={panel}
         tabIndex={-1}
-        className="w-full max-w-md rounded-lg border border-border bg-raised p-4 shadow-lg"
+        // Height-bounded and scrollable. Without this a form taller than the
+        // viewport simply extended past it — and because the overlay is
+        // `items-end` on a phone, it grew off the *top*, where nothing could
+        // scroll it back. dvh rather than vh so mobile browser chrome is
+        // accounted for; the 2rem matches the overlay's p-4.
+        className="flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col overflow-y-auto rounded-lg border border-border bg-raised p-4 shadow-lg"
       >
-        <h2 id={titleId} className="mb-3 font-semibold text-lg text-text">
+        <h2
+          id={titleId}
+          className="mb-3 shrink-0 font-semibold text-lg text-text"
+        >
           {title}
         </h2>
         {children}

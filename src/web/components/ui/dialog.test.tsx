@@ -27,6 +27,20 @@ function Harness({ onClose = () => {} }: { onClose?: () => void }) {
 }
 
 describe("Dialog", () => {
+  it("bounds its height and scrolls the overflow", () => {
+    // The panel had neither. On a phone the overlay is `items-end`, so a form
+    // taller than the viewport grew off the *top* of the screen with no way to
+    // reach it — the exposure form did exactly that once its help text landed.
+    //
+    // jsdom has no layout, so this asserts the rules rather than the geometry.
+    // A class check is a weak proxy for "you can see the whole form", and is
+    // here because the alternative was no guard at all.
+    render(<Harness />);
+    const panel = screen.getByRole("dialog");
+    expect(panel.className).toMatch(/max-h-/);
+    expect(panel.className).toMatch(/overflow-y-auto/);
+  });
+
   it("moves focus into the dialog when it opens", async () => {
     render(<Harness />);
     expect(screen.getByRole("dialog")).toContainElement(
