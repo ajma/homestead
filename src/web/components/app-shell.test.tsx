@@ -186,6 +186,9 @@ describe("AppShell account menu", () => {
   beforeEach(() => {
     signOut.mockReset();
     localStorage.clear();
+    fetched.length = 0;
+    // Rendering the shell runs its preflight query, whatever the test is about.
+    stubFetch();
   });
 
   it("moves focus into the menu when it opens and back on Escape", async () => {

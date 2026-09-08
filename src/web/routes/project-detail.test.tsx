@@ -1,6 +1,13 @@
 import type { ContainerState, Operation } from "@shared/projects.js";
 import { focusManager, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   createMemoryRouter,
@@ -18,9 +25,13 @@ import {
 import { projectDetailRoute } from "./ProjectDetail.js";
 
 afterEach(() => {
-  vi.unstubAllGlobals();
-  // focusManager is module-level state; a test that forces focus must undo it.
+  // Unmount first. focusManager is module-level state, and handing focus back
+  // is a false→true transition that refetches every mounted query — after the
+  // stub is gone, so it would go to the real network.
+  cleanup();
+  // A test that forces focus must undo it.
   focusManager.setFocused(undefined);
+  vi.unstubAllGlobals();
 });
 
 /** Alt-tab away and back, which is what makes react-query refetch. */

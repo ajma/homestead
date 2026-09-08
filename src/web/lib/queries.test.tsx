@@ -4,7 +4,7 @@ import {
   QueryClientProvider,
   useQuery,
 } from "@tanstack/react-query";
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, apiFetch } from "./api.js";
@@ -27,10 +27,14 @@ import {
 } from "./queries.js";
 
 afterEach(() => {
+  // Unmount first. focusManager is module-level state, and handing focus back
+  // is a false→true transition that refetches every mounted query — after the
+  // stub is gone, so it would go to the real network.
+  cleanup();
+  // Undo any focus the test forced.
+  focusManager.setFocused(undefined);
   vi.unstubAllGlobals();
   vi.useRealTimers();
-  // Undo any focus the test forced; focusManager is module-level state.
-  focusManager.setFocused(undefined);
 });
 
 /**
