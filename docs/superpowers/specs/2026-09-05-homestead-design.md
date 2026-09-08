@@ -39,7 +39,7 @@ delivery, backup/restore, and compose version history beyond snapshots. See §16
 | **Compose project name** | What Docker calls the stack. Read from `docker compose config`, never computed. |
 | **Endpoint** | A published host port of a project. |
 | **Exposure** | A binding of a host port to a public hostname on the tunnel. |
-| **App** | A dashboard tile. Derived from a service, a discovered container, or a manual entry. |
+| **App** | A dashboard tile. Derived from a service in a managed project, or a manual entry. |
 | **Probe** | A configured health check. An app may have a local one and a public one. |
 | **Operation** | A tracked, streamed invocation of `docker compose` (`up`/`down`/`pull`/…). |
 
@@ -403,10 +403,15 @@ record.
    **One tile per service**, not per port: a service publishing several ports
    uses `homestead.app.port` if present, otherwise the lowest published port,
    and the remainder are listed on the project detail view.
-2. **Discovered containers** — any running container carrying `homestead.*`
-   labels, including outside `$HOMESTEAD_PROJECTS`. Deduped against (1) by
-   container id; the managed record wins, since it also has lifecycle controls.
-3. **Manual apps** — SQLite rows with a name, URL, and icon. No container.
+2. **Manual apps** — SQLite rows with a name, URL, and icon. No container. For
+   the things Homestead does not run: a router admin page, a printer, a NAS UI.
+
+**These two are the whole list.** A third source — discovered containers, any
+running container carrying `homestead.*` labels from outside
+`$HOMESTEAD_PROJECTS` — was specified here and is **not built**. It is parked in
+`docs/backlog.md` together with a stronger alternative (adopting such a
+container's compose project outright, so it gains lifecycle controls instead of
+becoming a second-class read-only tile). Neither is scheduled.
 
 ### 9.2 Links
 
@@ -685,30 +690,72 @@ audit_log(id, actor_user_id, action, target, detail, at)
 Fastify, all under `/api`, session-authenticated. Role enforcement is a
 per-route precondition, not a UI concern.
 
+Better-Auth is mounted at `/api/auth/*`, with `sign-up` blocked over HTTP
+(403): accounts are admin-managed, not self-registered.
+
+**Built:**
+
 ```
-POST   /api/onboarding/*                  guarded by count(users)==0 where relevant
+GET    /api/health, /api/status           status is pre-auth; the login screen reads it
+POST   /api/onboarding/admin              guarded by count(users)==0
+GET    /api/preflight                     startup check results        [admin]
+
 GET    /api/projects                      list (scan + cache)
 POST   /api/projects                      create (blank | template | import)
 GET    /api/projects/:slug                manifest, services, ports, status
-GET    /api/projects/:slug/file/:name     compose | env            [admin]
-PUT    /api/projects/:slug/file/:name     snapshot + atomic write  [admin]
-POST   /api/projects/:slug/validate       docker compose config    [admin]
-POST   /api/projects/:slug/:op            up|down|restart|pull → operation id
-POST   /api/projects/:slug/rename         dry-run + migrate        [admin]
-DELETE /api/projects/:slug                                          [admin]
+DELETE /api/projects/:slug                                             [admin]
+GET    /api/projects/:slug/file/:name     compose | env                [admin]
+PUT    /api/projects/:slug/file/:name     snapshot + atomic write      [admin]
+POST   /api/projects/:slug/validate       docker compose config        [admin]
+POST   /api/projects/:slug/:verb          up|down|restart|pull → operation id
+GET    /api/projects/:slug/logs           SSE, per service             [admin]
+GET    /api/projects/:slug/operations
+GET    /api/operations/:id
 GET    /api/operations/:id/stream         SSE
-GET    /api/projects/:slug/logs           SSE, per service        [admin]
-GET    /api/projects/:slug/stats          SSE, CPU/memory/uptime  [admin]
-GET    /api/apps                          role-filtered tiles + status
-GET    /api/apps/stream                   SSE status updates
-CRUD   /api/manual-apps                                             [admin]
-GET    /api/tunnel                        runtime + connection status
-CRUD   /api/exposures                                               [admin]
-GET    /api/cloudflare/zones                                        [admin]
-CRUD   /api/probes, /api/access-tokens                              [admin]
-POST   /api/heartbeat/:token              unauthenticated by design
-CRUD   /api/users                                                   [admin]
+
+GET    /api/dashboard                     role-filtered tiles + status
+POST   /api/apps                          manual app                   [admin]
+PATCH  /api/apps/:id                                                   [admin]
+DELETE /api/apps/:id                                                   [admin]
+GET    /api/apps/:key/icon                cached to $HOMESTEAD_DATA/icons
+
+GET    /api/devices                                                    [admin]
+POST   /api/devices                                                    [admin]
+GET    /api/devices/:id                                                [admin]
+PATCH  /api/devices/:id                                                [admin]
+DELETE /api/devices/:id                                                [admin]
+POST   /api/devices/:id/monitors                                       [admin]
+PATCH  /api/monitors/:id                                               [admin]
+DELETE /api/monitors/:id                                               [admin]
+POST   /api/monitors/:id/push/:token      heartbeat; unauthenticated by design
+POST   /api/settings/tailscale                                         [admin]
+
+GET    /api/exposures                                                  [admin]
+POST   /api/exposures                                                  [admin]
+PATCH  /api/exposures/:id                                              [admin]
+DELETE /api/exposures/:id                                              [admin]
+POST   /api/exposures/reconcile                                        [admin]
+GET    /api/cloudflare/status                                          [admin]
+POST   /api/cloudflare/account, /setup, /token, /sync-users            [admin]
 ```
+
+**Specified here and not built.** Listed so the gap is visible rather than
+discovered; see `docs/backlog.md` for which of these matter.
+
+```
+POST   /api/projects/:slug/rename         dry-run + migrate            [admin]
+GET    /api/projects/:slug/stats          SSE, CPU/memory/uptime       [admin]
+GET    /api/apps/stream                   SSE status updates
+GET    /api/tunnel                        runtime + connection status
+GET    /api/cloudflare/zones                                           [admin]
+CRUD   /api/access-tokens                                              [admin]
+CRUD   /api/users                                                      [admin]
+```
+
+Earlier drafts of this table named `/api/manual-apps`, `/api/probes`,
+`/api/heartbeat/:token` and `GET /api/apps`. Those shipped under different
+names — `/api/apps`, `/api/monitors/*`, `/api/monitors/:id/push/:token` and
+`/api/dashboard` respectively — and the table above uses the built ones.
 
 ---
 
@@ -739,8 +786,8 @@ documented API shapes. The suite needs no live account.
 **In v1:** projects (create, edit, import, adopt, rename, delete); compose and
 `.env` editing with snapshots; up/down/restart; streaming logs; health and
 resource stats; image update check, pull, and recreate; tunnel exposures across
-all zones in the account; dashboard with inferred tiles, discovered containers,
-and manual apps; two-tier probes with Access service tokens and heartbeats;
+all zones in the account; dashboard with inferred tiles and manual apps;
+two-tier probes with Access service tokens and heartbeats;
 onboarding; admin/viewer roles with per-viewer grants; container and native
 packaging.
 

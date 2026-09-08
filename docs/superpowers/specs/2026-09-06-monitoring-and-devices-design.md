@@ -333,9 +333,9 @@ police.
 ## 9. Handoff to the Dashboard plan
 
 - `targetType` / `targetId` already accept `'app'`; no migration needed.
-- Apps come from three sources (product design §9.1): managed projects, discovered
-  containers carrying `homestead.*` labels, and manual SQLite rows. All three become
-  targets.
+- Apps come from two sources (product design §9.1): managed projects and manual
+  SQLite rows. Both become targets. A third source, discovered containers, was
+  specified when this was written and is not built — see `docs/backlog.md`.
 - The published host port is the join key for project-backed apps; manual apps are
   probed by URL, and their public probe *is* the health signal.
 - App monitors must be reconciled against `docker compose config` whenever a project
