@@ -17,6 +17,71 @@ describe("createCloudflareClient", () => {
     );
   });
 
+  it("falls back to memberships when /accounts comes back empty", async () => {
+    // Verified against a real token: /accounts answers 200 with an empty array
+    // and total_count 0, while /memberships returns the account perfectly well.
+    // Trusting /accounts alone strands setup on an empty dropdown for a token
+    // that can do everything else.
+    const calls: string[] = [];
+    const f = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/memberships")) {
+        return ok([
+          { id: "mem-1", account: { id: "acc-real", name: "Real Account" } },
+        ]);
+      }
+      return ok([]);
+    });
+
+    const accounts = await createCloudflareClient({
+      token: "t",
+      fetch: f,
+    }).listAccounts();
+
+    expect(accounts).toEqual([{ id: "acc-real", name: "Real Account" }]);
+    expect(calls.some((u) => u.endsWith("/accounts"))).toBe(true);
+  });
+
+  it("does not call memberships when /accounts already answered", async () => {
+    // The fallback is for a gap in /accounts, not a second request every time.
+    const calls: string[] = [];
+    const f = vi.fn<typeof fetch>(async (input) => {
+      calls.push(String(input));
+      return ok([{ id: "acc-1", name: "From Accounts" }]);
+    });
+
+    const accounts = await createCloudflareClient({
+      token: "t",
+      fetch: f,
+    }).listAccounts();
+
+    expect(accounts).toEqual([{ id: "acc-1", name: "From Accounts" }]);
+    expect(calls.some((u) => u.includes("/memberships"))).toBe(false);
+  });
+
+  it("returns empty when neither source knows of an account", async () => {
+    const f = vi.fn<typeof fetch>(async () => ok([]));
+    const accounts = await createCloudflareClient({
+      token: "t",
+      fetch: f,
+    }).listAccounts();
+    expect(accounts).toEqual([]);
+  });
+
+  it("survives a membership row with no account object", async () => {
+    const f = vi.fn<typeof fetch>(async (input) =>
+      String(input).includes("/memberships")
+        ? ok([{ id: "mem-1" }, { id: "m2", account: { id: "a", name: "A" } }])
+        : ok([]),
+    );
+    const accounts = await createCloudflareClient({
+      token: "t",
+      fetch: f,
+    }).listAccounts();
+    expect(accounts).toEqual([{ id: "a", name: "A" }]);
+  });
+
   it("lists zones from the top-level collection, filtered by account", async () => {
     // Zones are not nested under an account. Cloudflare answers
     // /accounts/{id}/zones with 400 "No route for that URI", so the whole

@@ -119,8 +119,22 @@ export function createCloudflareClient(opts: {
       type Account = { id: string; name: string };
       const accounts = await request<Account[]>("GET", "/accounts");
       // Defend against null result - return empty array rather than letting null.map() explode downstream
-      if (!accounts) return [];
-      return accounts.map((a) => ({ id: a.id, name: a.name }));
+      if (accounts && accounts.length > 0) {
+        return accounts.map((a) => ({ id: a.id, name: a.name }));
+      }
+
+      // Verified against a live token: /accounts can answer 200 with an empty
+      // array for a token that reaches everything else — zones, tunnels,
+      // Access — while /memberships lists the account correctly. Cloudflare
+      // documents Memberships:Read as what /accounts needs, but granting it is
+      // not sufficient. Ask the endpoint that actually answers.
+      type Membership = { account?: { id: string; name: string } };
+      const memberships = await request<Membership[]>("GET", "/memberships");
+      if (!memberships) return [];
+      return memberships
+        .map((m) => m.account)
+        .filter((a): a is { id: string; name: string } => Boolean(a?.id))
+        .map((a) => ({ id: a.id, name: a.name }));
     },
 
     async listZones(accountId: string) {
