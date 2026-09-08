@@ -10,6 +10,29 @@ const signOut = vi.fn();
 /** Records the order of the two teardown steps sign-out performs. */
 const teardown: string[] = [];
 
+/**
+ * Every URL apiFetch has been asked for. AppShell owns a preflight query, so
+ * rendering it reaches for the network; without this stub these tests would
+ * make a real request.
+ */
+const fetched: string[] = [];
+
+function stubFetch(): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown) => {
+      fetched.push(String(input));
+      return new Response(JSON.stringify({ checks: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }),
+  );
+}
+
+const preflightCalls = (): number =>
+  fetched.filter((u) => u.includes("/api/preflight")).length;
+
 vi.mock("react-router-dom", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router-dom")>();
   return {
@@ -64,6 +87,29 @@ describe("AppShell sign-out", () => {
     signOut.mockReset();
     localStorage.clear();
     teardown.length = 0;
+    fetched.length = 0;
+    stubFetch();
+  });
+
+  it("asks for nothing more once sign-out begins", async () => {
+    // The failure this prevents is an aborted navigation, not a wrong render.
+    // clear() makes every mounted observer refetch, and AppShell is still
+    // mounted then — navigate() is a state update React has not flushed. That
+    // refetch carries the revoked cookie, 401s, and apiFetch turns a 401 into
+    // window.location.assign("/login"), killing whatever navigation is in
+    // flight. It surfaced as a ~1-in-3 e2e failure two tests later.
+    signOut.mockResolvedValue({ data: {}, error: null });
+    const client = new QueryClient();
+    renderShell(client);
+
+    await screen.findByText("Dashboard page");
+    const asked = preflightCalls();
+    expect(asked, "should have asked while signed in").toBeGreaterThan(0);
+
+    await openAccountMenu();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+
+    expect(preflightCalls()).toBe(asked);
   });
 
   it("navigates away before clearing the cache", async () => {

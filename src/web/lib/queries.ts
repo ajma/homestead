@@ -338,9 +338,20 @@ export function useDashboard() {
   });
 }
 
-export function usePreflight() {
+/**
+ * `enabled` exists for sign-out. `queryClient.clear()` makes every *mounted*
+ * observer refetch immediately, and AppShell — which owns this query — is
+ * still mounted at that moment, because navigating is a state update React
+ * has not flushed yet. That refetch carries the cookie the server has just
+ * revoked, so it 401s, and apiFetch answers a 401 with
+ * `window.location.assign("/login")`, aborting whatever navigation is already
+ * in flight. Ordering navigate before clear does not prevent it; not asking
+ * does.
+ */
+export function usePreflight(enabled = true) {
   return useQuery({
     queryKey: queryKeys.preflight,
+    enabled,
     queryFn: async () => {
       const body = await apiFetch<{ checks: PreflightResult[] }>(
         "/api/preflight",

@@ -94,7 +94,8 @@ export function AppShell() {
   const menuId = useId();
   const emailId = useId();
   const [signOutError, setSignOutError] = useState<string | null>(null);
-  const preflight = usePreflight();
+  const [signingOut, setSigningOut] = useState(false);
+  const preflight = usePreflight(!signingOut);
 
   // A closed menu takes its error with it, however it was closed: a retry must
   // not open onto the previous attempt's message.
@@ -104,11 +105,17 @@ export function AppShell() {
 
   async function handleSignOut() {
     setSignOutError(null);
+    // Stop this shell's own query before the session goes away. The round-trip
+    // below gives React time to re-render with the observer disabled, so the
+    // clear() at the end cannot provoke a refetch from it. Ordering alone is
+    // not enough — see the note there.
+    setSigningOut(true);
     // Better-Auth resolves with { error } rather than throwing. Navigating on a
     // failed sign-out would tell the user they are signed out while the server
     // session is still live — and Back would walk straight into the app.
     const { error } = await signOut();
     if (error) {
+      setSigningOut(false);
       setSignOutError(
         error.message ?? "Could not sign out. Check your connection.",
       );
@@ -122,6 +129,11 @@ export function AppShell() {
     // leaves its observer to re-fetch with the cookie the server has just
     // revoked, and apiFetch answers that 401 with window.location.assign —
     // a full page reload in place of the SPA transition.
+    //
+    // Navigating first is necessary but NOT sufficient: navigate() is a state
+    // update, so nothing has unmounted by the time clear() runs on the next
+    // line. Any query this component owns must be disabled outright, which is
+    // what signingOut does above.
     queryClient.clear();
   }
 
