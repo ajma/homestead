@@ -85,7 +85,8 @@ Each module has one responsibility, a narrow interface, and is testable alone.
 | State | Home | Rationale |
 |---|---|---|
 | Compose YAML, `.env` | Disk | Source of truth. Portable, git-able, editable over SSH. |
-| Project display name, description, icon, source | `x-homestead:` in the compose file | Travels with the project. |
+| Project provenance (`source`) | `x-homestead:` in the compose file | Travels with the project. |
+| Project display name, description, icon | **SQLite** | **Amended.** Originally `x-homestead:`, for the same travels-with-the-project reason. Writing that block is what flips `hasHomestead`, the provenance marker the delete dialog reads to decide whether to confirm twice for an adopted project — so setting an icon would have quietly made a project easier to delete. Identity describes presentation, which is instance-level. The cost, accepted: it does not survive moving the directory to another machine. See `2026-09-08-project-identity-design.md` §2. |
 | Per-app name, icon, port, path | `homestead.*` service labels | Readable from the Engine API at runtime; enables discovery. |
 | Users, sessions, roles, app grants | SQLite | References users; no natural file form. |
 | Cloudflare credentials, tunnel id/token, Access service tokens | SQLite, encrypted | Secrets must not sit in a copyable project directory. |
@@ -137,12 +138,17 @@ There is no sidecar metadata file. Project-level metadata uses a top-level
 extension field; app-level metadata uses service labels. Compose has no
 project-level `labels` key — it is rejected by the schema (§17.2).
 
+**`displayName`, `description` and `icon` are no longer stored here** — see the
+amended row in §4. They live in SQLite, because writing this block is what
+flips the provenance marker the delete dialog reads. The block below shows them
+for historical reference; only `schemaVersion`, `source` and `system` are read.
+
 ```yaml
 x-homestead:
   schemaVersion: 1
-  displayName: Media Stack
-  description: Jellyfin and friends
-  icon: jellyfin
+  displayName: Media Stack      # no longer read — see §4
+  description: Jellyfin and friends   # no longer read — see §4
+  icon: jellyfin                # no longer read — see §4
   source: { kind: template, id: jellyfin }
   system: false            # true hides it from the grid and blocks deletion
 

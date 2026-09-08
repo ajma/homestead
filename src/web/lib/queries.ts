@@ -39,6 +39,15 @@ export const queryKeys = {
   dashboard: ["dashboard"] as const,
   preflight: ["preflight"] as const,
   zones: ["cloudflare", "zones"] as const,
+  icons: (q: string) => ["icons", q] as const,
+};
+
+/** How a project is presented: set by an admin, shown wherever it appears. */
+export type ProjectIdentity = {
+  displayName: string | null;
+  description: string | null;
+  iconSlug: string | null;
+  iconUrl: string | null;
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -144,6 +153,7 @@ export function useProjects() {
  * so nothing here may be reached through a non-null assertion.
  */
 export type ProjectDetailData = ScanEntry & {
+  identity: ProjectIdentity | null;
   model: ProjectModel | null;
   parseError: string | null;
   states: ContainerState[];
@@ -354,6 +364,39 @@ export function useDashboard() {
  * session, and the picker is the only consumer, so it is fetched on demand
  * rather than polled.
  */
+/**
+ * Icon slugs matching a query. Disabled while the box is empty — the endpoint
+ * answers "" with nothing, and asking anyway is a request per focus.
+ */
+export function useIconSearch(query: string) {
+  return useQuery({
+    queryKey: queryKeys.icons(query),
+    enabled: query.trim() !== "",
+    queryFn: async () => {
+      const body = await apiFetch<{ icons: string[] }>(
+        `/api/icons?q=${encodeURIComponent(query)}`,
+      );
+      return body?.icons ?? [];
+    },
+  });
+}
+
+export function useSaveIdentity(slug: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: Partial<ProjectIdentity>) => {
+      await apiFetch(`/api/projects/${encodeURIComponent(slug)}/identity`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+    },
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: queryKeys.project(slug) });
+      client.invalidateQueries({ queryKey: queryKeys.projects });
+    },
+  });
+}
+
 export function useZones() {
   return useQuery({
     queryKey: queryKeys.zones,

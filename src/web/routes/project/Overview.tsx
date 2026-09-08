@@ -287,6 +287,7 @@ export function Overview({
   exposures,
   onExpose,
   onEditExposure,
+  onEditIdentity,
 }: {
   slug: string;
   detail: ProjectDetailData;
@@ -294,12 +295,43 @@ export function Overview({
   exposures: ExposureSummary[];
   onExpose: (port: PortOption) => void;
   onEditExposure: (exposure: ExposureSummary) => void;
+  onEditIdentity: () => void;
 }) {
   return (
     <div className="flex flex-col gap-4">
       {/* The parse error itself is rendered by ProjectDetail, above the tabs:
           this aside is hidden below `lg` on the Edit tab, which is exactly
           where someone goes to fix the file. */}
+      <Section title="Project">
+        <div className="flex items-start gap-3">
+          {detail.identity?.iconSlug || detail.identity?.iconUrl ? (
+            <img
+              src={
+                detail.identity.iconSlug
+                  ? `/api/icons/${detail.identity.iconSlug}`
+                  : (detail.identity.iconUrl ?? "")
+              }
+              alt=""
+              className="h-10 w-10 shrink-0 rounded"
+            />
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-text">
+              {detail.identity?.displayName || slug}
+            </p>
+            {detail.identity?.description ? (
+              <p className="mt-0.5 text-muted text-sm">
+                {detail.identity.description}
+              </p>
+            ) : (
+              <p className="mt-0.5 text-muted text-sm">No description yet.</p>
+            )}
+          </div>
+          <Button variant="ghost" onClick={onEditIdentity}>
+            Edit
+          </Button>
+        </div>
+      </Section>
       <Services
         detail={detail}
         // Narrowed here so the port match below needs only the port number.

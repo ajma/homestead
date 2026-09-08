@@ -39,6 +39,7 @@ const port = (hostPort: number, loopbackOnly = false) => ({
 const detail = (): ProjectDetailData =>
   ({
     slug: "metube",
+    identity: null,
     name: "metube",
     hasCompose: true,
     hasEnv: false,
@@ -92,6 +93,7 @@ function renderOverview(
           exposures={exposures}
           onExpose={onExpose}
           onEditExposure={onEditExposure}
+          onEditIdentity={() => {}}
         />
       </MemoryRouter>
     </QueryClientProvider>,

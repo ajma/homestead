@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
-import { user } from "../db/schema.js";
+import { projectIdentity, user } from "../db/schema.js";
 import {
   composeVerbOf,
   createFakeDocker,
@@ -753,5 +753,114 @@ describe("GET /api/projects/:slug — provenance", () => {
       headers: { cookie: adminCookie },
     });
     expect(res.json()).toMatchObject({ hasHomestead: false });
+  });
+});
+
+describe("project identity", () => {
+  it("stores a display name, description and icon", async () => {
+    const put = await app.inject({
+      method: "PUT",
+      url: `/api/projects/${slug}/identity`,
+      headers: { cookie: adminCookie },
+      payload: {
+        displayName: "Media Stack",
+        description: "Jellyfin and friends",
+        iconSlug: "jellyfin",
+      },
+    });
+    expect(put.statusCode).toBe(200);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/projects/${slug}`,
+      headers: { cookie: adminCookie },
+    });
+    expect(res.json().identity).toMatchObject({
+      displayName: "Media Stack",
+      description: "Jellyfin and friends",
+      iconSlug: "jellyfin",
+    });
+  });
+
+  it("leaves the compose file untouched and the project still adopted", async () => {
+    // The whole reason identity is in SQLite. Writing x-homestead would flip
+    // hasHomestead, which the delete dialog reads to decide whether to confirm
+    // twice — so naming a project would quietly make it easier to delete.
+    const file = join(root, slug, "docker-compose.yml");
+    const before = await readFile(file, "utf8");
+
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${slug}/identity`,
+      headers: { cookie: adminCookie },
+      payload: { displayName: "Renamed", iconSlug: "jellyfin" },
+    });
+
+    expect(await readFile(file, "utf8")).toBe(before);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/projects/${slug}`,
+      headers: { cookie: adminCookie },
+    });
+    expect(res.json().hasHomestead).toBe(false);
+  });
+
+  it("reports no identity for a project that has none", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/projects/${slug}`,
+      headers: { cookie: adminCookie },
+    });
+    expect(res.json().identity).toBeNull();
+  });
+
+  it("lists identity alongside each project", async () => {
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${slug}/identity`,
+      headers: { cookie: adminCookie },
+      payload: { displayName: "Media Stack" },
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/projects",
+      headers: { cookie: adminCookie },
+    });
+    const entry = res
+      .json()
+      .projects.find((p: { slug: string }) => p.slug === slug);
+    expect(entry.identity).toMatchObject({ displayName: "Media Stack" });
+  });
+
+  it("forgets identity when the project is deleted", async () => {
+    // A directory recreated under the same slug must not inherit a stranger's
+    // description.
+    await app.inject({
+      method: "PUT",
+      url: `/api/projects/${slug}/identity`,
+      headers: { cookie: adminCookie },
+      payload: { displayName: "Gone Soon" },
+    });
+    await app.inject({
+      method: "DELETE",
+      url: `/api/projects/${slug}`,
+      headers: { cookie: adminCookie },
+    });
+
+    const [row] = await db
+      .select()
+      .from(projectIdentity)
+      .where(eq(projectIdentity.slug, slug));
+    expect(row).toBeUndefined();
+  });
+
+  it("is refused for a viewer", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/projects/${slug}/identity`,
+      headers: { cookie: viewerCookie },
+      payload: { displayName: "Nope" },
+    });
+    expect(res.statusCode).toBe(403);
   });
 });

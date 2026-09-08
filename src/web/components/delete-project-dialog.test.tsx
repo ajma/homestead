@@ -39,6 +39,7 @@ function mockFetch(status = 200, body: unknown = { ok: true }) {
 function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
   return {
     slug: "media",
+    identity: null,
     hasCompose: true,
     hasEnv: false,
     composeFile: "compose.yaml",

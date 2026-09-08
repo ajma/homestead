@@ -15,6 +15,7 @@ import {
   type PortOption,
 } from "../components/ExposureDialog.js";
 import { OperationPanel } from "../components/OperationPanel.js";
+import { ProjectIdentityDialog } from "../components/ProjectIdentityDialog.js";
 import {
   Button,
   Dialog,
@@ -126,6 +127,7 @@ export function ProjectDetail() {
   const [editingExposure, setEditingExposure] =
     useState<ExposureSummary | null>(null);
   const dialogOpen = exposing !== null || editingExposure !== null;
+  const [editingIdentity, setEditingIdentity] = useState(false);
 
   // Local, not global and not cache: this belongs to this project's page for
   // the lifetime of that page. OperationPanel takes it as props.
@@ -284,6 +286,14 @@ export function ProjectDetail() {
         {/* Mounted only while open, like the delete dialog above: the form
             resets from its props, and a stale instance would reopen on the
             previous port. */}
+        {editingIdentity && (
+          <ProjectIdentityDialog
+            open
+            onClose={() => setEditingIdentity(false)}
+            slug={slug}
+            identity={data.identity}
+          />
+        )}
         {dialogOpen && (
           <ExposureDialog
             open
@@ -416,6 +426,7 @@ export function ProjectDetail() {
                 exposures={exposures.data ?? []}
                 onExpose={setExposing}
                 onEditExposure={setEditingExposure}
+                onEditIdentity={() => setEditingIdentity(true)}
               />
             </div>
           </aside>

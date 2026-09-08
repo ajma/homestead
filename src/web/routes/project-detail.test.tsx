@@ -56,6 +56,7 @@ function container(over: Partial<ContainerState> = {}): ContainerState {
 function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
   return {
     slug: "jellyfin",
+    identity: null,
     hasCompose: true,
     hasEnv: true,
     composeFile: "compose.yaml",

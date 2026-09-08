@@ -1,7 +1,12 @@
+import { createReadStream } from "node:fs";
+import { join } from "node:path";
 import { isReservedSlug } from "@shared/projects.js";
 import { and, eq } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
+import { loadIconNames } from "../apps/icon-manifest.js";
+import { searchIcons } from "../apps/icon-search.js";
+import { resolveIcon } from "../apps/icons.js";
 import { syncAppMonitors } from "../apps/sync.js";
 import { requirePermission } from "../auth/guard.js";
 import type { Db } from "../db/client.js";
@@ -15,6 +20,12 @@ import {
 import { type DockerRunner, dockerRunner } from "../docker/run.js";
 import type { OperationRegistry } from "../ops/registry.js";
 import { hasHomesteadBlock } from "../projects/doc.js";
+import {
+  deleteIdentity,
+  readIdentities,
+  readIdentity,
+  writeIdentity,
+} from "../projects/identity.js";
 import { parseCanonical } from "../projects/model.js";
 import {
   createProject,
@@ -84,7 +95,17 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     { preHandler: requirePermission({ project: ["read"] }) },
     async () => {
       const entries = await scanProjects(opts.projectsDir);
-      return { projects: entries };
+      // One lookup for the whole page rather than one per row.
+      const identities = await readIdentities(
+        opts.db,
+        entries.map((e) => e.slug),
+      );
+      return {
+        projects: entries.map((e) => ({
+          ...e,
+          identity: identities.get(e.slug) ?? null,
+        })),
+      };
     },
   );
 
@@ -138,6 +159,7 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         states,
         statesError,
         // Absence of the x-homestead block IS the provenance marker (§3.7).
+        identity: await readIdentity(opts.db, slug),
         hasHomestead:
           composeText === null ? false : hasHomesteadBlock(composeText),
         snapshots: await listSnapshots(opts.projectsDir, slug),
@@ -198,6 +220,98 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     },
   );
 
+  app.get<{ Querystring: { q?: string } }>(
+    "/api/icons",
+    { preHandler: requirePermission({ project: ["update"] }) },
+    async (request) => {
+      // Cached to $HOMESTEAD_DATA/icons and never fatal: an empty list means
+      // the picker offers nothing, not that the form is broken.
+      const names = await loadIconNames({
+        cacheDir: join(opts.dataDir, "icons"),
+      });
+      return { icons: searchIcons(names, request.query.q ?? "") };
+    },
+  );
+
+  app.get<{ Params: { slug: string } }>(
+    "/api/icons/:slug",
+    { preHandler: requirePermission({ project: ["read"] }) },
+    async (request, reply) => {
+      // resolveIcon sanitises the slug to [a-z0-9-], builds the path inside
+      // the cache directory, and refuses SVG outright — it executes script
+      // when served same-origin. The path it returns is constrained by
+      // construction, which is why it can be sent directly.
+      const resolved = await resolveIcon({
+        slug: request.params.slug,
+        cacheDir: join(opts.dataDir, "icons"),
+      });
+      if (!resolved) {
+        return reply.status(404).send({ error: "not_found" });
+      }
+      const ext = resolved.path.split(".").pop() ?? "png";
+      const type =
+        ext === "webp"
+          ? "image/webp"
+          : ext.startsWith("jp")
+            ? "image/jpeg"
+            : "image/png";
+      return reply
+        .type(type)
+        .header("cache-control", "public, max-age=86400")
+        .send(createReadStream(resolved.path));
+    },
+  );
+
+  app.put<{ Params: { slug: string } }>(
+    "/api/projects/:slug/identity",
+    { preHandler: requirePermission({ project: ["update"] }) },
+    async (request, reply) => {
+      const { slug } = request.params;
+      if (!isValidSlug(slug)) {
+        return reply.status(400).send({
+          error: "invalid_slug",
+          detail: `Not a project slug: ${slug}`,
+        });
+      }
+
+      const body = z
+        .object({
+          // Nullable as well as optional: clearing a field is a real edit, and
+          // the form sends null for one it has emptied.
+          displayName: z.string().max(120).nullish(),
+          description: z.string().max(2000).nullish(),
+          iconSlug: z
+            .string()
+            .regex(/^[a-z0-9-]+$/, "lowercase letters, digits and dashes only")
+            .max(80)
+            .nullish(),
+          iconUrl: z.string().url().max(2000).nullish(),
+        })
+        .safeParse(request.body);
+
+      if (!body.success) {
+        return reply.status(400).send({
+          error: "invalid_body",
+          detail: body.error.issues
+            .map((i) => `${i.path.join(".") || "body"}: ${i.message}`)
+            .join("; "),
+        });
+      }
+
+      // Identity is stored against the slug, so the directory has to exist —
+      // otherwise a typo silently creates a row nothing will ever read.
+      const entries = await scanProjects(opts.projectsDir);
+      if (!entries.some((e) => e.slug === slug)) {
+        return reply
+          .status(404)
+          .send({ error: "not_found", detail: `No project named ${slug}` });
+      }
+
+      await writeIdentity(opts.db, slug, body.data);
+      return { ok: true };
+    },
+  );
+
   app.delete<{ Params: { slug: string } }>(
     "/api/projects/:slug",
     { preHandler: requirePermission({ project: ["delete"] }) },
@@ -238,6 +352,8 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
           }
         }
         await deleteProjectDir(opts.projectsDir, slug);
+        // Otherwise a directory recreated under this slug inherits its name.
+        await deleteIdentity(opts.db, slug);
       } finally {
         release();
       }

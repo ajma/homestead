@@ -7,7 +7,11 @@ import {
   StaleNotice,
   StatusDot,
 } from "../components/ui/index.js";
-import { isRefusal, useProjects } from "../lib/queries.js";
+import {
+  isRefusal,
+  type ProjectIdentity,
+  useProjects,
+} from "../lib/queries.js";
 
 /**
  * A `Link` styled as the primary button, not a `Button` that navigates.
@@ -38,10 +42,37 @@ const ROW =
  * down a list read as "everything is up" — a claim this screen has no way to
  * make. Saying less, in a colour that promises nothing, is the honest reading.
  */
-function Row({ entry }: { entry: ScanEntry }) {
+type ListEntry = ScanEntry & { identity?: ProjectIdentity | null };
+
+function Row({ entry }: { entry: ListEntry }) {
   const contents = (
     <>
-      <span className="min-w-0 flex-1 truncate font-medium">{entry.slug}</span>
+      {(entry.identity?.iconSlug || entry.identity?.iconUrl) && (
+        <img
+          src={
+            entry.identity.iconSlug
+              ? `/api/icons/${entry.identity.iconSlug}`
+              : (entry.identity.iconUrl ?? "")
+          }
+          alt=""
+          className="h-6 w-6 shrink-0 rounded"
+        />
+      )}
+      <span className="min-w-0 flex-1 truncate">
+        {/* The slug never disappears: it is what Compose uses, what the
+            directory is called, and what you type to delete a project. */}
+        <span className="font-medium">
+          {entry.identity?.displayName || entry.slug}
+        </span>
+        {entry.identity?.displayName && (
+          <span className="ml-2 text-muted text-xs">{entry.slug}</span>
+        )}
+        {entry.identity?.description && (
+          <span className="block truncate text-muted text-xs">
+            {entry.identity.description}
+          </span>
+        )}
+      </span>
       {entry.hasEnv && <Badge>.env</Badge>}
       {entry.hasCompose ? (
         <Badge>Valid compose</Badge>
@@ -93,7 +124,7 @@ function Body({
   error,
   isPending,
 }: {
-  data: ScanEntry[] | undefined;
+  data: ListEntry[] | undefined;
   error: Error | null;
   isPending: boolean;
 }) {

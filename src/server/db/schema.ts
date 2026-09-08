@@ -163,4 +163,25 @@ export const manualApps = sqliteTable("manual_apps", {
   hidden: integer("hidden", { mode: "boolean" }).notNull().default(false),
 });
 
+/**
+ * How a project is presented: a readable name, what it is for, an icon.
+ *
+ * In SQLite rather than the compose file's `x-homestead` block, which is where
+ * design 4 originally put it. Writing that block on a project that had none
+ * would flip `hasHomestead` — the provenance marker the delete dialog reads to
+ * decide whether to confirm twice — so giving a project an icon would quietly
+ * make it easier to delete. Identity describes presentation, which is
+ * instance-level; the compose file stays the source of truth for the stack.
+ *
+ * The cost, accepted: identity does not travel with the directory.
+ */
+export const projectIdentity = sqliteTable("project_identity", {
+  slug: text("slug").primaryKey(),
+  displayName: text("display_name"),
+  description: text("description"),
+  iconSlug: text("icon_slug"),
+  iconUrl: text("icon_url"),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 export * from "./auth-schema.js";

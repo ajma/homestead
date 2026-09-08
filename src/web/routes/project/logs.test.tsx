@@ -12,6 +12,7 @@ const SLUG = "jellyfin";
 function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
   return {
     slug: SLUG,
+    identity: null,
     hasCompose: true,
     hasEnv: false,
     composeFile: "compose.yaml",

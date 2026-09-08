@@ -64,6 +64,13 @@
       "when": 1788812684180,
       "tag": "0008_quiet_vivisector",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788894877824,
+      "tag": "0009_crazy_dazzler",
+      "breakpoints": true
     }
   ]
 }
