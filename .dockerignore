@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.superpowers
+test-results
+playwright-report
+*.md
+.env
+.env.local
+.DS_Store
+*.log
+coverage
+.vscode
+.idea

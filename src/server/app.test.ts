@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { buildApp } from "./app.js";
 import { createAuth } from "./auth/index.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -22,6 +24,21 @@ async function boot() {
     projectsHostDir: tmpDir,
     dataDir: tmpDir,
   });
+}
+
+async function makeBaseDeps() {
+  const db = createDb(":memory:");
+  await runMigrations(db);
+  const auth = createAuth(db, TEST_AUTH);
+  const tmpDir = await tempDir("hs-test-");
+  return {
+    db,
+    auth,
+    secretKey: Buffer.alloc(32),
+    projectsDir: tmpDir,
+    projectsHostDir: tmpDir,
+    dataDir: tmpDir,
+  };
 }
 
 describe("app", () => {
@@ -110,5 +127,55 @@ describe("error handler", () => {
     const res = await app.inject({ method: "GET", url: "/api/_missing" });
     expect(res.statusCode).toBe(404);
     await app.close();
+  });
+});
+
+describe("static file serving", () => {
+  it("serves index.html for an unknown path so client routing works", async () => {
+    const baseDeps = await makeBaseDeps();
+    const webDir = await tempDir("hs-web-");
+    await writeFile(
+      join(webDir, "index.html"),
+      "<!doctype html><title>hs</title>",
+    );
+    const app = await buildApp({ ...baseDeps, webDir });
+    onTestFinished(() => app.close());
+    const res = await app.inject({ method: "GET", url: "/exposures" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("<title>hs</title>");
+  });
+
+  it("does not swallow an unknown API route", async () => {
+    // The SPA fallback must not turn a missing endpoint into an HTML page —
+    // a fetch would then fail on JSON parsing rather than on a 404.
+    const baseDeps = await makeBaseDeps();
+    const webDir = await tempDir("hs-web-");
+    await writeFile(join(webDir, "index.html"), "<!doctype html>");
+    const app = await buildApp({ ...baseDeps, webDir });
+    onTestFinished(() => app.close());
+    const res = await app.inject({ method: "GET", url: "/api/nope" });
+    expect(res.statusCode).toBe(404);
+    expect(res.headers["content-type"]).not.toContain("text/html");
+  });
+
+  it("does not swallow a non-GET method on an unknown route", async () => {
+    // A mistyped POST to an unknown path should not get an HTML page with a
+    // 200 status — that's the least legible possible failure for a client.
+    const baseDeps = await makeBaseDeps();
+    const webDir = await tempDir("hs-web-");
+    await writeFile(join(webDir, "index.html"), "<!doctype html>");
+    const app = await buildApp({ ...baseDeps, webDir });
+    onTestFinished(() => app.close());
+    const res = await app.inject({ method: "POST", url: "/typo" });
+    expect(res.statusCode).toBe(404);
+    expect(res.headers["content-type"]).not.toContain("text/html");
+  });
+
+  it("works with no webDir, as in development", async () => {
+    const baseDeps = await makeBaseDeps();
+    const app = await buildApp(baseDeps);
+    onTestFinished(() => app.close());
+    const res = await app.inject({ method: "GET", url: "/api/health" });
+    expect(res.statusCode).toBe(200);
   });
 });

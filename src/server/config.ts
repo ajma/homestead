@@ -6,6 +6,7 @@ export type Config = {
   dataDir: string;
   projectsDir: string;
   projectsHostDir: string;
+  webDir: string | undefined;
   port: number;
   secretKey: string | undefined;
   baseUrl: string;
@@ -72,6 +73,7 @@ const schema = z.object({
   HOMESTEAD_DATA: absolutePath.default("/var/lib/homestead"),
   HOMESTEAD_PROJECTS: absolutePath.default("/opt/stacks"),
   HOMESTEAD_PROJECTS_HOST: absolutePath.optional(),
+  HOMESTEAD_WEB_DIR: absolutePath.optional(),
   PORT: z.coerce.number().int().min(1).max(65535).default(7420),
   HOMESTEAD_SECRET_KEY: z.string().min(1).optional(),
   HOMESTEAD_BASE_URL: baseUrl,
@@ -92,6 +94,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     dataDir: v.HOMESTEAD_DATA,
     projectsDir: v.HOMESTEAD_PROJECTS,
     projectsHostDir: v.HOMESTEAD_PROJECTS_HOST ?? v.HOMESTEAD_PROJECTS,
+    webDir: v.HOMESTEAD_WEB_DIR,
     port: v.PORT,
     secretKey: v.HOMESTEAD_SECRET_KEY,
     // Better-Auth checks the browser's Origin header against this value, and

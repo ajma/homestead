@@ -32,7 +32,7 @@ describe("dockerChecks", () => {
     expect(results.find((r) => r.id === "compose_v2")?.ok).toBe(true);
   });
 
-  it("reports the daemon as a blocking failure when it cannot be reached", async () => {
+  it("reports the daemon as a failure when it cannot be reached", async () => {
     const results = await runChecks(
       dockerChecks(
         fake({
@@ -46,7 +46,7 @@ describe("dockerChecks", () => {
     );
     const check = results.find((r) => r.id === "docker_reachable");
     expect(check?.ok).toBe(false);
-    expect(check?.blocking).toBe(true);
+    expect(check?.severity).toBe("warning");
     expect(check?.detail).toContain("docker.sock");
   });
 

@@ -2,7 +2,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { signOut, useSession } from "../lib/auth-client.js";
+import { usePreflight } from "../lib/queries.js";
 import { useMenu } from "../lib/use-menu.js";
+import { PreflightBanner } from "./PreflightBanner.js";
 import { ThemeToggle } from "./ThemeToggle.js";
 import { Button } from "./ui/Button.js";
 
@@ -92,6 +94,7 @@ export function AppShell() {
   const menuId = useId();
   const emailId = useId();
   const [signOutError, setSignOutError] = useState<string | null>(null);
+  const preflight = usePreflight();
 
   // A closed menu takes its error with it, however it was closed: a retry must
   // not open onto the previous attempt's message.
@@ -215,6 +218,7 @@ export function AppShell() {
           </div>
         </div>
       </header>
+      <PreflightBanner checks={preflight.data ?? []} />
       <Outlet />
     </div>
   );

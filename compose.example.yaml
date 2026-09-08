@@ -1,0 +1,16 @@
+services:
+  homestead:
+    image: ghcr.io/<owner>/homestead:latest
+    # Host networking is required so health probes reach services at 127.0.0.1.
+    # A bridged container's loopback is its own, so tcp/http checks would test
+    # the container instead of the service, and every app would report down.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /volume2/docker:/volume2/docker
+      - /volume2/docker/.homestead:/data
+    environment:
+      HOMESTEAD_DATA: /data
+      HOMESTEAD_PROJECTS: /volume2/docker
+      HOMESTEAD_PROJECTS_HOST: /volume2/docker

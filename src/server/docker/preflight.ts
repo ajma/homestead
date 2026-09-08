@@ -6,7 +6,7 @@ export function dockerChecks(run: Runner = runDocker): Check[] {
     {
       id: "docker_reachable",
       label: "Docker daemon is reachable",
-      blocking: true,
+      severity: "warning",
       run: async () => {
         const { stdout, stderr, code } = await run([
           "version",
@@ -24,7 +24,7 @@ export function dockerChecks(run: Runner = runDocker): Check[] {
     {
       id: "compose_v2",
       label: "Docker Compose v2 is available",
-      blocking: true,
+      severity: "warning",
       run: async () => {
         const { stdout, stderr, code } = await run([
           "compose",

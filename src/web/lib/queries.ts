@@ -7,6 +7,7 @@ import type {
   MonitorType,
   UptimeWindow,
 } from "@shared/monitoring.js";
+import type { PreflightResult } from "@shared/preflight.js";
 import type {
   ContainerState,
   Operation,
@@ -36,6 +37,7 @@ export const queryKeys = {
   exposures: ["exposures"] as const,
   cloudflareStatus: ["cloudflare", "status"] as const,
   dashboard: ["dashboard"] as const,
+  preflight: ["preflight"] as const,
 };
 
 /** Slow enough for ~30 stacks on a NAS, quick enough to feel live. */
@@ -332,6 +334,18 @@ export function useDashboard() {
     queryFn: async () => {
       const body = await apiFetch<DashboardData>("/api/dashboard");
       return body;
+    },
+  });
+}
+
+export function usePreflight() {
+  return useQuery({
+    queryKey: queryKeys.preflight,
+    queryFn: async () => {
+      const body = await apiFetch<{ checks: PreflightResult[] }>(
+        "/api/preflight",
+      );
+      return body?.checks ?? [];
     },
   });
 }

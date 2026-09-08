@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "./app.js";
 import { syncAppMonitors } from "./apps/sync.js";
@@ -11,7 +14,7 @@ import { exposures, settings } from "./db/schema.js";
 import { composeConfig } from "./docker/compose.js";
 import { dockerChecks } from "./docker/preflight.js";
 import { createRunner } from "./monitoring/runner.js";
-import { dataDirChecks, runChecks } from "./preflight.js";
+import { dataDirChecks, portCheck, runChecks } from "./preflight.js";
 import { scanProjects } from "./projects/store.js";
 
 async function main(): Promise<void> {
@@ -23,16 +26,15 @@ async function main(): Promise<void> {
   const results = await runChecks([
     ...dataDirChecks(config),
     ...dockerChecks(),
+    portCheck(config.port),
   ]);
   for (const r of results) {
-    console.log(
-      `${r.ok ? "ok  " : "FAIL"}  ${r.label}${r.detail ? ` — ${r.detail}` : ""}`,
-    );
-  }
-  const blocked = results.filter((r) => !r.ok && r.blocking);
-  if (blocked.length > 0) {
-    console.error(`\nStartup blocked by ${blocked.length} failed check(s).`);
-    process.exit(1);
+    const msg = `${r.ok ? "ok  " : "FAIL"}  ${r.label}${r.detail ? ` — ${r.detail}` : ""}`;
+    if (!r.ok && r.severity === "danger") {
+      console.error(msg);
+    } else {
+      console.log(msg);
+    }
   }
 
   const key = await ensureSecretKey(config.dataDir, config.secretKey);
@@ -43,6 +45,20 @@ async function main(): Promise<void> {
     baseURL: config.baseUrl,
     trustedOrigins: config.trustedOrigins,
   });
+
+  // Compute webDir: use the env var if set, otherwise look for dist/web relative
+  // to this file. In production (container or `pnpm start`), the server bundle is
+  // at dist/server/index.js, so ../web resolves to dist/web. In dev mode, that
+  // directory doesn't exist, which is correct — Vite serves the SPA separately.
+  let webDir = config.webDir;
+  if (!webDir) {
+    const serverDir = dirname(fileURLToPath(import.meta.url));
+    const candidateWebDir = join(serverDir, "../web");
+    if (existsSync(candidateWebDir)) {
+      webDir = candidateWebDir;
+    }
+  }
+
   const app = await buildApp({
     db,
     auth,
@@ -51,6 +67,8 @@ async function main(): Promise<void> {
     projectsDir: config.projectsDir,
     projectsHostDir: config.projectsHostDir,
     dataDir: config.dataDir,
+    webDir,
+    preflight: results,
   });
 
   // Build the user sync function for the runner
