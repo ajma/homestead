@@ -153,6 +153,71 @@ describe("Exposures", () => {
     });
   });
 
+  it("offers no Service field, which the server does not store", async () => {
+    // There is no service_name column; GET /api/exposures always returns null
+    // for it, derived instead from docker compose config at read time. The form
+    // collected it and sent it anyway, so whatever was typed vanished without
+    // a word. A field that ignores its input is worse than no field.
+    mockFetch({
+      "/api/exposures": () =>
+        new Response(JSON.stringify({ exposures: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      "/api/cloudflare/status": () =>
+        new Response(
+          JSON.stringify({
+            configured: true,
+            accountId: "acc123",
+            tunnelId: "tun123",
+            runtime: { kind: "deployed", projectSlug: "cloudflared" },
+            idpId: "idp123",
+            syncState: "synced",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const { user } = renderExposures();
+    await user.click(await screen.findByRole("button", { name: /add/i }));
+
+    expect(await screen.findByLabelText(/hostname/i)).toBeVisible();
+    expect(screen.queryByLabelText(/^service/i)).toBeNull();
+  });
+
+  it("defaults the origin scheme to HTTP", async () => {
+    // The origin is the service on this box, not the public URL — that is
+    // always HTTPS via Cloudflare. Self-hosted apps on a host port almost
+    // always speak plain HTTP, and the column default is "http", so defaulting
+    // the form to HTTPS handed most people a 502 on their first exposure.
+    mockFetch({
+      "/api/exposures": () =>
+        new Response(JSON.stringify({ exposures: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      "/api/cloudflare/status": () =>
+        new Response(
+          JSON.stringify({
+            configured: true,
+            accountId: "acc123",
+            tunnelId: "tun123",
+            runtime: { kind: "deployed", projectSlug: "cloudflared" },
+            idpId: "idp123",
+            syncState: "synced",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+    const { user } = renderExposures();
+    await user.click(await screen.findByRole("button", { name: /add/i }));
+    await screen.findByLabelText(/hostname/i);
+
+    const http = screen.getByRole("radio", { name: "HTTP" });
+    expect(http).toBeChecked();
+  });
+
   it("requires explicit confirmation to disable Access", async () => {
     mockFetch({
       "/api/exposures": () =>

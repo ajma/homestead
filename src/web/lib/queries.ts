@@ -512,9 +512,11 @@ export function useCloudflareStatus() {
 export function useCreateExposure() {
   const client = useQueryClient();
   return useMutation({
+    // No serviceName: there is no such column, and the server derives the
+    // name from docker compose config at read time. Accepting one here let the
+    // form collect a value that was silently discarded.
     mutationFn: async (body: {
       projectSlug: string | null;
-      serviceName: string | null;
       hostPort: number;
       hostname: string;
       scheme: "http" | "https";

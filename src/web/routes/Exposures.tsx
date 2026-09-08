@@ -79,9 +79,8 @@ function ExposureDialog({
   const [hostname, setHostname] = useState("");
   const [label, setLabel] = useState("");
   const [projectSlug, setProjectSlug] = useState("");
-  const [serviceName, setServiceName] = useState("");
   const [hostPort, setHostPort] = useState("");
-  const [scheme, setScheme] = useState<"http" | "https">("https");
+  const [scheme, setScheme] = useState<"http" | "https">("http");
   const [enabled, setEnabled] = useState(true);
   const [accessEnabled, setAccessEnabled] = useState(true);
   const [noTlsVerify, setNoTlsVerify] = useState(false);
@@ -93,9 +92,8 @@ function ExposureDialog({
       setHostname(exposure?.hostname ?? "");
       setLabel(exposure?.label ?? "");
       setProjectSlug(exposure?.projectSlug ?? "");
-      setServiceName(exposure?.serviceName ?? "");
       setHostPort(exposure?.hostPort?.toString() ?? "");
-      setScheme(exposure?.scheme ?? "https");
+      setScheme(exposure?.scheme ?? "http");
       setEnabled(exposure?.enabled ?? true);
       setAccessEnabled(exposure?.accessEnabled ?? true);
       setNoTlsVerify(exposure?.noTlsVerify ?? false);
@@ -108,7 +106,6 @@ function ExposureDialog({
   const hostnameId = useId();
   const labelId = useId();
   const projectId = useId();
-  const serviceId = useId();
   const portId = useId();
 
   const isEditing = exposure !== null;
@@ -139,7 +136,6 @@ function ExposureDialog({
       try {
         await create.mutateAsync({
           projectSlug: projectSlug || null,
-          serviceName: serviceName || null,
           hostPort: Number.parseInt(hostPort, 10),
           hostname,
           scheme,
@@ -234,6 +230,10 @@ function ExposureDialog({
             placeholder="app.example.com"
             required
           />
+          <p className="mt-1 text-xs text-muted">
+            The public address people will visit. It must sit under a domain in
+            your Cloudflare account; Homestead creates the DNS record for it.
+          </p>
         </div>
 
         {!isEditing && (
@@ -253,18 +253,32 @@ function ExposureDialog({
                 placeholder="8080"
                 required
               />
+              <p className="mt-1 text-xs text-muted">
+                The port the service already listens on <em>on this machine</em>
+                . The same number you would use in{" "}
+                <code>http://localhost:…</code> here. Not the public port —
+                visitors always arrive on 443.
+              </p>
             </div>
 
             <div>
-              <div className="block text-sm font-medium mb-1">Scheme</div>
+              <div className="block text-sm font-medium mb-1">
+                Origin scheme
+              </div>
               <SegmentedControl
                 items={[
-                  { id: "https", label: "HTTPS" },
                   { id: "http", label: "HTTP" },
+                  { id: "https", label: "HTTPS" },
                 ]}
                 value={scheme}
                 onChange={(value) => setScheme(value as "http" | "https")}
               />
+              <p className="mt-1 text-xs text-muted">
+                How the tunnel reaches the service locally, not how visitors
+                reach you — that is always HTTPS. Most self-hosted apps speak
+                plain HTTP on their port, so leave this on HTTP unless the app
+                serves HTTPS itself.
+              </p>
             </div>
 
             <div>
@@ -281,22 +295,11 @@ function ExposureDialog({
                 onChange={(e) => setProjectSlug(e.target.value)}
                 placeholder="traefik"
               />
-            </div>
-
-            <div>
-              <label
-                htmlFor={serviceId}
-                className="block text-sm font-medium mb-1"
-              >
-                Service (optional)
-              </label>
-              <Input
-                id={serviceId}
-                type="text"
-                value={serviceName}
-                onChange={(e) => setServiceName(e.target.value)}
-                placeholder="web"
-              />
+              <p className="mt-1 text-xs text-muted">
+                The slug of the Homestead project behind this port, if there is
+                one. Leave empty for anything Homestead does not run — a NAS
+                admin page, a printer, a service started by hand.
+              </p>
             </div>
 
             <div>
@@ -309,6 +312,11 @@ function ExposureDialog({
                 />
                 <span className="text-sm">Skip TLS verification</span>
               </label>
+              <p className="mt-1 text-xs text-muted">
+                Only for an HTTPS origin with a self-signed certificate — Unifi
+                and Proxmox are the usual ones. The tunnel refuses those by
+                default. Irrelevant when the origin scheme is HTTP.
+              </p>
             </div>
           </>
         )}
