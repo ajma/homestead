@@ -116,12 +116,21 @@ export async function upsertDnsRecord(
 ): Promise<void> {
   try {
     // List existing DNS records
-    const records = await c.request<
-      Array<{ id: string; name: string; type: string; content: string }>
-    >("GET", `/zones/${zoneId}/dns_records`);
+    const records =
+      (await c.request<Array<{
+        id: string;
+        name: string;
+        type: string;
+        content: string;
+      }> | null>("GET", `/zones/${zoneId}/dns_records`)) ?? [];
 
-    // Find all records matching this hostname
-    const matching = records.filter((r) => r.name === hostname);
+    // Find all records matching this hostname. Cloudflare has answered an
+    // empty collection with null elsewhere in this API — the tunnel
+    // configuration does exactly that — and .filter on null is a 500 three
+    // frames from anything meaningful.
+    const matching = (Array.isArray(records) ? records : []).filter(
+      (r) => r.name === hostname,
+    );
 
     // Refuse if multiple records exist
     if (matching.length > 1) {

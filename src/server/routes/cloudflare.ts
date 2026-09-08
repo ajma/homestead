@@ -14,6 +14,7 @@ import { runSetup } from "../cloudflare/setup.js";
 import { reconcileExposures } from "../cloudflare/sync.js";
 import { syncAllowPolicy } from "../cloudflare/sync-users.js";
 import { deleteDnsRecord } from "../cloudflare/tunnel.js";
+import { resolveZoneId } from "../cloudflare/zone.js";
 import { decrypt, encrypt } from "../crypto/secrets.js";
 import type { Db } from "../db/client.js";
 import { exposures, settings } from "../db/schema.js";
@@ -331,20 +332,31 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
     async (request, reply) => {
       const body = z
         .object({
-          projectSlug: z.string().optional(),
+          // nullable, not just optional: the form sends null for an empty
+          // field, and `.optional()` rejects it.
+          projectSlug: z.string().nullish(),
           hostPort: z.number().int().min(1).max(65535),
-          zoneId: z.string().min(1),
+          // Derived from the hostname below. There is no zone field in the
+          // form, and requiring one here failed every submission.
+          zoneId: z.string().min(1).optional(),
           hostname: z.string().min(1),
           scheme: z.enum(["http", "https"]).default("http"),
           noTlsVerify: z.boolean().default(false),
-          label: z.string().optional(),
+          label: z.string().nullish(),
           enabled: z.boolean().default(true),
           accessEnabled: z.boolean().default(true),
         })
         .safeParse(request.body);
 
       if (!body.success) {
-        return reply.status(400).send({ error: "invalid_body" });
+        return reply.status(400).send({
+          error: "invalid_body",
+          // A bare refusal tells the operator nothing about which field is
+          // wrong, and this endpoint refused every submission for a week.
+          detail: body.error.issues
+            .map((i) => `${i.path.join(".") || "body"}: ${i.message}`)
+            .join("; "),
+        });
       }
 
       const data = body.data;
@@ -370,13 +382,30 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       const clientFactory = opts.cloudflare ?? createCloudflareClient;
       const client = clientFactory({ token });
 
+      // The hostname already determines the zone, so derive it rather than
+      // asking for it twice.
+      let zoneId = data.zoneId;
+      if (!zoneId) {
+        const zones = await client.listZones(accountId);
+        const resolved = resolveZoneId(data.hostname, zones);
+        if (!resolved) {
+          return reply.status(400).send({
+            error: "unknown_zone",
+            detail:
+              `No Cloudflare zone in this account covers ${data.hostname}. ` +
+              `Available: ${zones.map((z) => z.name).join(", ") || "none"}.`,
+          });
+        }
+        zoneId = resolved;
+      }
+
       // Commit the exposure first, then converge remote state
       const id = randomUUID();
       await db.insert(exposures).values({
         id,
         projectSlug: data.projectSlug ?? null,
         hostPort: data.hostPort,
-        zoneId: data.zoneId,
+        zoneId,
         hostname: data.hostname,
         scheme: data.scheme,
         noTlsVerify: data.noTlsVerify,

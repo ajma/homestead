@@ -276,3 +276,11 @@ it("removes catch-alls from the middle and keeps exactly one at the end", async 
   expect(sent.config.ingress.at(-1)).toEqual({ service: "http_status:404" });
   expect(sent.config.ingress).toHaveLength(3); // Two hostnames + one catch-all
 });
+
+it("treats a null dns_records list as no records", async () => {
+  // Cloudflare answers an empty collection with null elsewhere in this API;
+  // .filter on null is a 500 with nothing useful in it.
+  const c = fakeClient({ "GET /zones/z1/dns_records": null });
+  await upsertDnsRecord(c, "z1", "app.example.com", "t1");
+  expect(c.calls.some((k) => k.method === "POST")).toBe(true);
+});

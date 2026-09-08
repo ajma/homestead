@@ -68,8 +68,11 @@ beforeEach(async () => {
     listIdentityProviders: async () => [
       { id: "idp-xyz", name: "Google OAuth", type: "google" },
     ],
-    // biome-ignore lint/suspicious/noExplicitAny: test mock
-    request: async () => ({}) as any,
+    request: async (_m: string, path: string) =>
+      // Realistic enough for the paths a request actually takes: DNS listing
+      // returns a collection; anything created comes back with an id.
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      (path.includes("/dns_records") ? [] : { id: "cf-obj" }) as any,
   });
 
   app = await buildApp({
@@ -565,6 +568,100 @@ describe("POST /api/cloudflare/setup", () => {
       payload: { idpId: "idp-xyz" },
     });
   }
+
+  it("accepts what the exposure form actually sends", async () => {
+    // The form has no zone field, and sends null for an empty project or
+    // label. The schema required zoneId and rejected null for both, so every
+    // attempt to add an exposure failed with a bare "invalid_body" that named
+    // nothing. This drives the real body shape.
+    await db.insert(settings).values([
+      { key: "cloudflare.accountId", value: "acc-123" },
+      { key: "cloudflare.tunnelId", value: "tunnel-123" },
+      {
+        key: "cloudflare.apiToken",
+        value: encrypt(PLAINTEXT_TOKEN, Buffer.alloc(32)),
+      },
+      // Access is on by default, and reconcile refuses to publish a hostname
+      // it cannot protect. After setup these exist; without them the fail-
+      // closed guard correctly rejects the exposure.
+      { key: "cloudflare.policyAllowId", value: "pol-allow" },
+      { key: "cloudflare.policyProbeId", value: "pol-probe" },
+    ]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/exposures",
+      headers: { cookie: adminCookie },
+      payload: {
+        hostname: "metube.example.com",
+        hostPort: 8081,
+        scheme: "http",
+        noTlsVerify: false,
+        projectSlug: null,
+        label: null,
+        enabled: true,
+        accessEnabled: true,
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+
+    // The zone came from the hostname rather than the request.
+    const [row] = await db.select().from(exposures);
+    expect(row?.zoneId).toBe("zone-abc");
+    expect(row?.hostPort).toBe(8081);
+  });
+
+  it("says which zone is missing rather than a bare invalid_body", async () => {
+    await db.insert(settings).values([
+      { key: "cloudflare.accountId", value: "acc-123" },
+      { key: "cloudflare.tunnelId", value: "tunnel-123" },
+      {
+        key: "cloudflare.apiToken",
+        value: encrypt(PLAINTEXT_TOKEN, Buffer.alloc(32)),
+      },
+      // Access is on by default, and reconcile refuses to publish a hostname
+      // it cannot protect. After setup these exist; without them the fail-
+      // closed guard correctly rejects the exposure.
+      { key: "cloudflare.policyAllowId", value: "pol-allow" },
+      { key: "cloudflare.policyProbeId", value: "pol-probe" },
+    ]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/exposures",
+      headers: { cookie: adminCookie },
+      payload: {
+        hostname: "metube.somewhere-else.net",
+        hostPort: 8081,
+        scheme: "http",
+        noTlsVerify: false,
+        projectSlug: null,
+        label: null,
+        enabled: true,
+        accessEnabled: true,
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error).toBe("unknown_zone");
+    // Naming the hostname and what is available is the difference between a
+    // typo you can see and a form that just refuses.
+    expect(body.detail).toContain("somewhere-else.net");
+    expect(body.detail).toContain("example.com");
+  });
+
+  it("explains a malformed body instead of only refusing it", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/exposures",
+      headers: { cookie: adminCookie },
+      payload: { hostname: "x.example.com" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().detail).toMatch(/hostPort/);
+  });
 
   it("reports a running connector in status instead of a hardcoded none", async () => {
     // status returned { kind: "none" } unconditionally, with a comment saying
