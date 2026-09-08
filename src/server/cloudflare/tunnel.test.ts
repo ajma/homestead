@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import type { CloudflareClient } from "./client.js";
 import {
   createTunnel,
+  getIngress,
   getTunnelToken,
   type IngressRule,
   putIngress,
@@ -66,6 +67,37 @@ it("fails by name when the run token is missing entirely", async () => {
   // inside a cipher.
   const c = fakeClient({ "GET /accounts/a/cfd_tunnel/t1/token": null });
   await expect(getTunnelToken(c, "a", "t1")).rejects.toThrow(/t1/);
+});
+
+it("reads a freshly created tunnel as having no ingress", async () => {
+  // A tunnel that has never been configured has a null configuration, not an
+  // empty one. Dereferencing it made Reconcile fail with "Cannot read
+  // properties of null" on exactly the tunnel Homestead had just created —
+  // so the first reconcile after setup could never succeed.
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1/configurations": null,
+  });
+  await expect(getIngress(c, "a", "t1")).resolves.toEqual([]);
+});
+
+it("reads a tunnel whose config exists but has no ingress", async () => {
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1/configurations": { config: {} },
+  });
+  await expect(getIngress(c, "a", "t1")).resolves.toEqual([]);
+});
+
+it("still reads the ingress array when one is configured", async () => {
+  // The empty cases must not be achieved by ignoring real configuration:
+  // returning [] for a populated tunnel would make reconcile delete every
+  // hostname on the account.
+  const rules = [{ hostname: "a.example.com", service: "http://localhost:1" }];
+  const c = fakeClient({
+    "GET /accounts/a/cfd_tunnel/t1/configurations": {
+      config: { ingress: rules },
+    },
+  });
+  await expect(getIngress(c, "a", "t1")).resolves.toEqual(rules);
 });
 
 it("always ends the ingress array with a catch-all", async () => {

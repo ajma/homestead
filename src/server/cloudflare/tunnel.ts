@@ -61,11 +61,17 @@ export async function getIngress(
   tunnelId: string,
 ): Promise<IngressRule[]> {
   try {
-    const result = await c.request<{ config: { ingress: IngressRule[] } }>(
+    // A tunnel that has never been configured returns a null configuration
+    // rather than an empty one — which is the state of every tunnel Homestead
+    // has just created, so the first reconcile after setup hit exactly this.
+    // Absent config means no ingress; it must not mean "give up".
+    const result = await c.request<{
+      config?: { ingress?: IngressRule[] } | null;
+    } | null>(
       "GET",
       `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`,
     );
-    return result.config.ingress;
+    return result?.config?.ingress ?? [];
   } catch (error) {
     throw new Error(
       `Failed to get ingress for tunnel ${tunnelId}: ${error instanceof Error ? error.message : String(error)}`,
