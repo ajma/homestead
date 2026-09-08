@@ -17,11 +17,17 @@ export async function syncAllowPolicy(
   policyId: string,
   idpId: string,
 ): Promise<SyncResult> {
-  // Get all Homestead users (both admins and viewers)
-  const users = await db
-    .select()
-    .from(user)
-    .where(eq(user.emailVerified, true));
+  // Every Homestead user, admins and viewers alike — the same selection
+  // setup's createAllowPolicy makes.
+  //
+  // This filtered on emailVerified, a flag nothing in this codebase ever sets:
+  // sign-up is blocked and accounts are admin-created, so it is false for
+  // everyone. Creation did not filter, so the policy was right when written
+  // and then threw "must name at least one user" on every tick afterwards.
+  // The visible cost was not a locked-out user but a frozen policy: adding
+  // someone granted nothing, and removing someone revoked nothing, which is
+  // the whole reason this policy is reusable.
+  const users = await db.select().from(user);
 
   const emails = users.map((u) => u.email);
 

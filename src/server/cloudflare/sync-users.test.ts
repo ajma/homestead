@@ -54,7 +54,17 @@ async function seedUsers(
       n += 1;
       await db
         .insert(user)
-        .values({ id: `u${n}`, name: email, email, role, emailVerified: true });
+        // Deliberately false, which is what Homestead actually stores:
+        // sign-up is blocked, accounts are admin-created, and nothing in the
+        // codebase ever sets this flag. A fixture that set it true hid a
+        // filter on it for as long as the filter existed.
+        .values({
+          id: `u${n}`,
+          name: email,
+          email,
+          role,
+          emailVerified: false,
+        });
     }
   }
   return db;
@@ -83,6 +93,46 @@ describe("syncAllowPolicy", () => {
       { email: { email: "b@example.com" } },
     ]);
     expect(body.require).toEqual([{ login_method: { id: "idp1" } }]);
+  });
+
+  it("syncs users whose email was never verified, which is all of them", async () => {
+    // syncAllowPolicy filtered on emailVerified while setup's createAllowPolicy
+    // did not, so the policy was correct when written and could never be
+    // updated again: the sync threw "must name at least one user" on every
+    // tick. Adding a user granted nothing, and — worse — removing one revoked
+    // nothing, which is the entire reason the policy is reusable.
+    const db = await seedUsers(["only@example.com"]);
+    await setFingerprint(db, []);
+    const c = fakeClient({
+      "GET /accounts/a/access/policies/p1": policyBody([]),
+    });
+    const r = await syncAllowPolicy(db, c, "a", "p1", "idp1");
+    expect(r.synced).toBe(true);
+    const put = c.calls.find((k) => k.method === "PUT");
+    expect(put, "no PUT was issued").toBeDefined();
+    const sent = put?.body as ReturnType<typeof policyBody> | undefined;
+    expect(sent?.include).toEqual([{ email: { email: "only@example.com" } }]);
+  });
+
+  it("selects the same users setup does when it creates the policy", async () => {
+    // The two paths disagreeing is the actual defect. Creation used every
+    // user; sync used a subset. Whatever the rule is, one rule.
+    const db = await seedUsers(["a@example.com"], ["b@example.com"]);
+    const createdWith = (await db.select().from(user)).map((u) => u.email);
+
+    await setFingerprint(db, []);
+    const c = fakeClient({
+      "GET /accounts/a/access/policies/p1": policyBody([]),
+    });
+    await syncAllowPolicy(db, c, "a", "p1", "idp1");
+    const put = c.calls.find((k) => k.method === "PUT");
+    expect(put, "no PUT was issued").toBeDefined();
+    const body = put?.body as
+      | { include: { email: { email: string } }[] }
+      | undefined;
+    const syncedWith = (body?.include ?? []).map((i) => i.email.email);
+
+    expect(syncedWith.sort()).toEqual(createdWith.sort());
   });
 
   it("includes viewers as well as admins", async () => {
