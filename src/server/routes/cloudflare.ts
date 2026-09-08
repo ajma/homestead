@@ -101,6 +101,23 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       // Fetch accounts
       const accounts = await client.listAccounts();
 
+      // Cloudflare answers GET /accounts with 200 and an empty array when the
+      // token cannot read the user's memberships, so verifyToken's 403 probe
+      // sees nothing wrong. Setup cannot continue without an account, and the
+      // permission lives under User rather than Account or Zone — which is
+      // where everyone looks — so name it rather than showing an empty menu.
+      if (accounts.length === 0) {
+        return reply.status(400).send({
+          error: "no_accounts",
+          missingScopes: ["User:Memberships:Read"],
+          detail:
+            "This token cannot list any Cloudflare accounts. Add the " +
+            "User → Memberships → Read permission to it. Note that it sits " +
+            "under User, not Account or Zone. An account-owned token cannot " +
+            "grant it at all; create the token from My Profile → API Tokens.",
+        });
+      }
+
       // Only store if verification succeeded
       const encryptedToken = encrypt(token, opts.secretKey);
 

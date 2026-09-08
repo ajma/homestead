@@ -17,6 +17,23 @@ describe("createCloudflareClient", () => {
     );
   });
 
+  it("lists zones from the top-level collection, filtered by account", async () => {
+    // Zones are not nested under an account. Cloudflare answers
+    // /accounts/{id}/zones with 400 "No route for that URI", so the whole
+    // tunnel setup died the moment an account was chosen.
+    const f = vi.fn<typeof fetch>(async () => ok([]));
+    await createCloudflareClient({ token: "t", fetch: f }).listZones("acc-123");
+    const url = String(f.mock.calls[0]?.[0]);
+    expect(url).toContain("/zones?account.id=acc-123");
+    expect(url).not.toContain("/accounts/acc-123/zones");
+  });
+
+  it("escapes the account id rather than pasting it into the query", async () => {
+    const f = vi.fn<typeof fetch>(async () => ok([]));
+    await createCloudflareClient({ token: "t", fetch: f }).listZones("a b&c=d");
+    expect(String(f.mock.calls[0]?.[0])).toContain("account.id=a%20b%26c%3Dd");
+  });
+
   it("never puts the token in a thrown error", async () => {
     // An error surfaces in logs and in a 500 body. A credential must not ride along.
     const f = vi.fn<typeof fetch>(

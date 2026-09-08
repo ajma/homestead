@@ -124,9 +124,12 @@ export function createCloudflareClient(opts: {
     },
 
     async listZones(accountId: string) {
+      // Zones are a top-level collection filtered by account, not a
+      // sub-resource of one. /accounts/{id}/zones does not exist and answers
+      // 400 "No route for that URI".
       const zones = await request<ZoneOption[]>(
         "GET",
-        `/accounts/${accountId}/zones`,
+        `/zones?account.id=${encodeURIComponent(accountId)}`,
       );
       // Defend against null result
       return zones ?? [];

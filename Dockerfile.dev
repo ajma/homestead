@@ -1,0 +1,16 @@
+# Development image. Unlike the production Dockerfile it bakes in no source and
+# no build: the working tree is bind-mounted, so the watchers inside pick up a
+# file the moment it lands on the host. That is the whole point — a built image
+# would ignore anything copied in afterwards.
+FROM node:24-alpine
+
+# Homestead shells out to Compose, so the container needs its own client even in
+# development. Same reasoning as the production image: the host's may be v1.
+RUN apk add --no-cache docker-cli docker-cli-compose
+
+RUN corepack enable
+WORKDIR /app
+
+# node_modules lives in a named volume, not here — see compose.dev.yaml. The
+# bind mount would otherwise hide anything installed at build time.
+CMD ["sh", "docker/dev-entrypoint.sh"]

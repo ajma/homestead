@@ -186,6 +186,53 @@ describe("POST /api/cloudflare/token", () => {
     expect(row).toBeUndefined();
   });
 
+  it("explains an empty account list instead of accepting the token", async () => {
+    // Cloudflare answers GET /accounts with 200 and an empty array when the
+    // token lacks User → Memberships → Read, so verifyToken sees nothing wrong.
+    // Storing it leaves setup on an empty dropdown with no way to learn why.
+    await app.close();
+    const mockCloudflare = (): CloudflareClient => ({
+      verifyToken: async () => ({ ok: true }),
+      listAccounts: async () => [],
+      listZones: async () => [],
+      listIdentityProviders: async () => [],
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      request: async () => ({}) as any,
+    });
+
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mockCloudflare,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: PLAINTEXT_TOKEN },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error).toBe("no_accounts");
+    // The permission is under User, not Account or Zone, which is exactly why
+    // it gets missed. Naming it is the whole point of this branch.
+    expect(body.missingScopes).toEqual(["User:Memberships:Read"]);
+    expect(body.detail).toMatch(/Memberships/);
+
+    // A token that cannot list accounts cannot finish setup, so it is not kept.
+    const [row] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, "cloudflare.apiToken"));
+    expect(row).toBeUndefined();
+  });
+
   it("is refused for a viewer", async () => {
     const res = await app.inject({
       method: "POST",
@@ -1748,7 +1795,9 @@ describe("POST /api/cloudflare/sync-users", () => {
     // Mock that returns a valid policy structure
     const mockCloudflare = (): CloudflareClient => ({
       verifyToken: async () => ({ ok: true }),
-      listAccounts: async () => [],
+      // Non-empty: this test seeds a token through the real route, which now
+      // refuses a token that can list no accounts.
+      listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
       listZones: async () => [],
       listIdentityProviders: async () => [],
       request: async (method: string, path: string) => {

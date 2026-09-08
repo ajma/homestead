@@ -1,0 +1,44 @@
+# Development deployment: source is bind-mounted and watched, so files copied
+# to the host afterwards take effect without a rebuild.
+#
+#   docker compose -f compose.dev.yaml up -d --build
+#
+# For the immutable production image, use the root Dockerfile instead.
+services:
+  homestead:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    # Required, exactly as in production: a bridged container's 127.0.0.1 is its
+    # own loopback, so every local probe would test the container rather than
+    # the service. It also puts Vite's 5173 and the API's 7420 straight on the
+    # host, which is what makes this reachable from another machine.
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The working tree. This is the hot-reload path — rsync into it and the
+      # watchers fire.
+      - ./:/app
+      # Keeps the container's install from being hidden by the bind mount, and
+      # stops it writing a linux/musl node_modules back over the host's.
+      - homestead-node-modules:/app/node_modules
+      - homestead-data:/data
+      - /opt/stacks:/opt/stacks
+    environment:
+      HOMESTEAD_DATA: /data
+      HOMESTEAD_PROJECTS: /opt/stacks
+      # Identity-mapped, so paths Homestead hands the daemon resolve on the host.
+      HOMESTEAD_PROJECTS_HOST: /opt/stacks
+      # Vite refuses an unrecognised Host header; bare IPs are exempt, hostnames
+      # are not. Without this, http://homestead-test:5173 gets "Blocked request".
+      VITE_ALLOWED_HOSTS: homestead-test
+      # Better-Auth compares the browser's Origin against these and derives
+      # cookie security from the scheme, so they must be the URL actually typed
+      # into the address bar — not localhost. The IP stays listed so both work.
+      HOMESTEAD_BASE_URL: http://homestead-test:5173
+      HOMESTEAD_TRUSTED_ORIGINS: http://homestead-test:5173,http://10.1.0.5:5173,http://localhost:5173
+
+volumes:
+  homestead-node-modules:
+  homestead-data:
