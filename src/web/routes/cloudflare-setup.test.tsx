@@ -89,13 +89,18 @@ describe("CloudflareSetup", () => {
 
     await screen.findByPlaceholderText(/api token/i);
 
-    // This exact set was verified against a live account-owned token: with
-    // these five and nothing else, /accounts, /zones, cfd_tunnel, access apps,
-    // policies, service tokens and identity providers all answered.
+    // Verified against a live account-owned token: five of these were enough
+    // for /accounts, /zones, cfd_tunnel, access apps, policies and service
+    // tokens. Identity Providers Read is the sixth, and it was missed because
+    // the account had none at the time — see the note below.
     for (const permission of [
       /Cloudflare Tunnel · Edit/,
       /Access: Apps and Policies · Edit/,
       /Access: Service Tokens · Edit/,
+      // Omitting this looked fine while the account had no identity providers
+      // — Cloudflare returns an empty list rather than refusing — and broke the
+      // moment one existed.
+      /Access: Identity Providers · Read/,
       /Zone · Zone · Read/,
       /Zone · DNS · Edit/,
     ]) {

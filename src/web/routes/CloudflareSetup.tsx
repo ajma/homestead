@@ -160,12 +160,13 @@ function TokenStep({
               the Cloudflare dashboard
             </a>{" "}
             and go to <strong>Manage Account → Account API Tokens</strong>, then{" "}
-            <strong>Create Token</strong>, and add these five permissions:
+            <strong>Create Token</strong>, and add these six permissions:
           </p>
           <ul className="mt-1 list-disc space-y-0.5 pl-5">
             <li>Account · Cloudflare Tunnel · Edit</li>
             <li>Account · Access: Apps and Policies · Edit</li>
             <li>Account · Access: Service Tokens · Edit</li>
+            <li>Account · Access: Identity Providers · Read</li>
             <li>Zone · Zone · Read</li>
             <li>Zone · DNS · Edit</li>
           </ul>

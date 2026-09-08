@@ -172,7 +172,25 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       const client = clientFactory({ token });
 
       const zones = await client.listZones(accountId);
-      const idps = await client.listIdentityProviders(accountId);
+
+      // Cloudflare answers this with an empty list when the account has no
+      // identity providers, and with an authentication error when it has some
+      // the token may not read. Those mean opposite things to the operator, so
+      // do not let the second arrive as a 500 — or worse, get rounded down to
+      // "you have none" and send someone to configure what they already have.
+      let idps: Awaited<ReturnType<typeof client.listIdentityProviders>>;
+      try {
+        idps = await client.listIdentityProviders(accountId);
+      } catch (error) {
+        return reply.status(400).send({
+          error: "idp_unreadable",
+          missingScopes: ["Access: Identity Providers Read"],
+          detail:
+            "Could not read this account's identity providers. The token is " +
+            "probably missing the Access: Identity Providers Read permission. " +
+            `Cloudflare said: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
 
       // Store the account ID
       await db

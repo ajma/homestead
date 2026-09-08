@@ -265,6 +265,58 @@ describe("POST /api/cloudflare/token", () => {
     expect(res.body).not.toContain("secret-value-here");
   });
 
+  it("does not report unreadable identity providers as none configured", async () => {
+    // The account had two. The token could not read them, so Cloudflare
+    // answered with an authentication error — and before this, that surfaced
+    // as a 500. When there are zero it answers with an empty list instead, so
+    // the two cases are genuinely different and must not be conflated: telling
+    // someone to configure an IdP they already have sends them somewhere with
+    // nothing to do.
+    await app.close();
+    const mockCloudflare = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
+      verifyToken: async () => ({ ok: true }),
+      listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
+      listZones: async () => [{ id: "z1", name: "example.com" }],
+      listIdentityProviders: async () => {
+        throw new Error("Cloudflare API error (403): Authentication error");
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: test mock
+      request: async () => ({}) as any,
+    });
+
+    app = await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: root,
+      projectsHostDir: root,
+      dataDir: root,
+      cloudflare: mockCloudflare,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: PLAINTEXT_TOKEN },
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/account",
+      headers: { cookie: adminCookie },
+      payload: { accountId: "acc-123" },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error).toBe("idp_unreadable");
+    expect(body.detail).toMatch(/Identity Providers Read/);
+    // Not the other message, which would send them to configure one they have.
+    expect(body.detail).not.toMatch(/no identity providers configured/i);
+  });
+
   it("explains an empty account list instead of accepting the token", async () => {
     // Cloudflare answers GET /accounts with 200 and an empty array when the
     // token lacks User → Memberships → Read, so verifyToken sees nothing wrong.
