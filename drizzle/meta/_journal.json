@@ -71,6 +71,13 @@
       "when": 1788894877824,
       "tag": "0009_crazy_dazzler",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1788918878403,
+      "tag": "0010_public_check_gates_the_dot",
+      "breakpoints": true
     }
   ]
 }

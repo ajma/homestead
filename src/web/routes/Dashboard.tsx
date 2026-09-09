@@ -1,44 +1,96 @@
 import type { AppSummary } from "@shared/dashboard.js";
+import type { MonitorSummary } from "@shared/monitoring.js";
+import { useId, useState } from "react";
 import {
   EmptyState,
   Spinner,
   StaleNotice,
   StatusDot,
 } from "../components/ui/index.js";
+import { monitorLabel } from "../lib/monitor-labels.js";
 import { isRefusal, useDashboard } from "../lib/queries.js";
 
+/** One check behind the dot: what it is, how it answered, and why if it failed. */
+function MonitorRow({ monitor }: { monitor: MonitorSummary }) {
+  return (
+    <li className="flex items-start gap-2 py-1">
+      <span className="mt-1 shrink-0">
+        <StatusDot state={monitor.state} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="text-sm text-text">{monitorLabel(monitor.type)}</span>
+        {!monitor.required && (
+          <span className="text-xs text-muted ml-1">(advisory)</span>
+        )}
+        {monitor.error && (
+          <span className="block text-xs text-muted break-words">
+            {monitor.error}
+          </span>
+        )}
+      </span>
+    </li>
+  );
+}
+
 function AppTile({ app }: { app: AppSummary }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
   const isUp = app.status.state === "up";
-  const content = (
-    <>
-      <div className="flex items-center gap-3">
-        <StatusDot state={app.status.state} />
-        <span className="min-w-0 flex-1 truncate font-medium text-text">
-          {app.name}
-        </span>
+
+  return (
+    <article className="p-4 border border-border rounded-lg bg-surface">
+      <div className="flex items-center gap-1">
+        {/*
+          The dot is the disclosure, per the tile's whole point: the dot is a
+          rollup, and the question it provokes is "which part?". The button is
+          sized to the 44px tap target the e2e sweeps enforce rather than to
+          the glyph, which is far smaller than a fingertip.
+        */}
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-controls={panelId}
+          aria-label={`${open ? "Hide" : "Show"} checks for ${app.name}`}
+          className="grid place-items-center size-11 shrink-0 rounded-md hover:bg-raised"
+        >
+          <StatusDot state={app.status.state} />
+        </button>
+        {/*
+          The name links out, the dot expands. Previously the whole tile was
+          the link, which leaves nowhere to put a control: a button inside an
+          anchor is not valid, and the browser would have to guess which of
+          the two a tap meant.
+        */}
+        {app.hostname ? (
+          <a
+            href={`https://${app.hostname}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="min-w-0 flex-1 truncate font-medium text-text hover:underline py-3"
+          >
+            {app.name}
+          </a>
+        ) : (
+          <span className="min-w-0 flex-1 truncate font-medium text-text">
+            {app.name}
+          </span>
+        )}
       </div>
+
       {!isUp && app.tier && (
         <p className="text-sm text-muted mt-1">{app.tier}</p>
       )}
-    </>
-  );
 
-  if (app.hostname) {
-    return (
-      <a
-        href={`https://${app.hostname}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="block p-4 border border-border rounded-lg bg-surface hover:bg-raised min-h-11"
-      >
-        <article>{content}</article>
-      </a>
-    );
-  }
-
-  return (
-    <article className="p-4 border border-border rounded-lg bg-surface min-h-11">
-      {content}
+      {open && (
+        <ul id={panelId} className="mt-2 border-t border-border pt-2">
+          {app.monitors.length === 0 ? (
+            <li className="text-sm text-muted">No checks yet</li>
+          ) : (
+            app.monitors.map((m) => <MonitorRow key={m.id} monitor={m} />)
+          )}
+        </ul>
+      )}
     </article>
   );
 }

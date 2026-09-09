@@ -11,6 +11,7 @@ import {
   Spinner,
   StaleNotice,
 } from "../components/ui/index.js";
+import { monitorLabel } from "../lib/monitor-labels.js";
 import type { DeviceDetailData } from "../lib/queries.js";
 import {
   isRefusal,
@@ -74,11 +75,11 @@ function AddMonitorDialog({
             className="h-11 w-full rounded-md border border-border bg-surface px-3 text-sm"
             required
           >
-            <option value="tcp">TCP</option>
-            <option value="http">HTTP</option>
-            <option value="dns">DNS</option>
-            <option value="push">Push</option>
-            <option value="tailscale">Tailscale</option>
+            {(["tcp", "http", "dns", "push", "tailscale"] as const).map((t) => (
+              <option key={t} value={t}>
+                {monitorLabel(t)}
+              </option>
+            ))}
           </select>
         </div>
         {error && (

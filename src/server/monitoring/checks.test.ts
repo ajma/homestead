@@ -7,11 +7,14 @@ vi.mock("node:dns/promises");
 
 import { type CheckContext, executors } from "./checks.js";
 
-const ctx = (over: Partial<Parameters<typeof executors.push>[2]> = {}) => ({
+const ctx = (
+  over: Partial<Parameters<typeof executors.push>[2]> = {},
+): CheckContext => ({
   now: () => 10_000,
   lastPushAt: () => null,
   deviceConnected: () => null,
   containerState: async () => null,
+  accessServiceToken: () => null,
   ...over,
 });
 
@@ -490,13 +493,14 @@ describe("reachability executor", () => {
     const f = vi.fn(async () => new Response("", { status: 200 }));
     vi.stubGlobal("fetch", f);
     await executors.reachability(
-      {
-        url: "https://app.example.com",
-        clientId: "cid",
-        clientSecret: "csecret",
-      },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({
+          clientId: "cid",
+          clientSecret: "csecret",
+        }),
+      }),
     );
     expect(f).toHaveBeenCalledTimes(1);
     const calls = f.mock.calls as unknown as Array<[string, RequestInit]>;
@@ -513,9 +517,11 @@ describe("reachability executor", () => {
     const f = vi.fn(async () => new Response("", { status: 200 }));
     vi.stubGlobal("fetch", f);
     await executors.reachability(
-      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({ clientId: "c", clientSecret: "s" }),
+      }),
     );
     expect(f).toHaveBeenCalledTimes(1);
     const calls = f.mock.calls as unknown as Array<[string, RequestInit]>;
@@ -538,9 +544,11 @@ describe("reachability executor", () => {
     );
     vi.stubGlobal("fetch", f);
     const r = await executors.reachability(
-      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({ clientId: "c", clientSecret: "s" }),
+      }),
     );
     expect(r.up).toBe(false);
     expect(r.error).toMatch(/access/i);
@@ -557,9 +565,11 @@ describe("reachability executor", () => {
     );
     vi.stubGlobal("fetch", f);
     const r = await executors.reachability(
-      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({ clientId: "c", clientSecret: "s" }),
+      }),
     );
     expect(r.up).toBe(false);
     expect(r.error).toBe("HTTP 302");
@@ -579,9 +589,11 @@ describe("reachability executor", () => {
     );
     vi.stubGlobal("fetch", f);
     const r = await executors.reachability(
-      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({ clientId: "c", clientSecret: "s" }),
+      }),
     );
     expect(r.up).toBe(false);
     expect(r.error).toMatch(/access/i);
@@ -594,9 +606,11 @@ describe("reachability executor", () => {
       vi.fn(async () => new Response("", { status: 200 })),
     );
     const r = await executors.reachability(
-      { url: "https://app.example.com", clientId: "c", clientSecret: "s" },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({ clientId: "c", clientSecret: "s" }),
+      }),
     );
     expect(r.up).toBe(true);
     vi.unstubAllGlobals();
@@ -616,9 +630,11 @@ describe("reachability executor", () => {
       }),
     );
     const r = await executors.reachability(
-      { url: "https://app.example.com", clientId: "c", clientSecret: "SEKRIT" },
+      { url: "https://app.example.com" },
       1000,
-      ctx(),
+      ctx({
+        accessServiceToken: () => ({ clientId: "c", clientSecret: "SEKRIT" }),
+      }),
     );
     expect(r.error ?? "").not.toContain("SEKRIT");
     vi.unstubAllGlobals();

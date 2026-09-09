@@ -1,5 +1,6 @@
 import type { MonitorType } from "@shared/monitoring.js";
 import { describe, expect, it } from "vitest";
+import { configSchemas } from "../monitoring/checks.js";
 import { desiredMonitors, planReconcile } from "./reconcile.js";
 
 describe("desiredMonitors", () => {
@@ -10,38 +11,50 @@ describe("desiredMonitors", () => {
     hostPort: 8096,
   };
 
-  it("provisions three monitors for an unpublished app", () => {
+  it("provisions two monitors for an unpublished app", () => {
     // DNS and reachability need a hostname to be about.
     const types = desiredMonitors(app, null)
       .map((m) => m.type)
       .sort();
-    expect(types).toEqual(["docker", "http", "tcp"]);
+    expect(types).toEqual(["docker", "http"]);
+  });
+
+  it("never provisions tcp, which http already subsumes", () => {
+    // HTTP runs over TCP: a passing http check has already proved the
+    // handshake, so a tcp monitor could only ever restate it — while adding a
+    // second required gate that can fail on its own.
+    for (const hostname of [null, "jf.example.com"]) {
+      const types = desiredMonitors(app, hostname).map((m) => m.type);
+      expect(types).not.toContain("tcp");
+    }
   });
 
   it("adds dns and reachability once a hostname exists", () => {
     const types = desiredMonitors(app, "jf.example.com")
       .map((m) => m.type)
       .sort();
-    expect(types).toEqual(["dns", "docker", "http", "reachability", "tcp"]);
+    expect(types).toEqual(["dns", "docker", "http", "reachability"]);
   });
 
-  it("marks reachability advisory and the rest required", () => {
-    // A Cloudflare outage must not turn every published tile red.
-    const monitors = desiredMonitors(app, "jf.example.com");
-    const reach = monitors.find((m) => m.type === "reachability");
-    expect(reach?.required).toBe(false);
-    for (const m of monitors.filter((m) => m.type !== "reachability")) {
+  it("makes every monitor required, reachability included", () => {
+    // A published app nobody outside can reach is not green. The cost — one
+    // Cloudflare outage reddening every published tile — is accepted, and the
+    // expanded tile names the check that failed.
+    for (const m of desiredMonitors(app, "jf.example.com")) {
       expect(m.required, `${m.type} should be required`).toBe(true);
     }
   });
 
-  it("points the local checks at the published port", () => {
-    const monitors = desiredMonitors(app, null);
-    expect(monitors.find((m) => m.type === "tcp")?.config).toMatchObject({
-      port: 8096,
-    });
+  it("separates the internal URL from the public one", () => {
+    const monitors = desiredMonitors(app, "jf.example.com");
+    // Internal: loopback, no DNS and no Cloudflare in the path.
     expect(monitors.find((m) => m.type === "http")?.config).toMatchObject({
       url: "http://127.0.0.1:8096",
+    });
+    // Public: the URL a person would type. No credentials here — those come
+    // from the check context, so rotating the token rewrites one row.
+    expect(monitors.find((m) => m.type === "reachability")?.config).toEqual({
+      url: "https://jf.example.com",
     });
   });
 
@@ -139,5 +152,36 @@ describe("planReconcile", () => {
     expect(plan.update).toEqual([]);
     expect(plan.remove).toEqual([]);
     expect(plan.keep).toEqual(["m1"]);
+  });
+});
+
+describe("desiredMonitors matches the executors' config contracts", () => {
+  const app = {
+    key: "media:jellyfin",
+    projectSlug: "media",
+    service: "jellyfin",
+    hostPort: 8096,
+  };
+
+  // The seam. Each side of it was already tested in isolation: reconcile.test
+  // asserted what desiredMonitors produces, checks.test exercised executors
+  // against hand-written config. Nothing asserted the first satisfies the
+  // second, so a tcp config with no `host` shipped and pinned every app tile
+  // to "down" — not because anything was down, but because the check never
+  // got as far as opening a socket.
+  it.each([
+    ["without a hostname", null],
+    ["with a hostname", "jf.example.com"],
+  ])("every monitor it emits %s parses", (_label, hostname) => {
+    for (const monitor of desiredMonitors(app, hostname)) {
+      const schema = configSchemas[monitor.type];
+      const result = schema.safeParse(monitor.config);
+      expect(
+        result.success,
+        `${monitor.type} config ${JSON.stringify(monitor.config)} failed: ${
+          result.success ? "" : result.error.message
+        }`,
+      ).toBe(true);
+    }
   });
 });

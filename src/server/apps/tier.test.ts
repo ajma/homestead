@@ -84,19 +84,34 @@ describe("deriveTier", () => {
     expect(t.tier).toBe("verified");
   });
 
-  it("is degraded when it is locally up but publicly unreachable", () => {
-    // Two different outages. Conflating them sends you to the wrong place.
+  it("is down when it is locally up but publicly unreachable", () => {
+    // This was the `degraded` tier, back when reachability was advisory and
+    // could fail without moving the dot. Now that the public check gates,
+    // an app nobody outside can reach is down — and the reason still names
+    // reachability, so the two outages stay tellable apart.
+    const t = deriveTier([
+      m({ type: "docker" }),
+      m({ type: "reachability", required: true, up: false, error: "HTTP 502" }),
+    ]);
+    expect(t.tier).toBe("down");
+    expect(t.reason).toBe("reachability: HTTP 502");
+  });
+
+  it("is blocked, not down, when a required public check is refused by Access", () => {
+    // Both branches match once reachability is required. `blocked` has to be
+    // tested first or this reads as the raw "reachability: access: ..."
+    // string, which the marker exists to keep off the tile.
     const t = deriveTier([
       m({ type: "docker" }),
       m({
         type: "reachability",
-        required: false,
+        required: true,
         up: false,
-        error: "HTTP 502",
+        error: "access: Authentication failed",
       }),
     ]);
-    expect(t.tier).toBe("degraded");
-    expect(t.reason).toMatch(/unreachable/i);
+    expect(t.tier).toBe("blocked");
+    expect(t.reason).toBe("Authentication failed");
   });
 
   it("is responding when only an http check has answered", () => {

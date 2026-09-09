@@ -1,11 +1,10 @@
-import type { TargetStatus } from "./monitoring.js";
+import type { MonitorSummary, TargetStatus } from "./monitoring.js";
 
 export type AppSource = "project" | "manual";
 
 export type ConfidenceTier =
   | "verified"
   | "responding"
-  | "degraded"
   | "down"
   | "blocked"
   | "unknown";
@@ -24,6 +23,15 @@ export type AppSummary = {
   iconUrl: string | null;
   status: TargetStatus;
   tier: ConfidenceTier;
+  /**
+   * The checks behind the dot, in the order the tile lists them.
+   *
+   * The dot is a rollup, and a rollup of several checks answers "is it up"
+   * while hiding "which part is not". The route already assembles these to
+   * compute `status` and `tier`; sending them costs one array and saves the
+   * reader a trip to the database.
+   */
+  monitors: MonitorSummary[];
 };
 
 export type DeviceSummary = {

@@ -1,7 +1,8 @@
 import type { AppSummary, DashboardData } from "@shared/dashboard.js";
-import type { TargetStatus } from "@shared/monitoring.js";
+import type { MonitorSummary, TargetStatus } from "@shared/monitoring.js";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createQueryClient } from "../lib/queries.js";
@@ -13,6 +14,19 @@ function status(state: "up" | "down" | "unknown"): TargetStatus {
   return { state, reason: null };
 }
 
+function monitor(over: Partial<MonitorSummary> = {}): MonitorSummary {
+  return {
+    id: "m1",
+    type: "http",
+    required: true,
+    enabled: true,
+    state: "up",
+    lastCheckedAt: 1_700_000_000_000,
+    error: null,
+    ...over,
+  };
+}
+
 function app(over: Partial<AppSummary> = {}): AppSummary {
   return {
     key: "jellyfin:web",
@@ -22,6 +36,7 @@ function app(over: Partial<AppSummary> = {}): AppSummary {
     service: "web",
     hostPort: 8096,
     hostname: "jellyfin.example.com",
+    monitors: [],
     iconSlug: null,
     iconUrl: null,
     status: status("up"),
@@ -84,7 +99,7 @@ describe("Dashboard", () => {
 
   it("shows tier as detail text for non-green dots", async () => {
     stubDashboard({
-      apps: [app({ status: status("down"), tier: "degraded" })],
+      apps: [app({ status: status("down"), tier: "blocked" })],
       devices: [],
       projectCount: 1,
     });
@@ -92,7 +107,7 @@ describe("Dashboard", () => {
 
     const tile = await screen.findByRole("article");
     expect(tile.querySelector(".bg-danger")).toBeInTheDocument();
-    expect(within(tile).getByText("degraded")).toBeInTheDocument();
+    expect(within(tile).getByText("blocked")).toBeInTheDocument();
   });
 
   it("links a tile with a hostname to that hostname", async () => {
@@ -119,6 +134,66 @@ describe("Dashboard", () => {
     expect(tile).toBeInTheDocument();
     expect(within(tile).getByText("Jellyfin")).toBeInTheDocument();
     expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("keeps the checks hidden until the dot is tapped, then names each one", async () => {
+    // The dot answers "is it up". Which part is not up is the next question,
+    // and it used to have no answer anywhere in the UI.
+    stubDashboard({
+      apps: [
+        app({
+          status: status("down"),
+          tier: "down",
+          monitors: [
+            monitor({ id: "1", type: "docker", state: "up" }),
+            monitor({ id: "2", type: "http", state: "up" }),
+            monitor({
+              id: "3",
+              type: "reachability",
+              state: "down",
+              error: "HTTP 502",
+            }),
+          ],
+        }),
+      ],
+      devices: [],
+      projectCount: 1,
+    });
+    renderDashboard();
+
+    const tile = await screen.findByRole("article");
+    expect(within(tile).queryByText("Container")).toBeNull();
+
+    const toggle = within(tile).getByRole("button", { name: /show checks/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(within(tile).getByText("Container")).toBeInTheDocument();
+    // The two HTTP checks have to be tellable apart: same verb, different
+    // vantage point, and here one passes while the other does not.
+    expect(within(tile).getByText("HTTP (internal)")).toBeInTheDocument();
+    expect(within(tile).getByText("HTTP (public)")).toBeInTheDocument();
+    expect(within(tile).getByText("HTTP 502")).toBeInTheDocument();
+  });
+
+  it("expands without following the tile's link", async () => {
+    // The dot is a button and the name is the link. Were the whole tile still
+    // an anchor, there would be nowhere valid to put the control.
+    stubDashboard({
+      apps: [
+        app({ monitors: [monitor({ id: "1", type: "docker", state: "up" })] }),
+      ],
+      devices: [],
+      projectCount: 1,
+    });
+    renderDashboard();
+
+    const tile = await screen.findByRole("article");
+    const toggle = within(tile).getByRole("button", { name: /show checks/i });
+    expect(toggle.closest("a")).toBeNull();
+    await userEvent.click(toggle);
+    expect(within(tile).getByText("Container")).toBeInTheDocument();
   });
 
   it("shows no device section for a viewer", async () => {

@@ -29,8 +29,15 @@ export type ReconcilePlan = {
 
 /**
  * Determine which monitors an app should have based on whether it has a hostname.
- * Apps without a hostname get local checks only (docker, tcp, http).
- * Apps with a hostname get those plus dns and reachability.
+ *
+ * Unpublished apps get `docker` (is the container alive) and `http` (does it
+ * answer on the loopback address). Published apps add `dns` and
+ * `reachability` — the same request from outside, through Cloudflare Access.
+ *
+ * There is deliberately no `tcp` monitor. HTTP runs over TCP, so a passing
+ * `http` check already proves the handshake; as a gate it could only ever
+ * restate what `http` said. It remains available for devices, where the
+ * protocol behind a port is unknown.
  */
 export function desiredMonitors(
   app: EnumeratedApp,
@@ -46,13 +53,7 @@ export function desiredMonitors(
     required: true,
   });
 
-  monitors.push({
-    targetId: app.key,
-    type: "tcp",
-    config: { port: app.hostPort },
-    required: true,
-  });
-
+  // The internal check: loopback, no DNS, no Cloudflare in the path.
   monitors.push({
     targetId: app.key,
     type: "http",
@@ -69,11 +70,19 @@ export function desiredMonitors(
       required: true,
     });
 
+    // The public check: the URL a person would type, through Access. Only the
+    // URL is stored — the probe's service token comes from the check context,
+    // so rotating it does not mean rewriting a row per app, and the secret
+    // lives in one settings row rather than one per monitor.
+    //
+    // Required, so a published app that nobody outside can reach does not
+    // report green. The cost is that a Cloudflare outage reddens every
+    // published tile at once; the expanded tile names which check failed.
     monitors.push({
       targetId: app.key,
       type: "reachability",
-      config: { hostname },
-      required: false, // Advisory - Cloudflare outage shouldn't make all tiles red
+      config: { url: `https://${hostname}` },
+      required: true,
     });
   }
 

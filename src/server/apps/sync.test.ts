@@ -17,9 +17,9 @@ describe("syncAppMonitors", () => {
       }),
       hostnameFor: async () => null,
     });
-    expect(created.created).toBe(3);
+    expect(created.created).toBe(2);
     const rows = await db.select().from(monitors);
-    expect(rows.map((r) => r.type).sort()).toEqual(["docker", "http", "tcp"]);
+    expect(rows.map((r) => r.type).sort()).toEqual(["docker", "http"]);
     expect(rows.every((r) => r.targetType === "app")).toBe(true);
     expect(rows.every((r) => r.targetId === "media:jellyfin")).toBe(true);
   });
@@ -37,11 +37,11 @@ describe("syncAppMonitors", () => {
     });
 
     await syncAppMonitors(db, deps(withPort));
-    expect(await db.select().from(monitors)).toHaveLength(3);
+    expect(await db.select().from(monitors)).toHaveLength(2);
 
     // The port is gone from the compose file.
     const r = await syncAppMonitors(db, deps({ services: { jellyfin: {} } }));
-    expect(r.removed).toBe(3);
+    expect(r.removed).toBe(2);
     expect(await db.select().from(monitors)).toHaveLength(0);
   });
 
@@ -61,22 +61,23 @@ describe("syncAppMonitors", () => {
     };
 
     await syncAppMonitors(db, deps);
-    const [tcp] = await db
+    const [probe] = await db
       .select()
       .from(monitors)
-      .where(eq(monitors.type, "tcp"));
-    if (!tcp) throw new Error("expected a tcp monitor after the first sync");
+      .where(eq(monitors.type, "http"));
+    if (!probe)
+      throw new Error("expected an http monitor after the first sync");
     await db
       .update(monitors)
       .set({ intervalSeconds: 600, required: false })
-      .where(eq(monitors.id, tcp.id));
+      .where(eq(monitors.id, probe.id));
 
     await syncAppMonitors(db, deps);
 
     const [after] = await db
       .select()
       .from(monitors)
-      .where(eq(monitors.id, tcp.id));
+      .where(eq(monitors.id, probe.id));
     expect(after).toMatchObject({ intervalSeconds: 600, required: false });
   });
 
@@ -93,7 +94,7 @@ describe("syncAppMonitors", () => {
       composeConfig: async () => good,
       hostnameFor: async () => null,
     });
-    expect(await db.select().from(monitors)).toHaveLength(3);
+    expect(await db.select().from(monitors)).toHaveLength(2);
 
     const r = await syncAppMonitors(db, {
       listProjects: async () => ["media"],
@@ -104,11 +105,11 @@ describe("syncAppMonitors", () => {
     });
 
     expect(r.removed).toBe(0);
-    expect(await db.select().from(monitors)).toHaveLength(3);
+    expect(await db.select().from(monitors)).toHaveLength(2);
   });
 
   it("updates monitor config when port changes, preserving user edits", async () => {
-    // When a service moves from port 8096 to 9096, the tcp and http monitors
+    // When a service moves from port 8096 to 9096, the http monitor
     // must point at the new port. But a user-edited intervalSeconds must survive.
     const db = createDb(":memory:");
     await runMigrations(db);
@@ -122,17 +123,17 @@ describe("syncAppMonitors", () => {
 
     // Sync at port 8096
     await syncAppMonitors(db, deps("8096"));
-    const [tcp] = await db
+    const [probe] = await db
       .select()
       .from(monitors)
-      .where(eq(monitors.type, "tcp"));
-    if (!tcp) throw new Error("expected a tcp monitor");
+      .where(eq(monitors.type, "http"));
+    if (!probe) throw new Error("expected an http monitor");
 
     // User edits the interval
     await db
       .update(monitors)
       .set({ intervalSeconds: 600 })
-      .where(eq(monitors.id, tcp.id));
+      .where(eq(monitors.id, probe.id));
 
     // Port changes to 9096
     await syncAppMonitors(db, deps("9096"));
@@ -140,8 +141,10 @@ describe("syncAppMonitors", () => {
     const [updated] = await db
       .select()
       .from(monitors)
-      .where(eq(monitors.id, tcp.id));
-    expect(updated?.config).toBe(JSON.stringify({ port: 9096 }));
+      .where(eq(monitors.id, probe.id));
+    expect(updated?.config).toBe(
+      JSON.stringify({ url: "http://127.0.0.1:9096" }),
+    );
     expect(updated?.intervalSeconds).toBe(600);
   });
 
@@ -177,8 +180,8 @@ describe("syncAppMonitors", () => {
       .from(monitors)
       .where(eq(monitors.targetId, "dev:nginx"));
 
-    expect(mediaMonitors).toHaveLength(3);
-    expect(devMonitors).toHaveLength(3);
+    expect(mediaMonitors).toHaveLength(2);
+    expect(devMonitors).toHaveLength(2);
   });
 
   it("reconciles other projects when one throws a parse error", async () => {
@@ -213,6 +216,6 @@ describe("syncAppMonitors", () => {
       .select()
       .from(monitors)
       .where(eq(monitors.targetId, "dev:nginx"));
-    expect(devMonitors).toHaveLength(3);
+    expect(devMonitors).toHaveLength(2);
   });
 });

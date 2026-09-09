@@ -1,4 +1,5 @@
 import type { MonitorSummary } from "@shared/monitoring.js";
+import { monitorLabel } from "../lib/monitor-labels.js";
 import { IconButton, StatusDot } from "./ui/index.js";
 
 type MonitorEditorProps = {
@@ -32,8 +33,8 @@ export function MonitorEditor({
           className="flex min-h-11 items-center gap-3 px-4 py-2"
         >
           <StatusDot state={monitor.state} />
-          <span className="flex-1 text-sm font-medium capitalize">
-            {monitor.type}
+          <span className="flex-1 text-sm font-medium">
+            {monitorLabel(monitor.type)}
           </span>
           <span className="text-xs text-muted">
             {formatRelativeTime(monitor.lastCheckedAt)}

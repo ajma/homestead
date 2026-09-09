@@ -219,13 +219,13 @@ describe("GET /api/dashboard", () => {
 
   it("shows project-backed app with projectSlug, service and hostPort", async () => {
     // Create monitors for a project-backed app (jellyfin:web)
-    const tcpMonitorId = randomUUID();
+    const httpMonitorId = randomUUID();
     await db.insert(monitors).values({
-      id: tcpMonitorId,
+      id: httpMonitorId,
       targetType: "app",
       targetId: "jellyfin:web",
-      type: "tcp",
-      config: JSON.stringify({ port: 8096 }),
+      type: "http",
+      config: JSON.stringify({ url: "http://127.0.0.1:8096" }),
       intervalSeconds: 60,
       timeoutMs: 5000,
       required: true,
@@ -254,9 +254,9 @@ describe("GET /api/dashboard", () => {
 
   it("project app with hostname carries it", async () => {
     // Create monitors for a project-backed app with hostname
-    const tcpMonitorId = randomUUID();
+    const httpMonitorId = randomUUID();
     await db.insert(monitors).values({
-      id: tcpMonitorId,
+      id: httpMonitorId,
       targetType: "app",
       targetId: "nextcloud:app",
       type: "tcp",
@@ -323,8 +323,8 @@ describe("GET /api/dashboard", () => {
       id: projectMonitorId,
       targetType: "app",
       targetId: "plex:server",
-      type: "tcp",
-      config: JSON.stringify({ port: 32400 }),
+      type: "http",
+      config: JSON.stringify({ url: "http://127.0.0.1:32400" }),
       intervalSeconds: 60,
       timeoutMs: 5000,
       required: true,

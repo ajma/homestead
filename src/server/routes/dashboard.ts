@@ -5,7 +5,7 @@ import type {
   AppSummary,
   DeviceSummary as DashboardDeviceSummary,
 } from "@shared/dashboard.js";
-import type { MonitorType } from "@shared/monitoring.js";
+import type { MonitorSummary, MonitorType } from "@shared/monitoring.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
@@ -15,7 +15,24 @@ import type { Db } from "../db/client.js";
 import { checks, devices, manualApps, monitors } from "../db/schema.js";
 import type { MonitorLatest } from "../monitoring/status.js";
 import { resolveStatus } from "../monitoring/status.js";
+
 import { scanProjects } from "../projects/store.js";
+
+/**
+ * A monitor's row on an expanded tile. `up: null` becomes "unknown" rather
+ * than a third boolean, so the dot component takes one union and no nulls.
+ */
+function toMonitorSummary(m: MonitorLatest): MonitorSummary {
+  return {
+    id: m.id,
+    type: m.type,
+    required: m.required,
+    enabled: m.enabled,
+    state: m.up === null ? "unknown" : m.up ? "up" : "down",
+    lastCheckedAt: m.at,
+    error: m.error,
+  };
+}
 
 type Opts = {
   db: Db;
@@ -113,6 +130,7 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
 
           const status = resolveStatus(monitorLatest);
           const { tier } = deriveTier(monitorLatest);
+          const monitorSummaries = monitorLatest.map(toMonitorSummary);
 
           // Determine if this is a manual or project app
           if (targetId.startsWith("manual:")) {
@@ -137,6 +155,7 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
               iconUrl: manualApp.iconUrl,
               status,
               tier,
+              monitors: monitorSummaries,
             };
           }
 
@@ -149,29 +168,46 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
           const projectSlug = targetId.slice(0, colonIndex);
           const service = targetId.slice(colonIndex + 1);
 
-          // Get hostPort from tcp monitor config
-          const tcpMonitor = appMonitors.find((m) => m.type === "tcp");
+          // Get hostPort from the internal http monitor's URL.
+          //
+          // This read the tcp monitor's `port` until tcp stopped being
+          // provisioned for apps. The http monitor is the one that now always
+          // exists, and its loopback URL carries the same number.
+          const httpMonitor = appMonitors.find((m) => m.type === "http");
           let hostPort: number | null = null;
-          if (tcpMonitor) {
+          if (httpMonitor) {
             try {
-              const config = JSON.parse(tcpMonitor.config);
-              hostPort = config.port ?? null;
+              const config = JSON.parse(httpMonitor.config);
+              const port = Number(new URL(config.url).port);
+              hostPort = Number.isFinite(port) && port > 0 ? port : null;
             } catch {
               // Invalid config, leave as null
             }
           }
 
-          // Get hostname from dns or reachability monitor config
-          const hostnameMonitor =
-            appMonitors.find((m) => m.type === "dns") ??
-            appMonitors.find((m) => m.type === "reachability");
+          // Get hostname from the dns monitor, falling back to the public
+          // check's URL. The two carry it differently — dns stores a bare
+          // hostname, reachability a full URL — so each needs its own read.
           let hostname: string | null = null;
-          if (hostnameMonitor) {
+          const dnsMonitor = appMonitors.find((m) => m.type === "dns");
+          if (dnsMonitor) {
             try {
-              const config = JSON.parse(hostnameMonitor.config);
-              hostname = config.hostname ?? null;
+              hostname = JSON.parse(dnsMonitor.config).hostname ?? null;
             } catch {
               // Invalid config, leave as null
+            }
+          }
+          if (!hostname) {
+            const reachMonitor = appMonitors.find(
+              (m) => m.type === "reachability",
+            );
+            if (reachMonitor) {
+              try {
+                hostname = new URL(JSON.parse(reachMonitor.config).url)
+                  .hostname;
+              } catch {
+                // Invalid config, leave as null
+              }
             }
           }
 
@@ -187,6 +223,7 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
             iconUrl: null,
             status,
             tier,
+            monitors: monitorSummaries,
           };
         })
         .filter((app): app is AppSummary => app !== null);

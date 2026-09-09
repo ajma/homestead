@@ -25,6 +25,11 @@ export type CheckContext = {
     state: string;
     health: string | null;
   } | null>;
+  /** The Cloudflare Access service token the `reachability` executor presents,
+   *  or null when Cloudflare has not been set up. Resolved once per tick for
+   *  the same reason `deviceConnected` is: reading it per monitor would mean
+   *  one decrypt per published app, every interval. */
+  accessServiceToken: () => { clientId: string; clientSecret: string } | null;
 };
 
 export type CheckExecutor = (
@@ -55,16 +60,40 @@ const dnsConfigSchema = z.object({
   hostname: z.string(),
 });
 
+/**
+ * Only the URL. The Access service token arrives through {@link CheckContext},
+ * not through here: a credential copied into every monitor's config row would
+ * have to be rewritten on every rotation, and would put the plaintext secret
+ * in as many rows as there are published apps instead of one.
+ */
 const reachabilityConfigSchema = z.object({
   url: z.string(),
-  clientId: z.string(),
-  clientSecret: z.string(),
 });
 
 const dockerConfigSchema = z.object({
   projectSlug: z.string(),
   service: z.string(),
 });
+
+/**
+ * The config contract each executor validates, keyed by monitor type.
+ *
+ * Exported so a producer of monitor config can be checked against the consumer
+ * without running the executor — which would mean real network I/O in a unit
+ * test. `desiredMonitors` emitted a tcp config with no `host` and a
+ * reachability config shaped for an entirely different schema; both sides had
+ * tests, neither test crossed the seam, and every app tile read "down" for the
+ * validation error rather than for anything about the app.
+ */
+export const configSchemas: Record<MonitorType, z.ZodType> = {
+  push: pushConfigSchema,
+  tailscale: tailscaleConfigSchema,
+  tcp: tcpConfigSchema,
+  http: httpConfigSchema,
+  dns: dnsConfigSchema,
+  reachability: reachabilityConfigSchema,
+  docker: dockerConfigSchema,
+};
 
 async function pushExecutor(
   config: unknown,
@@ -303,7 +332,7 @@ async function dnsExecutor(
 async function reachabilityExecutor(
   config: unknown,
   timeoutMs: number,
-  _ctx: CheckContext,
+  ctx: CheckContext,
 ): Promise<CheckResult> {
   const start = performance.now();
   const parsed = reachabilityConfigSchema.safeParse(config);
@@ -316,7 +345,21 @@ async function reachabilityExecutor(
     };
   }
 
-  const { url, clientId, clientSecret } = parsed.data;
+  const { url } = parsed.data;
+
+  // No token means Cloudflare was never set up, which is a configuration
+  // state rather than an outage. Reported as down because a published app we
+  // cannot probe is not something to call green, but with a message that
+  // sends the reader to the setup screen instead of to the app's logs.
+  const token = ctx.accessServiceToken();
+  if (!token) {
+    return {
+      up: false,
+      durationMs: performance.now() - start,
+      error: "No Access service token — finish Cloudflare setup",
+    };
+  }
+  const { clientId, clientSecret } = token;
 
   try {
     const response = await fetch(url, {

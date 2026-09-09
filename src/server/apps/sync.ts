@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { MonitorType } from "@shared/monitoring.js";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { monitors } from "../db/schema.js";
+import { checkRollups, checks, monitors } from "../db/schema.js";
 import { enumerateApps } from "./enumerate.js";
 import { desiredMonitors, planReconcile } from "./reconcile.js";
 
@@ -94,8 +94,13 @@ export async function syncAppMonitors(
           .where(eq(monitors.id, upd.id));
       }
 
-      // Apply the plan: remove obsolete monitors
+      // Apply the plan: remove obsolete monitors.
+      // Checks first: there is no cascade on `checks.monitor_id`, so deleting
+      // only the monitor leaves its history addressed to an id nothing can
+      // resolve — invisible, unprunable, and counted by every rollup.
       for (const id of plan.remove) {
+        await db.delete(checks).where(eq(checks.monitorId, id));
+        await db.delete(checkRollups).where(eq(checkRollups.monitorId, id));
         await db.delete(monitors).where(eq(monitors.id, id));
         removed++;
       }
@@ -112,6 +117,10 @@ export async function syncAppMonitors(
       // Check if this monitor belongs to this project
       if (mon.targetId.startsWith(`${projectSlug}:`)) {
         if (!currentAppKeys.has(mon.targetId)) {
+          await db.delete(checks).where(eq(checks.monitorId, mon.id));
+          await db
+            .delete(checkRollups)
+            .where(eq(checkRollups.monitorId, mon.id));
           await db.delete(monitors).where(eq(monitors.id, mon.id));
           removed++;
         }

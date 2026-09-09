@@ -25,6 +25,17 @@ export type RunnerDeps = {
   projectsDir?: string;
   projectsHostDir?: string;
   dataDir?: string;
+  /**
+   * Resolves the Cloudflare Access service token the `reachability` executor
+   * presents. Injected rather than read here because decrypting it needs the
+   * instance secret key, which is composition-root state; the runner should
+   * not have to hold a key to schedule a check. Called at most once per tick,
+   * and only when a reachability monitor is actually due.
+   */
+  accessServiceToken?: () => Promise<{
+    clientId: string;
+    clientSecret: string;
+  } | null>;
 };
 
 const TICK_INTERVAL_MS = 10_000;
@@ -50,6 +61,7 @@ export function createRunner(deps: RunnerDeps): {
     projectsDir,
     projectsHostDir,
     dataDir,
+    accessServiceToken,
   } = deps;
   let timer: { cancel: () => void } | null = null;
   let lastRollupAt = 0;
@@ -101,10 +113,29 @@ export function createRunner(deps: RunnerDeps): {
         }
       }
 
+      // Same shape as deviceConnectionMap above: resolved once for the tick,
+      // and only when something needs it. A published app per tile would
+      // otherwise mean a settings read and a decrypt each, every interval.
+      let accessToken: { clientId: string; clientSecret: string } | null = null;
+      if (accessServiceToken && due.some((m) => m.type === "reachability")) {
+        try {
+          accessToken = await accessServiceToken();
+        } catch {
+          // Leave it null: the executor reports the missing token per monitor,
+          // which is a check result rather than a dead tick.
+          accessToken = null;
+        }
+      }
+
       // Execute monitors concurrently with bounded pool
       await executeWithPool(due, POOL_SIZE, async (monitor) => {
         try {
-          await executeMonitor(monitor, currentTime, deviceConnectionMap);
+          await executeMonitor(
+            monitor,
+            currentTime,
+            deviceConnectionMap,
+            accessToken,
+          );
         } catch (err) {
           // One monitor's failure must not affect others - record as failed check
           await recordFailedCheck(monitor, currentTime, err);
@@ -152,6 +183,7 @@ export function createRunner(deps: RunnerDeps): {
     monitor: typeof monitors.$inferSelect,
     currentTime: number,
     deviceConnectionMap: Map<string, boolean | null> | null,
+    accessToken: { clientId: string; clientSecret: string } | null,
   ): Promise<void> {
     const executor = executors[monitor.type as MonitorType];
     if (!executor) {
@@ -182,6 +214,7 @@ export function createRunner(deps: RunnerDeps): {
       lastPushAt: () => monitor.lastPushAt ?? null,
       deviceConnected: (deviceId: string) =>
         deviceConnectionMap?.get(deviceId) ?? null,
+      accessServiceToken: () => accessToken,
       containerState: async (projectSlug: string, service: string) => {
         // Return null if docker monitor dependencies are not configured
         if (!projectsDir || !projectsHostDir || !dataDir) {

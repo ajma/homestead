@@ -134,10 +134,26 @@ async function main(): Promise<void> {
     });
   };
 
+  // Resolves the probe's Access service token for the reachability monitor.
+  // Lives here rather than in the runner because decrypting needs the instance
+  // key, and the runner is deliberately given no access to it.
+  const accessServiceToken = async (): Promise<{
+    clientId: string;
+    clientSecret: string;
+  } | null> => {
+    const settingsRows = await db.select().from(settings);
+    const settingsMap = new Map(settingsRows.map((r) => [r.key, r.value]));
+    const clientId = settingsMap.get("cloudflare.serviceTokenClientId");
+    const encryptedSecret = settingsMap.get("cloudflare.serviceTokenSecret");
+    if (!clientId || !encryptedSecret) return null;
+    return { clientId, clientSecret: decrypt(encryptedSecret, key) };
+  };
+
   // Start the monitor runner AFTER buildApp, so route tests never start it
   const runner = createRunner({
     db,
     now: () => Date.now(),
+    accessServiceToken,
     setTimer: (fn, ms) => {
       const id = setInterval(fn, ms);
       return { cancel: () => clearInterval(id) };

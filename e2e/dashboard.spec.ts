@@ -20,6 +20,7 @@ test("the dashboard renders at desktop width", async ({ page }) => {
         hostname: "jellyfin.example.com",
         iconSlug: null,
         iconUrl: null,
+        monitors: [],
         status: { state: "up", reason: null },
         tier: "verified",
       },
@@ -59,6 +60,7 @@ test("the dashboard renders at phone width", async ({ page }) => {
         hostname: "jellyfin.example.com",
         iconSlug: null,
         iconUrl: null,
+        monitors: [],
         status: { state: "up", reason: null },
         tier: "verified",
       },
@@ -97,6 +99,7 @@ test("a project-backed app renders as a tile", async ({ page }) => {
         hostname: null,
         iconSlug: null,
         iconUrl: null,
+        monitors: [],
         status: { state: "up", reason: null },
         tier: "verified",
       },
@@ -132,6 +135,7 @@ test("an app with no hostname renders as a non-link tile", async ({ page }) => {
         hostname: null,
         iconSlug: null,
         iconUrl: null,
+        monitors: [],
         status: { state: "up", reason: null },
         tier: "verified",
       },
@@ -171,6 +175,7 @@ test("an app with a hostname renders as a link to that hostname", async ({
         hostname: "jellyfin.example.com",
         iconSlug: null,
         iconUrl: null,
+        monitors: [],
         status: { state: "up", reason: null },
         tier: "verified",
       },
@@ -206,8 +211,12 @@ test("a non-green tile shows its tier text", async ({ page }) => {
         hostname: null,
         iconSlug: null,
         iconUrl: null,
+        monitors: [],
         status: { state: "down", reason: null },
-        tier: "degraded",
+        // Not "down": the dot's own accessible label is the state, so a tier
+        // spelled the same way matches twice and the assertion cannot tell
+        // which element it found.
+        tier: "blocked",
       },
     ],
     devices: [],
@@ -226,7 +235,7 @@ test("a non-green tile shows its tier text", async ({ page }) => {
   const tile = page.getByRole("article");
   await expect(tile).toBeVisible();
   await expect(tile.getByText("Jellyfin")).toBeVisible();
-  await expect(tile.getByText("degraded")).toBeVisible();
+  await expect(tile.getByText("blocked")).toBeVisible();
 });
 
 test("empty state: no projects at all", async ({ page }) => {
