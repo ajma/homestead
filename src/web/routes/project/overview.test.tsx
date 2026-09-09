@@ -61,7 +61,6 @@ const detail = (): ProjectDetailData =>
     parseError: null,
     states: [],
     statesError: null,
-    hasHomestead: true,
     snapshots: [],
   }) as unknown as ProjectDetailData;
 

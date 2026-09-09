@@ -42,14 +42,6 @@ export type ServiceModel = {
   app: AppMeta | null;
 };
 
-export type ProjectMeta = {
-  schemaVersion: number;
-  displayName?: string;
-  description?: string;
-  icon?: string;
-  system: boolean;
-};
-
 export type VolumeRef = {
   /** The compose file's key for this volume. */
   key: string;
@@ -64,7 +56,6 @@ export type ProjectModel = {
   services: ServiceModel[];
   /** Top-level named volumes this project owns, sorted by key. */
   volumes: VolumeRef[];
-  meta: ProjectMeta;
 };
 
 /**

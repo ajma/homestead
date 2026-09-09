@@ -399,12 +399,14 @@ describe("POST /api/projects", () => {
     });
     expect(res.statusCode).toBe(201);
     expect(res.json()).toMatchObject({ slug: "media", valid: true });
-    // The scaffold is on disk under the new slug, carrying its provenance.
+    // The scaffold is on disk under the new slug, and carries no provenance
+    // block: nothing reads one any more.
     const file = await readFile(
       join(root, "media", "docker-compose.yml"),
       "utf8",
     );
-    expect(file).toContain("x-homestead");
+    expect(file).toContain("name: media");
+    expect(file).not.toContain("x-homestead");
   });
 
   it("stores an invalid paste rather than rejecting it", async () => {
@@ -723,69 +725,11 @@ describe("DELETE /api/projects/:slug", () => {
 });
 
 describe("GET /api/projects/:slug — provenance", () => {
-  it("reports hasHomestead true for a project Homestead created", async () => {
-    await app.inject({
-      method: "POST",
-      url: "/api/projects",
-      headers: { cookie: adminCookie },
-      payload: { slug: "made", source: "blank" },
-    });
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/projects/made",
-      headers: { cookie: adminCookie },
-    });
-    expect(res.json()).toMatchObject({ hasHomestead: true });
-  });
-
-  it("reports hasHomestead false for an adopted directory", async () => {
-    // Absence of the x-homestead block IS the provenance marker (§3.7) — this
-    // is what makes deletion ask twice for a directory we did not create.
-    await mkdir(join(root, "adopted"), { recursive: true });
-    await writeFile(
-      join(root, "adopted", "docker-compose.yml"),
-      "services:\n  web:\n    image: nginx\n",
-      "utf8",
-    );
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/projects/adopted",
-      headers: { cookie: adminCookie },
-    });
-    expect(res.json()).toMatchObject({ hasHomestead: false });
-  });
-});
-
-describe("project identity", () => {
-  it("stores a display name, description and icon", async () => {
-    const put = await app.inject({
-      method: "PUT",
-      url: `/api/projects/${slug}/identity`,
-      headers: { cookie: adminCookie },
-      payload: {
-        displayName: "Media Stack",
-        description: "Jellyfin and friends",
-        iconSlug: "jellyfin",
-      },
-    });
-    expect(put.statusCode).toBe(200);
-
-    const res = await app.inject({
-      method: "GET",
-      url: `/api/projects/${slug}`,
-      headers: { cookie: adminCookie },
-    });
-    expect(res.json().identity).toMatchObject({
-      displayName: "Media Stack",
-      description: "Jellyfin and friends",
-      iconSlug: "jellyfin",
-    });
-  });
-
-  it("leaves the compose file untouched and the project still adopted", async () => {
-    // The whole reason identity is in SQLite. Writing x-homestead would flip
-    // hasHomestead, which the delete dialog reads to decide whether to confirm
-    // twice — so naming a project would quietly make it easier to delete.
+  it("leaves the compose file untouched when identity is set", async () => {
+    // Identity lives in SQLite, so naming a project must not rewrite a file
+    // the user owns. This was originally about provenance — writing an
+    // x-homestead block would have reclassified the project — and it outlives
+    // that reason: the compose file describes the stack, not its presentation.
     const file = join(root, slug, "docker-compose.yml");
     const before = await readFile(file, "utf8");
 
@@ -797,12 +741,6 @@ describe("project identity", () => {
     });
 
     expect(await readFile(file, "utf8")).toBe(before);
-    const res = await app.inject({
-      method: "GET",
-      url: `/api/projects/${slug}`,
-      headers: { cookie: adminCookie },
-    });
-    expect(res.json().hasHomestead).toBe(false);
   });
 
   it("reports no identity for a project that has none", async () => {

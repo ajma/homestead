@@ -106,20 +106,6 @@ describe("parseCanonical", () => {
     expect(parseCanonical(json).services[0]?.app?.name).toBe("grafana");
   });
 
-  it("reads x-homestead project metadata", () => {
-    expect(parseCanonical(CANONICAL).meta).toEqual({
-      schemaVersion: 1,
-      displayName: "Media Stack",
-      icon: "jellyfin",
-      system: false,
-    });
-  });
-
-  it("supplies defaults when x-homestead is absent", () => {
-    const meta = parseCanonical({ name: "p", services: {} }).meta;
-    expect(meta).toEqual({ schemaVersion: 1, system: false });
-  });
-
   it("throws on input that is not a compose config", () => {
     expect(() => parseCanonical({ services: {} })).toThrow(/name/);
   });

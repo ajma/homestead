@@ -47,12 +47,10 @@ function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
       projectName: "media",
       services: [],
       volumes: [],
-      meta: { schemaVersion: 1, system: false },
     },
     parseError: null,
     states: [],
     statesError: null,
-    hasHomestead: true,
     snapshots: [],
     ...over,
   };
@@ -91,7 +89,7 @@ describe("DeleteProjectDialog", () => {
     expect(dangerButton()).toBeEnabled();
   });
 
-  it("deletes a Homestead-created project on one confirmation", async () => {
+  it("deletes on one confirmation", async () => {
     const fetchMock = mockFetch();
     const { user, onClose } = renderDialog(detail());
 
@@ -107,71 +105,6 @@ describe("DeleteProjectDialog", () => {
     expect(init.method).toBe("DELETE");
     await waitFor(() => expect(navigate).toHaveBeenCalledWith("/projects"));
     expect(onClose).toHaveBeenCalled();
-  });
-
-  it("asks an adopted project twice, and sends nothing on the first yes", async () => {
-    const fetchMock = mockFetch();
-    const { user } = renderDialog(detail({ hasHomestead: false }));
-
-    // The provenance is said out loud, not just acted on.
-    expect(screen.getByText(/homestead did not create/i)).toBeInTheDocument();
-
-    await user.type(confirmField(), "media");
-    await user.click(screen.getByRole("button", { name: /continue/i }));
-
-    // The assertion that matters: the first yes must reach nothing.
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("heading", { name: /really delete media\?/i }),
-    ).toBeInTheDocument();
-
-    // Advancing cleared the field, so the second yes is typed as well.
-    await user.type(confirmField(), "media");
-    await user.click(screen.getByRole("button", { name: /delete project/i }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-  });
-
-  it("makes the user type the slug again for the second confirmation", async () => {
-    const fetchMock = mockFetch();
-    const { user } = renderDialog(detail({ hasHomestead: false }));
-
-    await user.type(confirmField(), "media");
-    await user.click(screen.getByRole("button", { name: /continue/i }));
-
-    // Advancing clears the field, so the final confirm starts locked. A
-    // second prompt that arrives pre-satisfied is a click-through, not a
-    // confirmation.
-    expect(confirmField()).toHaveValue("");
-    expect(
-      screen.getByRole("button", { name: /delete project/i }),
-    ).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: /delete project/i }));
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    await user.type(confirmField(), "media");
-    await user.click(screen.getByRole("button", { name: /delete project/i }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-  });
-
-  it("survives an impatient double-tap on the first confirmation", async () => {
-    // A phone, a NAS that takes a moment, and a second tap. Both steps render
-    // into the same place, so without a cleared field AND a fresh element the
-    // second click of one gesture lands on the final confirm and deletes.
-    const fetchMock = mockFetch();
-    const { user } = renderDialog(detail({ hasHomestead: false }));
-
-    await user.type(confirmField(), "media");
-    await user.dblClick(screen.getByRole("button", { name: /continue/i }));
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    // And it is genuinely still waiting on the user, not merely slow.
-    expect(
-      screen.getByRole("heading", { name: /really delete media\?/i }),
-    ).toBeInTheDocument();
-    expect(confirmField()).toHaveValue("");
-    expect(
-      screen.getByRole("button", { name: /delete project/i }),
-    ).toBeDisabled();
   });
 
   it("refuses Enter on a near miss, which no disabled attribute is guarding", async () => {
@@ -191,28 +124,14 @@ describe("DeleteProjectDialog", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
-  it("advances rather than deletes when Enter lands on an adopted project", async () => {
-    const fetchMock = mockFetch();
-    const { user } = renderDialog(detail({ hasHomestead: false }));
-
-    await user.type(confirmField(), "media{Enter}");
-    await act(async () => {});
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("heading", { name: /really delete media\?/i }),
-    ).toBeInTheDocument();
-  });
-
   it("refuses a click the disabled attribute did not stop", async () => {
-    // `disabled` stops a pointer, and nothing else. Belt and braces with the
-    // handler's own check, for an event delivered against a stale frame.
+    // `disabled` stops a pointer, and nothing else. The handler's own check is
+    // what catches an event delivered against a stale frame, so it is tested
+    // by firing past the attribute rather than through it.
     const fetchMock = mockFetch();
-    const { user } = renderDialog(detail({ hasHomestead: false }));
+    const { user } = renderDialog(detail());
 
-    await user.type(confirmField(), "media");
-    await user.click(screen.getByRole("button", { name: /continue/i }));
-
+    await user.type(confirmField(), "medi");
     const final = screen.getByRole("button", { name: /delete project/i });
     expect(final).toBeDisabled();
     await act(async () => {
@@ -222,22 +141,22 @@ describe("DeleteProjectDialog", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("replaces the confirm button rather than relabelling the one under the pointer", async () => {
-    // The second half of the double-tap fix. If React reuses the node, the
-    // element the user is already touching — or has focus on — silently
-    // becomes the destructive one, so the same gesture that advanced the
-    // dialog can also fire it.
-    const { user } = renderDialog(detail({ hasHomestead: false }));
+  it("asks once, for every project", async () => {
+    // Deletion used to ask an adopted project twice — a directory Homestead
+    // had found rather than made. That was decided by the presence of an
+    // `x-homestead` block in the compose file, and both the distinction and
+    // the block are gone. Typing the exact slug is the whole gate now.
+    const fetchMock = mockFetch();
+    const { user } = renderDialog(detail());
+
+    expect(
+      screen.queryByRole("button", { name: /continue/i }),
+    ).not.toBeInTheDocument();
 
     await user.type(confirmField(), "media");
-    const advance = screen.getByRole("button", { name: /continue/i });
-    advance.focus();
-    await user.click(advance);
+    await user.click(screen.getByRole("button", { name: /delete project/i }));
 
-    const final = screen.getByRole("button", { name: /delete project/i });
-    expect(final).not.toBe(advance);
-    // Nothing destructive inherits the focus the previous step held.
-    expect(document.activeElement).not.toBe(final);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
   it("names the volumes it leaves behind and the command to remove them", () => {
@@ -254,7 +173,6 @@ describe("DeleteProjectDialog", () => {
             // another stack's data.
             { key: "shared", name: "nas_shared", external: true },
           ],
-          meta: { schemaVersion: 1, system: false },
         },
       }),
     );

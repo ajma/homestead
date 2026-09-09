@@ -1,6 +1,5 @@
 import type {
   AppMeta,
-  ProjectMeta,
   ProjectModel,
   PublishedPort,
   ServiceModel,
@@ -60,18 +59,6 @@ function parseApp(
   return app;
 }
 
-function parseMeta(raw: unknown): ProjectMeta {
-  const x = asRecord(raw);
-  const meta: ProjectMeta = {
-    schemaVersion: typeof x.schemaVersion === "number" ? x.schemaVersion : 1,
-    system: x.system === true,
-  };
-  if (typeof x.displayName === "string") meta.displayName = x.displayName;
-  if (typeof x.description === "string") meta.description = x.description;
-  if (typeof x.icon === "string") meta.icon = x.icon;
-  return meta;
-}
-
 function parseVolumes(raw: unknown): VolumeRef[] {
   const volumes: VolumeRef[] = [];
   const volumesObj = asRecord(raw);
@@ -121,6 +108,5 @@ export function parseCanonical(json: unknown): ProjectModel {
     projectName: root.name,
     services,
     volumes: parseVolumes(root.volumes),
-    meta: parseMeta(root["x-homestead"]),
   };
 }

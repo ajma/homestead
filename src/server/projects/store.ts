@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { isValidSlug, type ScanEntry } from "@shared/projects.js";
-import { blankScaffold, injectHomesteadBlock } from "./doc.js";
+import { blankScaffold } from "./doc.js";
 
 /** Compose's own precedence order. */
 const COMPOSE_FILENAMES = [
@@ -229,10 +229,12 @@ export async function createProject(
       throw new ProjectExistsError(slug);
     throw err;
   }
+  // A pasted compose file is written exactly as given. It used to have an
+  // `x-homestead` block injected for provenance; with that distinction gone
+  // there is nothing to add, and not editing a file the user pasted is the
+  // better default anyway.
   const content =
-    source.kind === "blank"
-      ? blankScaffold(slug)
-      : injectHomesteadBlock(source.content, { kind: "paste" });
+    source.kind === "blank" ? blankScaffold(slug) : source.content;
   await writeFile(join(dir, "docker-compose.yml"), content, "utf8");
 }
 

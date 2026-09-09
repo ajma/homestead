@@ -292,15 +292,15 @@ describe("createProject", () => {
     expect(content).toContain("services: {}");
   });
 
-  it("stores a pasted file with provenance injected and comments intact", async () => {
+  it("stores a pasted file byte for byte", async () => {
+    // Unedited. An `x-homestead` block used to be injected here to record
+    // provenance, which meant every paste came back subtly not as it was
+    // given; with the block gone there is nothing to add, and leaving a
+    // pasted file alone is the better contract anyway.
     const root = await tempDir("hs-create-");
-    await createProject(root, "immich", {
-      kind: "paste",
-      content: "# keep me\nservices:\n  web:\n    image: nginx\n",
-    });
-    const content = (await readProjectFile(root, "immich", "compose")) ?? "";
-    expect(content).toContain("# keep me");
-    expect(content).toContain("kind: paste");
+    const pasted = "# keep me\nservices:\n  web:\n    image: nginx\n";
+    await createProject(root, "immich", { kind: "paste", content: pasted });
+    expect(await readProjectFile(root, "immich", "compose")).toBe(pasted);
   });
 
   it("refuses to overwrite an existing directory", async () => {

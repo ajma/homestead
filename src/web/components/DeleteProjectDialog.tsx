@@ -44,34 +44,21 @@ export function DeleteProjectDialog({
   const navigate = useNavigate();
   const remove = useDeleteProject();
   const [typed, setTyped] = useState("");
-  const [confirmedOnce, setConfirmedOnce] = useState(false);
   const nameId = useId();
   const descId = useId();
 
   const slug = detail.slug;
-  // Absence of x-homestead IS the provenance marker.
-  const adopted = !detail.hasHomestead;
   // `external: true` volumes are owned elsewhere — another stack, or the
   // operator by hand — so they must never be offered or even implied here.
   const orphans = detail.model?.volumes.filter((v) => !v.external) ?? [];
 
   const matches = typed === slug;
-  const finalStep = confirmedOnce || !adopted;
 
   async function confirm() {
     // The real gate, not a mirror of the `disabled` prop. `disabled` stops a
     // pointer; this stops everything else — a keyboard activation racing a
     // re-render, or a second click delivered against the previous frame.
     if (!matches) return;
-    if (adopted && !confirmedOnce) {
-      setConfirmedOnce(true);
-      // Clearing the field is half of what stops a double-tap walking through
-      // both confirmations in one gesture: without it the slug is already
-      // satisfied when step two mounts, so the second click of a dblClick
-      // deletes. The other half is the `key` on the button below.
-      setTyped("");
-      return;
-    }
     try {
       await remove.mutateAsync(slug);
     } catch {
@@ -86,34 +73,16 @@ export function DeleteProjectDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title={
-        confirmedOnce ? `Really delete ${slug}?` : `Delete ${slug} for good?`
-      }
+      title={`Delete ${slug} for good?`}
       describedBy={descId}
       role="alertdialog"
     >
       <div id={descId} className="flex flex-col gap-3 text-sm text-text">
-        {confirmedOnce ? (
-          <p role="alert">
-            Homestead did not create <strong>{slug}</strong>, so this directory
-            and everything in it came from somewhere else. Deleting it removes
-            the whole directory from disk. This cannot be undone.
-          </p>
-        ) : (
-          <>
-            <p>
-              This stops the stack, removes its containers and networks, and
-              deletes the directory <strong>{slug}</strong> and every file in
-              it. This cannot be undone.
-            </p>
-            {adopted && (
-              <p className="text-warning">
-                Homestead did not create this project — it was already on disk
-                when Homestead found it. You will be asked to confirm twice.
-              </p>
-            )}
-          </>
-        )}
+        <p>
+          This stops the stack, removes its containers and networks, and deletes
+          the directory <strong>{slug}</strong> and every file in it. This
+          cannot be undone.
+        </p>
 
         {orphans.length > 0 && (
           <div className="rounded-md border border-border bg-surface p-3">
@@ -175,21 +144,16 @@ export function DeleteProjectDialog({
             Cancel
           </Button>
           <Button
-            // A distinct key per step, so React unmounts "Continue" and mounts
-            // a *new* element for "Delete project" rather than relabelling the
-            // node already under the user's finger. Without it a single
-            // dblClick delivers its second event to the same button, which by
-            // then is the final confirm — one gesture through both
-            // confirmations, on exactly the projects the second one protects.
-            key={finalStep ? "confirm-final" : "confirm-continue"}
             variant="danger"
-            // Disabled until the slug is typed exactly — on both steps, and
-            // advancing clears the field, so the final confirm starts locked.
+            // Disabled until the slug is typed exactly. This is the whole
+            // gate now: deletion used to ask an adopted project twice, and
+            // the second round went with the provenance marker that decided
+            // which projects got it.
             disabled={!matches || remove.isPending}
             loading={remove.isPending}
             onClick={confirm}
           >
-            {finalStep ? "Delete project" : "Continue"}
+            Delete project
           </Button>
         </div>
       </div>

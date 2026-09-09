@@ -27,27 +27,21 @@ const PROJECTS_ROOT = "/tmp/homestead-e2e/stacks";
 const suffix = randomUUID().slice(0, 8);
 /** Created through the UI, so the create path is exercised end to end. */
 const CREATED = `e2e-created-${suffix}`;
-/** Seeded with an `x-homestead` block: Homestead's own, one confirmation. */
-const OWNED = `e2e-owned-${suffix}`;
-/** Seeded without one: an adopted directory, two confirmations. */
-const ADOPTED = `e2e-adopted-${suffix}`;
+/** Seeded on disk rather than created through the UI. */
+const SEEDED = `e2e-seeded-${suffix}`;
 /** The editing fixture, with a hand-written `.env` that must survive a save. */
 const EDITED = `e2e-edited-${suffix}`;
 
-const ALL = [CREATED, OWNED, ADOPTED, EDITED];
+const ALL = [CREATED, SEEDED, EDITED];
 
-const OWNED_COMPOSE = [
-  "x-homestead:",
-  "  schemaVersion: 1",
-  "  source:",
-  "    kind: blank",
+/** A comment is what an editor is likeliest to eat, so it is what proves a save left the rest alone. */
+const SEEDED_COMPOSE = [
+  "# hand-written, keep me",
   "services:",
   "  web:",
   "    image: nginx:alpine",
   "",
 ].join("\n");
-
-const PLAIN_COMPOSE = "services:\n  web:\n    image: nginx:alpine\n";
 
 /**
  * A comment, a blank line and a second variable — the three things a
@@ -64,9 +58,8 @@ async function seed(slug: string, compose: string, env?: string) {
 }
 
 test.beforeAll(async () => {
-  await seed(OWNED, OWNED_COMPOSE);
-  await seed(ADOPTED, PLAIN_COMPOSE);
-  await seed(EDITED, OWNED_COMPOSE, SEEDED_ENV);
+  await seed(SEEDED, SEEDED_COMPOSE);
+  await seed(EDITED, SEEDED_COMPOSE, SEEDED_ENV);
 });
 
 test.afterAll(async () => {
@@ -148,8 +141,8 @@ test("an edited compose file survives a reload", async ({ page }) => {
     "utf8",
   );
   expect(onDisk).toContain("# edited by the authoring spec");
-  // The rest of the file is untouched, comments and provenance included.
-  expect(onDisk).toContain("x-homestead:");
+  // The rest of the file is untouched, comments included.
+  expect(onDisk).toContain("# hand-written, keep me");
   expect(onDisk).toContain("image: nginx:alpine");
 });
 
@@ -251,53 +244,25 @@ test("deleting needs the slug typed, and takes the project off the list", async 
     page.getByRole("link", { name: new RegExp(CREATED) }),
   ).toHaveCount(0);
   // Scoped to this spec's own fixture: no global count, no wiped root.
-  await expect(row(page, OWNED)).toHaveCount(1);
+  await expect(row(page, SEEDED)).toHaveCount(1);
 });
 
-test("a Homestead-created project deletes on one confirmation", async ({
-  page,
-}) => {
-  await page.goto(`/projects/${OWNED}/overview`);
+test("a project deletes on one confirmation", async ({ page }) => {
+  // Deletion used to ask twice for a directory Homestead had not created,
+  // decided by the presence of an `x-homestead` block. Both are gone: typing
+  // the exact slug is the whole gate, for every project.
+  await page.goto(`/projects/${SEEDED}/overview`);
   await page.getByRole("button", { name: "Delete project…" }).click();
 
   const dialog = page.getByRole("alertdialog");
   await expect(dialog).not.toContainText(/homestead did not create/i);
-  await dialog.getByLabel(/to confirm/i).fill(OWNED);
-  // One button, and it is the final one — no "Continue" step.
   await expect(dialog.getByRole("button", { name: "Continue" })).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Delete project" }).click();
+
+  const confirm = dialog.getByRole("button", { name: "Delete project" });
+  await expect(confirm).toBeDisabled();
+  await dialog.getByLabel(/to confirm/i).fill(SEEDED);
+  await confirm.click();
 
   await expect(page).toHaveURL(/\/projects$/);
-  await expect(row(page, OWNED)).toHaveCount(0);
-});
-
-test("an adopted directory is asked twice", async ({ page }) => {
-  await page.goto(`/projects/${ADOPTED}/overview`);
-  await page.getByRole("button", { name: "Delete project…" }).click();
-
-  const dialog = page.getByRole("alertdialog");
-  // No x-homestead block, so Homestead says whose directory this is.
-  await expect(dialog).toContainText(/homestead did not create/i);
-
-  await dialog.getByLabel(/to confirm/i).fill(ADOPTED);
-  await dialog.getByRole("button", { name: "Continue" }).click();
-
-  // Still on the page, still on disk: the first yes must reach nothing.
-  await expect(
-    page.getByRole("heading", { name: `Really delete ${ADOPTED}?` }),
-  ).toBeVisible();
-  await expect(page).toHaveURL(new RegExp(`/projects/${ADOPTED}/overview$`));
-  expect(
-    await readFile(join(PROJECTS_ROOT, ADOPTED, "compose.yaml"), "utf8"),
-  ).toContain("nginx:alpine");
-
-  // Advancing cleared the field and mounted a fresh button, so the second yes
-  // is a deliberate act rather than the tail of the first gesture.
-  await expect(
-    dialog.getByRole("button", { name: "Delete project" }),
-  ).toBeDisabled();
-  await dialog.getByLabel(/to confirm/i).fill(ADOPTED);
-  await dialog.getByRole("button", { name: "Delete project" }).click();
-  await expect(page).toHaveURL(/\/projects$/);
-  await expect(row(page, ADOPTED)).toHaveCount(0);
+  await expect(row(page, SEEDED)).toHaveCount(0);
 });

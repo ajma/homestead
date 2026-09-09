@@ -79,12 +79,10 @@ function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
         },
       ],
       volumes: [{ key: "config", name: "jellyfin_config", external: false }],
-      meta: { schemaVersion: 1, system: false },
     },
     parseError: null,
     states: [container()],
     statesError: null,
-    hasHomestead: true,
     snapshots: ["compose.yaml.2026-09-01T10-00-00Z.bak"],
     ...over,
   };

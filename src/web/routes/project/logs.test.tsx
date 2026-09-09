@@ -25,12 +25,10 @@ function detail(over: Partial<ProjectDetailData> = {}): ProjectDetailData {
         { name: "db", ports: [], labels: {}, app: null },
       ],
       volumes: [],
-      meta: { schemaVersion: 1, system: false },
     },
     parseError: null,
     states: [],
     statesError: null,
-    hasHomestead: true,
     snapshots: [],
     ...over,
   };

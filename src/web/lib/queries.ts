@@ -157,7 +157,6 @@ export type ProjectDetailData = ScanEntry & {
    * would let a missing flag read as "adopted" and silently soften a
    * confirmation that exists to protect a user's data.
    */
-  hasHomestead: boolean;
   snapshots: string[];
 };
 

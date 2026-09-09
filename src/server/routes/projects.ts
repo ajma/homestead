@@ -19,7 +19,6 @@ import {
 } from "../docker/compose.js";
 import { type DockerRunner, dockerRunner } from "../docker/run.js";
 import type { OperationRegistry } from "../ops/registry.js";
-import { hasHomesteadBlock } from "../projects/doc.js";
 import {
   deleteIdentity,
   readIdentities,
@@ -140,14 +139,6 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         }
       }
 
-      // Read from the file on disk, not from the canonical config: `docker
-      // compose config` is unavailable for a project that does not parse, and
-      // an unparseable adopted directory is exactly the case where the delete
-      // dialog most needs to know Homestead did not create it.
-      const composeText = entry.hasCompose
-        ? await readProjectFile(opts.projectsDir, slug, "compose")
-        : null;
-
       // SAFETY: parseCanonical extracts a fixed field set (name, ports, labels,
       // app, image) and deliberately never includes `environment`, which is what
       // keeps .env secrets out of this viewer-accessible response. Adding
@@ -158,10 +149,7 @@ export const projectRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         parseError,
         states,
         statesError,
-        // Absence of the x-homestead block IS the provenance marker (§3.7).
         identity: await readIdentity(opts.db, slug),
-        hasHomestead:
-          composeText === null ? false : hasHomesteadBlock(composeText),
         snapshots: await listSnapshots(opts.projectsDir, slug),
       };
     },
