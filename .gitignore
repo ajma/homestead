@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+*.local
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Tooling
+.superpowers/
+coverage/
+.vite/
+*.log
+.DS_Store
