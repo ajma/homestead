@@ -85,7 +85,16 @@ export type ContainerState = {
   exitCode: number;
 };
 
-export type OperationKind = "up" | "down" | "restart" | "pull";
+/**
+ * `down` is here for history, not for asking.
+ *
+ * No route offers it any more — stopping a project runs `compose stop`, and
+ * only deleting one runs `compose down`. But operations recorded before that
+ * change are still in the table with `kind = 'down'`, and the registry reads
+ * a row's kind back with an unchecked cast. Dropping the member would not
+ * throw; it would just make this type quietly wrong about rows that exist.
+ */
+export type OperationKind = "up" | "stop" | "down" | "restart" | "pull";
 export type OperationStatus = "running" | "succeeded" | "failed";
 
 /**

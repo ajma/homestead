@@ -22,6 +22,9 @@ async function probeEveryVerb(page: Page): Promise<Probe[]> {
   return page.evaluate(async (s: string) => {
     const urls = [
       `/api/projects/${s}/up`,
+      `/api/projects/${s}/stop`,
+      // Still guarded although no route serves it: the guard is the thing
+      // that must not go stale, and `down` is one route away from returning.
       `/api/projects/${s}/down`,
       `/api/projects/${s}/restart`,
       `/api/projects/${s}/pull`,
@@ -39,7 +42,7 @@ async function probeEveryVerb(page: Page): Promise<Probe[]> {
 }
 
 function expectGuarded(results: Probe[]): void {
-  expect(results).toHaveLength(6);
+  expect(results).toHaveLength(7);
   for (const { url, status, body } of results) {
     expect(status, `${url} was answered by the guard`).toBe(503);
     expect(body, `${url} carries the guard's marker`).toContain(GUARD_MARKER);

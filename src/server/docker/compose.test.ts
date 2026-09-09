@@ -89,6 +89,40 @@ describe("validateComposeVerb", () => {
     });
   });
 
+  describe("guards stop the same way it guards down", () => {
+    // `validateComposeVerb` opened with `if (verb[0] !== "down") return`, so a
+    // second lifecycle verb would have sailed past the guard entirely. Nothing
+    // reachable through `stop` is destructive today; the point is that the
+    // next flag added to it does not get to be the first one nobody checks.
+    it("allows stop with no args", () => {
+      expect(() => validateComposeVerb(["stop"])).not.toThrow();
+    });
+
+    it("allows stop with a timeout", () => {
+      expect(() => validateComposeVerb(["stop", "-t", "30"])).not.toThrow();
+      expect(() =>
+        validateComposeVerb(["stop", "--timeout", "0"]),
+      ).not.toThrow();
+    });
+
+    it("rejects a timeout that is not a non-negative integer", () => {
+      expect(() => validateComposeVerb(["stop", "-t", "-5"])).toThrow();
+      expect(() => validateComposeVerb(["stop", "--timeout", "abc"])).toThrow();
+    });
+
+    it("rejects an unknown flag", () => {
+      expect(() => validateComposeVerb(["stop", "--rmi", "all"])).toThrow(
+        /unknown or unsafe flag/,
+      );
+    });
+
+    it("rejects volume removal, which is not stop's business either", () => {
+      expect(() => validateComposeVerb(["stop", "-v"])).toThrow(
+        /volume removal/,
+      );
+    });
+  });
+
   describe("rejects dangerous down operations", () => {
     it("rejects down with -v", () => {
       expect(() => validateComposeVerb(["down", "-v"])).toThrow(

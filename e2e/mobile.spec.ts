@@ -21,7 +21,7 @@ const PROJECTS_ROOT = "/tmp/homestead-e2e/stacks";
 const suffix = randomUUID().slice(0, 8);
 const BUSY = `e2e-mobile-${suffix}`;
 
-const LIFECYCLE = ["Start", "Stop & remove", "Restart", "Pull"] as const;
+const LIFECYCLE = ["Start", "Stop", "Restart", "Pull"] as const;
 
 /**
  * The widths each viewport project must actually be emulating.

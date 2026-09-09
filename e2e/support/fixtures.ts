@@ -12,7 +12,7 @@ import { test as base, expect } from "@playwright/test";
  * page's own context, that this actually fires.
  */
 export const LIFECYCLE_ROUTE =
-  /\/api\/projects\/[^/]+\/(up|down|restart|pull)(\?|$)/;
+  /\/api\/projects\/[^/]+\/(up|stop|down|restart|pull)(\?|$)/;
 
 /** The body the guard answers with, so a test can recognise its own guard. */
 export const GUARD_MARKER = "e2e_lifecycle_guard";
@@ -20,9 +20,10 @@ export const GUARD_MARKER = "e2e_lifecycle_guard";
 /**
  * The Playwright `test` every spec in this suite must import.
  *
- * `POST /api/projects/:slug/:verb` runs `docker compose up -d` (or `down`, or
+ * `POST /api/projects/:slug/:verb` runs `docker compose up -d` (or `stop`, or
  * `restart`, or `pull`) against the real daemon this suite shares with the
- * developer's machine. Compose reconciles by project-name label, not by
+ * developer's machine. `down` is kept in the pattern although no route serves
+ * it: a guard is cheap and a stale one that stops matching is not. Compose reconciles by project-name label, not by
  * directory, so a stray verb can adopt — or tear down — a stack that is not
  * ours. An earlier plan's suite left `media-web-1` running on a real machine
  * for exactly this reason.

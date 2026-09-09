@@ -34,14 +34,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Alt-tab away and back, which is what makes react-query refetch. */
-async function refocusWindow() {
-  await act(async () => {
-    focusManager.setFocused(false);
-    focusManager.setFocused(true);
-  });
-}
-
 function container(over: Partial<ContainerState> = {}): ContainerState {
   return {
     service: "web",
@@ -197,7 +189,7 @@ function renderDetail(path = "/projects/jellyfin/overview") {
   };
 }
 
-const LIFECYCLE = ["Start", "Stop & remove", "Restart", "Pull"] as const;
+const LIFECYCLE = ["Start", "Stop", "Restart", "Pull"] as const;
 
 describe("ProjectDetail header", () => {
   it("names the project, shows its status and carries all four controls", async () => {
@@ -568,42 +560,34 @@ describe("lifecycle controls", () => {
     ).toBeInTheDocument();
   });
 
-  it("names the destructive verb for what it does", async () => {
-    // `docker compose down` removes containers and networks. "Stop" invites a
-    // tap meant as "pause this for a minute" and destroys anything the stack
-    // did not write to a named volume.
+  it("offers a plain Stop, and nothing that removes", async () => {
+    // `compose stop` leaves the containers, the network and every volume
+    // where they are, so the button says what it does and no longer has to
+    // warn. Removal moved to deleting the project, which is the only place
+    // that runs `down`.
     stubApi({});
     renderDetail();
     expect(
-      await screen.findByRole("button", { name: "Stop & remove" }),
+      await screen.findByRole("button", { name: "Stop" }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Stop" }),
+      screen.queryByRole("button", { name: /stop & remove/i }),
     ).not.toBeInTheDocument();
   });
 
-  it("asks before removing containers, and posts nothing until confirmed", async () => {
-    const fetchMock = stubApi({});
+  it("stops immediately, without a confirmation to clear", async () => {
+    // The confirmation existed because the button destroyed containers. It
+    // would now be friction guarding nothing — and worse, it would teach the
+    // habit of clicking through the dialog that still guards deletion.
+    const fetchMock = stubApi({
+      post: () => json(202, { operationId: "op-1" }),
+    });
     renderDetail();
     const user = userEvent.setup();
 
-    await user.click(
-      await screen.findByRole("button", { name: "Stop & remove" }),
-    );
-    const confirm = await screen.findByRole("alertdialog");
-    expect(confirm).toHaveTextContent(/deletes its containers and networks/i);
-    expect(
-      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
-    ).toHaveLength(0);
-    // Focus starts on Cancel: a stray Enter must not perform the very action
-    // the confirmation exists to prevent.
-    expect(
-      within(confirm).getByRole("button", { name: "Cancel" }),
-    ).toHaveFocus();
+    await user.click(await screen.findByRole("button", { name: "Stop" }));
 
-    await user.click(
-      within(confirm).getByRole("button", { name: /yes, stop and remove/i }),
-    );
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
@@ -611,86 +595,7 @@ describe("lifecycle controls", () => {
     );
     expect(
       fetchMock.mock.calls.find(([, init]) => init?.method === "POST")?.[0],
-    ).toBe("/api/projects/jellyfin/down");
-  });
-
-  it("cancels without posting and hands focus back", async () => {
-    const fetchMock = stubApi({});
-    renderDetail();
-    const user = userEvent.setup();
-
-    const down = await screen.findByRole("button", { name: "Stop & remove" });
-    await user.click(down);
-    await user.click(
-      within(await screen.findByRole("alertdialog")).getByRole("button", {
-        name: "Cancel",
-      }),
-    );
-    await waitFor(() =>
-      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
-    );
-    expect(down).toHaveFocus();
-    expect(
-      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
-    ).toHaveLength(0);
-  });
-
-  it("escape cancels the confirmation wherever focus has gone", async () => {
-    // The confirmation is not modal, so focus can be anywhere on the page. An
-    // Escape that quietly stops working once focus leaves the dialog is worse
-    // than none: the user believes they cancelled and walks away.
-    stubApi({});
-    renderDetail();
-    const user = userEvent.setup();
-
-    await user.click(
-      await screen.findByRole("button", { name: "Stop & remove" }),
-    );
-    await screen.findByRole("alertdialog");
-    // Move focus out of the dialog first, the way a background click or a Tab
-    // out of it would.
-    screen.getByRole("heading", { name: "jellyfin", level: 1 }).focus();
-    await user.keyboard("{Escape}");
-    await waitFor(() =>
-      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("gates the confirm button on the same in-flight state as the toolbar", async () => {
-    // Someone else can start an operation between opening this confirmation
-    // and confirming it. The trigger being disabled does not help — this
-    // dialog is already open — so the confirm must be gated too, or the user
-    // gets a 409 they could not have anticipated.
-    let running = false;
-    stubApi({
-      operations: () =>
-        json(200, {
-          operations: running
-            ? [
-                operation({
-                  status: "running",
-                  finishedAt: null,
-                  exitCode: null,
-                }),
-              ]
-            : [],
-        }),
-    });
-    renderDetail();
-    const user = userEvent.setup();
-
-    await user.click(
-      await screen.findByRole("button", { name: "Stop & remove" }),
-    );
-    const yes = within(await screen.findByRole("alertdialog")).getByRole(
-      "button",
-      { name: /yes, stop and remove/i },
-    );
-    expect(yes).toBeEnabled();
-
-    running = true;
-    await refocusWindow();
-    await waitFor(() => expect(yes).toBeDisabled());
+    ).toBe("/api/projects/jellyfin/stop");
   });
 
   it("does not carry one project's operation into the next", async () => {

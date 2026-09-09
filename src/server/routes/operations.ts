@@ -15,9 +15,18 @@ type Opts = {
   docker?: DockerRunner;
 };
 
+/**
+ * The lifecycle verbs a client may ask for.
+ *
+ * `stop` rather than `down`: stopping is not deleting. `down` destroys the
+ * containers and the network, which is the right thing to do when a project
+ * is being removed and a surprising thing to do when someone wanted it to
+ * stop running. Removal belongs to `DELETE /api/projects/:slug`, which still
+ * runs `down` on the way out — the only caller that should.
+ */
 const VERBS: Record<string, { kind: OperationKind; args: string[] }> = {
   up: { kind: "up", args: ["up", "-d"] },
-  down: { kind: "down", args: ["down"] },
+  stop: { kind: "stop", args: ["stop"] },
   restart: { kind: "restart", args: ["restart"] },
   pull: { kind: "pull", args: ["pull"] },
 };

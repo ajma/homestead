@@ -1,6 +1,6 @@
 import type { ExposureSummary } from "@shared/cloudflare.js";
 import type { OperationKind } from "@shared/projects.js";
-import { useId, useRef, useState } from "react";
+import { useId, useState } from "react";
 import {
   Link,
   Navigate,
@@ -18,7 +18,6 @@ import { OperationPanel } from "../components/OperationPanel.js";
 import { ProjectIdentityDialog } from "../components/ProjectIdentityDialog.js";
 import {
   Button,
-  Dialog,
   EmptyState,
   Panel,
   Spinner,
@@ -60,13 +59,18 @@ const TABS = [
 const VERBS: {
   verb: OperationKind;
   label: string;
-  variant: "primary" | "secondary" | "danger";
-  confirm: boolean;
+  variant: "primary" | "secondary";
+  confirm?: never;
 }[] = [
-  { verb: "up", label: "Start", variant: "primary", confirm: false },
-  { verb: "down", label: "Stop & remove", variant: "danger", confirm: true },
-  { verb: "restart", label: "Restart", variant: "secondary", confirm: false },
-  { verb: "pull", label: "Pull", variant: "secondary", confirm: false },
+  { verb: "up", label: "Start", variant: "primary" },
+  // Plain "Stop", and no confirmation: `compose stop` leaves the containers,
+  // the network and every volume in place, so there is nothing to warn about
+  // and nothing to undo. This used to be "Stop & remove" running `down` —
+  // honest about what it did, but it made pausing a stack a destructive act.
+  // Removal now happens only when the project is deleted.
+  { verb: "stop", label: "Stop", variant: "secondary" },
+  { verb: "restart", label: "Restart", variant: "secondary" },
+  { verb: "pull", label: "Pull", variant: "secondary" },
 ];
 
 /** Why the controls are disabled — said out loud, not left to be inferred. */
@@ -140,19 +144,14 @@ export function ProjectDetail() {
     kind: OperationKind;
   } | null>(null);
   const [overviewOpen, setOverviewOpen] = useState(true);
-  const [confirmingDown, setConfirmingDown] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const overviewId = useId();
   const busyId = useId();
-  const descId = useId();
-  const downRef = useRef<HTMLButtonElement>(null);
 
   const run = (verb: OperationKind) =>
     lifecycle.mutate(verb, {
       onSuccess: (id) => setActiveOperation({ id, kind: verb }),
     });
-
-  const cancelDown = () => setConfirmingDown(false);
 
   if (detail.isPending)
     return (
@@ -237,16 +236,15 @@ export function ProjectDetail() {
           aria-label="Lifecycle controls"
           className="mt-3 flex flex-wrap gap-2"
         >
-          {VERBS.map(({ verb, label, variant, confirm }) => (
+          {VERBS.map(({ verb, label, variant }) => (
             <Button
               key={verb}
-              ref={confirm ? downRef : undefined}
               variant={variant}
               disabled={busy}
               // A disabled control that does not say why reads as broken.
               aria-describedby={busy ? busyId : undefined}
               title={busy ? BUSY_REASON : undefined}
-              onClick={() => (confirm ? setConfirmingDown(true) : run(verb))}
+              onClick={() => run(verb)}
             >
               {label}
             </Button>
@@ -309,37 +307,6 @@ export function ProjectDetail() {
             initialPort={exposing?.hostPort}
           />
         )}
-        <Dialog
-          open={confirmingDown}
-          onClose={cancelDown}
-          title={`Stop and remove ${slug}?`}
-          describedBy={descId}
-          role="alertdialog"
-        >
-          <p id={descId} className="text-sm text-text">
-            This deletes its containers and networks. Named volumes are kept;
-            anything written inside a container is lost.
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button onClick={cancelDown}>Cancel</Button>
-            <Button
-              variant="danger"
-              // Gated on exactly what the toolbar is gated on: someone else
-              // can start an operation between opening this and confirming
-              // it, and an ungated confirm turns that into an unanticipated
-              // 409.
-              disabled={busy}
-              aria-describedby={busy ? busyId : undefined}
-              title={busy ? BUSY_REASON : undefined}
-              onClick={() => {
-                setConfirmingDown(false);
-                run("down");
-              }}
-            >
-              Yes, stop and remove
-            </Button>
-          </div>
-        </Dialog>
         {lifecycle.isError && (
           <p role="alert" className="mt-2 text-sm text-danger">
             {lifecycleErrorMessage(lifecycle.error)}

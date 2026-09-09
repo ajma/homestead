@@ -24,14 +24,31 @@ export type ComposeContext = {
 export type { ContainerState };
 
 /**
- * Validates compose verb for safety. Uses allow-list for `down` to prevent
- * volume removal and other destructive operations. Throws on unsafe arguments.
+ * Per-verb allow-list of flags that carry no argument.
+ *
+ * `stop` takes none: `--remove-orphans` is a `down` concept, and stop's whole
+ * point is that nothing is removed.
+ */
+const SAFE_ARGS: Record<string, ReadonlySet<string>> = {
+  down: new Set(["--remove-orphans"]),
+  stop: new Set(),
+};
+
+/**
+ * Validates a compose verb for safety, by allow-list, throwing on anything not
+ * on it.
+ *
+ * Covers every verb that tears something down — `down` and `stop`. This
+ * checked `down` alone and returned early for everything else, which meant a
+ * second lifecycle verb was unguarded the moment it was added: not a live
+ * danger for `stop`, whose only flag is a timeout, but the guard should not
+ * have to be remembered a second time.
  */
 export function validateComposeVerb(verb: string[]): void {
-  if (verb[0] !== "down") return;
-
-  // For down, only allow known-safe arguments
-  const safeArgs = new Set(["--remove-orphans"]);
+  const head = verb[0];
+  if (head === undefined) return;
+  const safeArgs = SAFE_ARGS[head];
+  if (!safeArgs) return;
 
   for (let i = 1; i < verb.length; i++) {
     const arg = verb[i];
@@ -42,16 +59,16 @@ export function validateComposeVerb(verb: string[]): void {
       const value = verb[i + 1];
       if (value === undefined) {
         throw new Error(
-          `refusing to run \`compose down ${arg}\`: missing timeout value`,
+          `refusing to run \`compose ${head} ${arg}\`: missing timeout value`,
         );
       }
       // Reject if it starts with '-' (likely another flag)
       if (value.startsWith("-")) {
         throw new Error(
-          `refusing to run \`compose down ${value}\`: ${
+          `refusing to run \`compose ${head} ${value}\`: ${
             value === "-v" || value === "--volumes"
               ? "volume removal is a separate action"
-              : "unknown or unsafe flag for `down`"
+              : `unknown or unsafe flag for \`${head}\``
           }`,
         );
       }
@@ -59,7 +76,7 @@ export function validateComposeVerb(verb: string[]): void {
       const num = Number(value);
       if (!Number.isInteger(num) || num < 0) {
         throw new Error(
-          `refusing to run \`compose down ${arg} ${value}\`: timeout must be a non-negative integer`,
+          `refusing to run \`compose ${head} ${arg} ${value}\`: timeout must be a non-negative integer`,
         );
       }
       i++; // Skip the validated timeout value
@@ -74,12 +91,12 @@ export function validateComposeVerb(verb: string[]): void {
     // Reject everything else, with specific message for volume-related flags
     if (arg === "-v" || arg === "--volumes") {
       throw new Error(
-        `refusing to run \`compose down ${arg}\`: volume removal is a separate action`,
+        `refusing to run \`compose ${head} ${arg}\`: volume removal is a separate action`,
       );
     }
 
     throw new Error(
-      `refusing to run \`compose down ${arg}\`: unknown or unsafe flag for \`down\``,
+      `refusing to run \`compose ${head} ${arg}\`: unknown or unsafe flag for \`${head}\``,
     );
   }
 }

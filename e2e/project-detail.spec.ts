@@ -21,7 +21,7 @@ const suffix = randomUUID().slice(0, 8);
 const STACK = `e2e-detail-${suffix}`;
 const BROKEN = `e2e-broken-${suffix}`;
 
-const LIFECYCLE = ["Start", "Stop & remove", "Restart", "Pull"] as const;
+const LIFECYCLE = ["Start", "Stop", "Restart", "Pull"] as const;
 
 test.beforeAll(async () => {
   await mkdir(join(PROJECTS_ROOT, STACK), { recursive: true });
@@ -163,39 +163,29 @@ test("starting a stack opens the operation slot and dismissing closes it", async
   await expect(panel).toBeHidden();
 });
 
-test("removing containers asks first, and cancelling posts nothing", async ({
+test("stopping posts straight away, with nothing to confirm", async ({
   page,
 }) => {
   let posted = 0;
-  await page.route(`**/api/projects/${STACK}/down`, (route) => {
+  await page.route(`**/api/projects/${STACK}/stop`, (route) => {
     posted++;
     return route.fulfill({
       status: 202,
       contentType: "application/json",
-      body: JSON.stringify({ operationId: "e2e-op-down" }),
+      body: JSON.stringify({ operationId: "e2e-op-stop" }),
     });
   });
 
   await page.goto(`/projects/${STACK}/overview`);
-  // The label says what `docker compose down` does, so the tap is informed.
-  await expect(
-    page.getByRole("button", { name: "Stop", exact: true }),
-  ).toHaveCount(0);
-  await page.getByRole("button", { name: "Stop & remove" }).click();
+  // `compose stop` removes nothing, so the label no longer has to warn and
+  // the confirmation that used to guard `down` is gone with it.
+  await expect(page.getByRole("button", { name: "Stop & remove" })).toHaveCount(
+    0,
+  );
 
-  const confirm = page.getByRole("alertdialog");
-  await expect(confirm).toContainText(/deletes its containers and networks/i);
-  expect(posted, "nothing is posted before confirming").toBe(0);
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
 
-  await confirm.getByRole("button", { name: "Cancel" }).click();
-  await expect(confirm).toBeHidden();
-  expect(posted, "cancelling posts nothing").toBe(0);
-
-  await page.getByRole("button", { name: "Stop & remove" }).click();
-  await page
-    .getByRole("alertdialog")
-    .getByRole("button", { name: /yes, stop and remove/i })
-    .click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(
     page.getByRole("region", { name: "Operation", exact: true }),
   ).toBeVisible();
@@ -260,15 +250,6 @@ test("every control on the page is tappable at phone width", async ({
   expectTappable(
     await sweepTapTargets(page),
     "with an operation open",
-    MIN_CONTROLS,
-  );
-
-  // …and with the remove confirmation open, which is the other pair.
-  await page.getByRole("button", { name: "Stop & remove" }).click();
-  await expect(page.getByRole("alertdialog")).toBeVisible();
-  expectTappable(
-    await sweepTapTargets(page),
-    "with the confirmation open",
     MIN_CONTROLS,
   );
 });
