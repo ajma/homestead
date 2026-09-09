@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
-import type { FastifyPluginAsync } from "fastify";
+import { and, eq } from "drizzle-orm";
+import type { FastifyBaseLogger, FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import type { ExposureSummary } from "../../shared/cloudflare.js";
+import { syncAppMonitors } from "../apps/sync.js";
 import { requirePermission } from "../auth/guard.js";
 import { deleteApp } from "../cloudflare/access.js";
 import {
@@ -18,10 +19,10 @@ import { resolveZoneId } from "../cloudflare/zone.js";
 import { decrypt, encrypt } from "../crypto/secrets.js";
 import type { Db } from "../db/client.js";
 import { exposures, settings } from "../db/schema.js";
-import { argsFor } from "../docker/compose.js";
+import { argsFor, composeConfig } from "../docker/compose.js";
 import { listContainers } from "../docker/engine.js";
 import { type DockerRunner, dockerRunner } from "../docker/run.js";
-import { writeProjectFiles } from "../projects/store.js";
+import { scanProjects, writeProjectFiles } from "../projects/store.js";
 
 type Opts = {
   db: Db;
@@ -53,6 +54,54 @@ async function getDecryptedToken(
 
 export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
   const { db } = opts;
+
+  /**
+   * Re-derives app monitors after an exposure changes.
+   *
+   * An app's `dns` and `reachability` monitors exist only when its port has a
+   * hostname, so creating an exposure should add them and deleting one should
+   * take them away. Nothing told the reconciler that, and it runs on a ten
+   * minute timer: a newly exposed app sat without its public checks until the
+   * timer came round. Project create, edit and delete already resync for the
+   * same reason.
+   *
+   * Fire and forget, like those: a sync failure must not fail a request whose
+   * own work is already committed.
+   */
+  const resyncAppMonitors = (request: { log: FastifyBaseLogger }) =>
+    syncAppMonitors(opts.db, {
+      listProjects: async () => {
+        const entries = await scanProjects(opts.projectsDir);
+        return entries.map((e) => e.slug);
+      },
+      composeConfig: async (slug: string) =>
+        composeConfig(
+          {
+            projectsDir: opts.projectsDir,
+            projectsHostDir: opts.projectsHostDir,
+            dataDir: opts.dataDir,
+            slug,
+          },
+          (opts.docker ?? dockerRunner).run,
+        ),
+      hostnameFor: async (slug: string, hostPort: number) => {
+        const [exposure] = await opts.db
+          .select({ hostname: exposures.hostname })
+          .from(exposures)
+          .where(
+            and(
+              eq(exposures.projectSlug, slug),
+              eq(exposures.hostPort, hostPort),
+            ),
+          );
+        return exposure?.hostname ?? null;
+      },
+    }).catch((err) => {
+      request.log.error(
+        { err },
+        "Failed to sync app monitors after an exposure change",
+      );
+    });
 
   app.get(
     "/api/cloudflare/status",
@@ -437,6 +486,7 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         accessEnabled: data.accessEnabled,
         accessAppId: null,
       });
+      await resyncAppMonitors(request);
 
       // Reconcile to Cloudflare
       const result = await reconcileExposures(
@@ -541,6 +591,7 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
         .update(exposures)
         .set(data)
         .where(eq(exposures.id, params.data.id));
+      await resyncAppMonitors(request);
 
       const policyAllowId = settingsMap.get("cloudflare.policyAllowId");
       const policyProbeId = settingsMap.get("cloudflare.policyProbeId");
@@ -611,6 +662,7 @@ export const cloudflareRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
 
       // Delete from SQLite first
       await db.delete(exposures).where(eq(exposures.id, params.data.id));
+      await resyncAppMonitors(request);
 
       // Clean up DNS and Access app
       await deleteDnsRecord(client, existing.zoneId, existing.hostname);

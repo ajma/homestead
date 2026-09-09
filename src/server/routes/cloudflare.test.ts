@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
@@ -9,7 +9,7 @@ import { createAuth } from "../auth/index.js";
 import type { CloudflareClient } from "../cloudflare/client.js";
 import { encrypt } from "../crypto/secrets.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
-import { exposures, settings, user } from "../db/schema.js";
+import { exposures, monitors, settings, user } from "../db/schema.js";
 import { createFakeDocker } from "../docker/fake.js";
 
 const TEST_AUTH = {
@@ -1435,6 +1435,92 @@ describe("GET /api/exposures", () => {
       headers: { cookie: viewerCookie },
     });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("exposure changes re-derive app monitors", () => {
+  // An app's `dns` and `reachability` monitors exist only when its port has a
+  // hostname. Nothing told the reconciler that an exposure had appeared, so a
+  // newly published app waited up to ten minutes for its public checks —
+  // which is exactly how it looked: created, then wrong, then quietly right.
+  async function appWithProject() {
+    const dir = await mkdtemp(join(tmpdir(), "hs-cf-sync-"));
+    await mkdir(join(dir, "hello"), { recursive: true });
+    await writeFile(
+      join(dir, "hello", "docker-compose.yml"),
+      "name: hello\nservices:\n  web:\n    image: nginx\n",
+    );
+    const fake = createFakeDocker({
+      config: {
+        name: "hello",
+        services: { web: { ports: [{ published: 8080, target: 80 }] } },
+      },
+    });
+    const cf = (): CloudflareClient => ({
+      detectTokenKind: async () => "account" as const,
+      verifyToken: async () => ({ ok: true }),
+      listAccounts: async () => [{ id: "acc-123", name: "Test Account" }],
+      listZones: async () => [{ id: "zone-1", name: "example.com" }],
+      listIdentityProviders: async () => [
+        { id: "idp-xyz", name: "Google OAuth", type: "google" },
+      ],
+      request: async (_m: string, path: string) =>
+        // biome-ignore lint/suspicious/noExplicitAny: test mock
+        (path.includes("/dns_records") ? [] : { id: "cf-obj" }) as any,
+    });
+    return await buildApp({
+      db,
+      auth,
+      secretKey: Buffer.alloc(32),
+      projectsDir: dir,
+      projectsHostDir: dir,
+      dataDir: dir,
+      cloudflare: cf,
+      docker: fake.runner,
+    });
+  }
+
+  const types = async () =>
+    (
+      await db
+        .select({ type: monitors.type })
+        .from(monitors)
+        .where(eq(monitors.targetId, "hello:web"))
+    )
+      .map((m) => m.type)
+      .sort();
+
+  it("adds the public checks as soon as the exposure exists", async () => {
+    const scoped = await appWithProject();
+    await scoped.inject({
+      method: "POST",
+      url: "/api/cloudflare/token",
+      headers: { cookie: adminCookie },
+      payload: { token: PLAINTEXT_TOKEN },
+    });
+    await db
+      .insert(settings)
+      .values([
+        { key: "cloudflare.accountId", value: "acc-123" },
+        { key: "cloudflare.tunnelId", value: "tunnel-123" },
+      ])
+      .onConflictDoNothing();
+
+    const res = await scoped.inject({
+      method: "POST",
+      url: "/api/exposures",
+      headers: { cookie: adminCookie },
+      payload: {
+        projectSlug: "hello",
+        hostPort: 8080,
+        hostname: "hello.example.com",
+        zoneId: "zone-1",
+      },
+    });
+    expect([201, 409]).toContain(res.statusCode);
+
+    // Not after the timer comes round — by the time the request returns.
+    expect(await types()).toEqual(["dns", "docker", "http", "reachability"]);
   });
 });
 
