@@ -59,10 +59,33 @@ export async function sweepTapTargets(page: Page): Promise<Sweep> {
       offenders.push(`${name}: no bounding box`);
       continue;
     }
-    if (box.height < TOUCH_MIN)
-      offenders.push(`${name}: ${Math.round(box.height)}px tall`);
-    if (box.width < TOUCH_MIN)
-      offenders.push(`${name}: ${Math.round(box.width)}px wide`);
+    // WCAG 2.5.8's inline exception: a link inside a sentence is sized by the
+    // text around it, and there is no honest way to give it 44px — padding it
+    // to an inline-block tears holes in the paragraph, and a 44px line-height
+    // wrecks the whole block. Prose links are read, not aimed at, and the
+    // sentence they sit in is the affordance.
+    //
+    // Narrow on purpose: it needs the anchor to render `display: inline` AND
+    // its parent to hold text the link does not, so a lone `<a>` in a <p> —
+    // which is a button wearing prose clothing — is still measured.
+    const isProseLink = await control.evaluate((el) => {
+      if (el.tagName !== "A") return false;
+      if (getComputedStyle(el).display !== "inline") return false;
+      const parent = el.parentElement;
+      if (!parent) return false;
+      const around = (parent.textContent ?? "").trim().length;
+      const own = (el.textContent ?? "").trim().length;
+      return around > own;
+    });
+
+    if (!isProseLink) {
+      if (box.height < TOUCH_MIN)
+        offenders.push(`${name}: ${Math.round(box.height)}px tall`);
+      if (box.width < TOUCH_MIN)
+        offenders.push(`${name}: ${Math.round(box.width)}px wide`);
+    }
+    // Off-screen is a defect whatever the control is: a link running past the
+    // right edge cannot be read, let alone tapped.
     if (box.x < 0 || box.x + box.width > viewport.width)
       offenders.push(`${name}: outside the viewport`);
   }
