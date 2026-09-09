@@ -33,27 +33,95 @@ function formatUptime(window: UptimeWindow): string {
   return `${label}: ${Math.round(window.ratio * 100)}%`;
 }
 
+/**
+ * What each monitor type needs before it can run.
+ *
+ * The dialog used to collect a type and nothing else, so the request was
+ * rejected outright — and had it succeeded, the monitor would have been saved
+ * with an empty config and reported down forever on a validation error rather
+ * than on anything about the device. The fields here are the ones each
+ * executor's schema demands.
+ */
+const CONFIG_FIELDS: Record<
+  MonitorType,
+  {
+    name: string;
+    label: string;
+    type: "text" | "number";
+    placeholder?: string;
+  }[]
+> = {
+  tcp: [
+    { name: "host", label: "Host", type: "text", placeholder: "192.168.1.10" },
+    { name: "port", label: "Port", type: "number", placeholder: "22" },
+  ],
+  http: [
+    {
+      name: "url",
+      label: "URL",
+      type: "text",
+      placeholder: "http://192.168.1.10",
+    },
+  ],
+  dns: [
+    {
+      name: "hostname",
+      label: "Hostname",
+      type: "text",
+      placeholder: "nas.example.com",
+    },
+  ],
+  push: [
+    {
+      name: "graceSeconds",
+      label: "Grace period (seconds)",
+      type: "number",
+      placeholder: "300",
+    },
+  ],
+  // The device being edited is the device being watched, so there is nothing
+  // to ask: `deviceId` is filled from the route.
+  tailscale: [],
+  reachability: [],
+  docker: [],
+};
+
 function AddMonitorDialog({
   open,
   onClose,
   onSubmit,
+  deviceId,
 }: {
   open: boolean;
   onClose: () => void;
-  onSubmit: (type: MonitorType) => Promise<void>;
+  onSubmit: (
+    type: MonitorType,
+    config: Record<string, string | number>,
+  ) => Promise<void>;
+  deviceId: string;
 }) {
   const [type, setType] = useState<MonitorType>("tcp");
+  const [values, setValues] = useState<Record<string, string>>({});
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const fields = CONFIG_FIELDS[type] ?? [];
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setIsPending(true);
     try {
-      await onSubmit(type);
+      const config: Record<string, string | number> =
+        type === "tailscale" ? { deviceId } : {};
+      for (const field of fields) {
+        const raw = values[field.name] ?? "";
+        config[field.name] = field.type === "number" ? Number(raw) : raw;
+      }
+      await onSubmit(type, config);
       onClose();
       setType("tcp");
+      setValues({});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add monitor");
     } finally {
@@ -82,6 +150,27 @@ function AddMonitorDialog({
             ))}
           </select>
         </div>
+        {fields.map((field) => (
+          <div key={field.name}>
+            <label
+              htmlFor={`cfg-${field.name}`}
+              className="block text-sm font-medium mb-1"
+            >
+              {field.label}
+            </label>
+            <input
+              id={`cfg-${field.name}`}
+              type={field.type}
+              value={values[field.name] ?? ""}
+              placeholder={field.placeholder}
+              onChange={(e) =>
+                setValues((v) => ({ ...v, [field.name]: e.target.value }))
+              }
+              className="h-11 w-full rounded-md border border-border bg-surface px-3 text-sm"
+              required
+            />
+          </div>
+        ))}
         {error && (
           <p role="alert" className="text-sm text-danger">
             {error}
@@ -108,8 +197,11 @@ export function DeviceDetail() {
   const updateMonitor = useUpdateMonitor(id ?? "");
   const deleteMonitor = useDeleteMonitor(id ?? "");
 
-  async function handleAddMonitor(type: MonitorType) {
-    await createMonitor.mutateAsync({ type });
+  async function handleAddMonitor(
+    type: MonitorType,
+    config: Record<string, string | number>,
+  ) {
+    await createMonitor.mutateAsync({ type, config });
   }
 
   function handleToggleRequired(monitorId: string, required: boolean) {
@@ -134,6 +226,7 @@ export function DeviceDetail() {
         open={addDialogOpen}
         onClose={() => setAddDialogOpen(false)}
         onSubmit={handleAddMonitor}
+        deviceId={id ?? ""}
       />
     </main>
   );

@@ -658,6 +658,34 @@ describe("DELETE /api/devices/:id", () => {
 });
 
 describe("POST /api/devices/:id/monitors", () => {
+  it("accepts what the Add Monitor dialog actually sends", async () => {
+    // The dialog collects a type and nothing else — `useCreateMonitor` posts
+    // `{ type }`. Every other test here hand-writes the full body, so the
+    // seam between the form and the schema has never been crossed.
+    const deviceId = randomUUID();
+    await db.insert(devices).values({
+      id: deviceId,
+      name: "Test",
+      kind: "nas",
+      tailscaleNodeId: null,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/devices/${deviceId}/monitors`,
+      headers: { cookie: adminCookie },
+      payload: { type: "tcp", config: { host: "192.168.1.10", port: 22 } },
+    });
+    expect(res.statusCode).toBe(201);
+
+    // Interval and timeout are not asked for, so they must arrive anyway.
+    const [monitor] = await db
+      .select()
+      .from(monitors)
+      .where(eq(monitors.targetId, deviceId));
+    expect(monitor).toMatchObject({ intervalSeconds: 60, timeoutMs: 5000 });
+  });
+
   it("creates a monitor for a device", async () => {
     const deviceId = randomUUID();
     await db.insert(devices).values({

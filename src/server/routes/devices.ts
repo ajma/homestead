@@ -54,11 +54,19 @@ const updateDeviceBody = z
   })
   .strict();
 
+/**
+ * `intervalSeconds` and `timeoutMs` default rather than being required.
+ *
+ * They were required, and the Add Monitor dialog does not ask for them — it
+ * collects a type and the config that type needs — so every monitor created
+ * through the UI was rejected with a 400. The defaults match the ones app
+ * monitors are provisioned with, and the editor can change them afterwards.
+ */
 const createMonitorBody = z.object({
   type: z.enum(["tailscale", "tcp", "http", "dns", "push"]),
   config: z.record(z.string(), z.unknown()),
-  intervalSeconds: z.number().int().positive(),
-  timeoutMs: z.number().int().positive(),
+  intervalSeconds: z.number().int().positive().default(60),
+  timeoutMs: z.number().int().positive().default(5000),
   retries: z.number().int().min(0).optional(),
   required: z.boolean().optional(),
   enabled: z.boolean().optional(),

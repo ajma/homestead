@@ -195,19 +195,32 @@ describe("DeviceDetail", () => {
     if (!addButton) throw new Error("Add button not found");
     fireEvent.click(addButton);
 
-    // Select monitor type and submit (implementation will determine exact fields)
     const typeSelect = await screen.findByLabelText(/type/i);
     fireEvent.change(typeSelect, { target: { value: "tcp" } });
+
+    // The type alone is not enough. A tcp check needs somewhere to connect,
+    // and the dialog used to send only the type — which the route rejected
+    // outright, and which would have stored a config no executor could parse.
+    fireEvent.change(screen.getByLabelText(/host/i), {
+      target: { value: "192.168.1.10" },
+    });
+    fireEvent.change(screen.getByLabelText(/port/i), {
+      target: { value: "22" },
+    });
 
     const saveButton = screen.getByRole("button", { name: /save/i });
     fireEvent.click(saveButton);
 
-    // Should have called POST
     await vi.waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
         (call) => call[1]?.method === "POST",
       );
       expect(postCalls).toHaveLength(1);
+      const body = JSON.parse(String(postCalls[0]?.[1]?.body));
+      expect(body).toEqual({
+        type: "tcp",
+        config: { host: "192.168.1.10", port: 22 },
+      });
     });
   });
 

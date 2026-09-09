@@ -486,7 +486,10 @@ export function useDeviceDetail(id: string) {
 export function useCreateMonitor(deviceId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { type: MonitorType }) => {
+    mutationFn: async (body: {
+      type: MonitorType;
+      config: Record<string, string | number>;
+    }) => {
       const res = await apiFetch(`/api/devices/${deviceId}/monitors`, {
         method: "POST",
         body: JSON.stringify(body),
