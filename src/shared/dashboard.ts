@@ -21,6 +21,15 @@ export type AppSummary = {
   hostname: string | null;
   iconSlug: string | null;
   iconUrl: string | null;
+  /**
+   * What the app is for, in the owner's words.
+   *
+   * For a project-backed app this is the project's description, so two tiles
+   * from one project carry the same one — identity is set per project, and a
+   * stack that publishes two ports is rare enough not to warrant a second
+   * place to set it. Always null for a manual app, which has no such field.
+   */
+  description: string | null;
   status: TargetStatus;
   tier: ConfidenceTier;
   /**

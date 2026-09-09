@@ -62,6 +62,21 @@ function AppTile({ app }: { app: AppSummary }) {
           anchor is not valid, and the browser would have to guess which of
           the two a tap meant.
         */}
+        {/*
+          Same resolution the project list uses: a slug goes through the
+          cached icon endpoint, a URL is taken as given. Decorative, so
+          `alt=""` — the name beside it already says which app this is, and
+          announcing it twice only slows a screen reader down.
+        */}
+        {(app.iconSlug || app.iconUrl) && (
+          <img
+            src={
+              app.iconSlug ? `/api/icons/${app.iconSlug}` : (app.iconUrl ?? "")
+            }
+            alt=""
+            className="h-6 w-6 shrink-0 rounded"
+          />
+        )}
         {app.hostname ? (
           <a
             href={`https://${app.hostname}`}
@@ -77,6 +92,17 @@ function AppTile({ app }: { app: AppSummary }) {
           </span>
         )}
       </div>
+
+      {/*
+        Clamped to two lines. A description is free text and a NAS project can
+        justify a paragraph; unbounded, one verbose tile would set the height
+        of its whole row in the grid.
+      */}
+      {app.description && (
+        <p className="text-sm text-muted mt-1 line-clamp-2">
+          {app.description}
+        </p>
+      )}
 
       {!isUp && app.tier && (
         <p className="text-sm text-muted mt-1">{app.tier}</p>

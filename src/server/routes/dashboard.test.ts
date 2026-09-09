@@ -7,7 +7,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../app.js";
 import { createAuth } from "../auth/index.js";
 import { createDb, type Db, runMigrations } from "../db/client.js";
-import { devices, manualApps, monitors, user } from "../db/schema.js";
+import {
+  devices,
+  manualApps,
+  monitors,
+  projectIdentity,
+  user,
+} from "../db/schema.js";
 import { createFakeDocker } from "../docker/fake.js";
 
 const TEST_AUTH = {
@@ -215,6 +221,74 @@ describe("GET /api/dashboard", () => {
       url: "/api/dashboard",
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("carries the project's icon and description onto its tiles", async () => {
+    // The dashboard hardcoded `iconSlug: null` for every project-backed tile
+    // and had no description field at all, so identity set on a project was
+    // visible on the project list and nowhere else.
+    await db.insert(projectIdentity).values({
+      slug: "jellyfin",
+      displayName: "Jellyfin",
+      description: "Films and TV for the house",
+      iconSlug: "jellyfin",
+      iconUrl: null,
+      updatedAt: Date.now(),
+    });
+    for (const service of ["web", "admin"]) {
+      await db.insert(monitors).values({
+        id: randomUUID(),
+        targetType: "app",
+        targetId: `jellyfin:${service}`,
+        type: "http",
+        config: JSON.stringify({ url: "http://127.0.0.1:8096" }),
+        intervalSeconds: 60,
+        timeoutMs: 5000,
+        required: true,
+        enabled: true,
+      });
+    }
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { cookie: adminCookie },
+    });
+    const body = res.json();
+
+    // Identity is per project, so both of its services carry it.
+    expect(body.apps).toHaveLength(2);
+    for (const tile of body.apps) {
+      expect(tile).toMatchObject({
+        iconSlug: "jellyfin",
+        description: "Films and TV for the house",
+      });
+    }
+  });
+
+  it("leaves icon and description null for a project with no identity row", async () => {
+    await db.insert(monitors).values({
+      id: randomUUID(),
+      targetType: "app",
+      targetId: "plex:server",
+      type: "http",
+      config: JSON.stringify({ url: "http://127.0.0.1:32400" }),
+      intervalSeconds: 60,
+      timeoutMs: 5000,
+      required: true,
+      enabled: true,
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { cookie: adminCookie },
+    });
+    expect(res.json().apps[0]).toMatchObject({
+      iconSlug: null,
+      iconUrl: null,
+      description: null,
+    });
   });
 
   it("shows project-backed app with projectSlug, service and hostPort", async () => {

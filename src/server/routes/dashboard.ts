@@ -16,6 +16,7 @@ import { checks, devices, manualApps, monitors } from "../db/schema.js";
 import type { MonitorLatest } from "../monitoring/status.js";
 import { resolveStatus } from "../monitoring/status.js";
 
+import { readIdentities } from "../projects/identity.js";
 import { scanProjects } from "../projects/store.js";
 
 /**
@@ -109,6 +110,19 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
       // Get distinct app targetIds (both manual and project-backed)
       const appTargetIds = [...new Set(allAppMonitors.map((m) => m.targetId))];
 
+      // The icon and description a project's tiles show. Read for every slug
+      // at once rather than per tile: a dashboard is the one screen that holds
+      // every app, so a per-tile read is a query per app on every poll.
+      const identitySlugs = [
+        ...new Set(
+          appTargetIds
+            .filter((id) => !id.startsWith("manual:"))
+            .map((id) => id.slice(0, id.indexOf(":")))
+            .filter((slug) => slug.length > 0),
+        ),
+      ];
+      const identities = await readIdentities(db, identitySlugs);
+
       const apps: AppSummary[] = appTargetIds
         .map((targetId): AppSummary | null => {
           const appMonitors = allAppMonitors.filter(
@@ -153,6 +167,9 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
               hostname: null,
               iconSlug: manualApp.iconSlug,
               iconUrl: manualApp.iconUrl,
+              // `manual_apps` has no description column; a manual app is a
+              // name and a URL.
+              description: null,
               status,
               tier,
               monitors: monitorSummaries,
@@ -167,6 +184,7 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
           }
           const projectSlug = targetId.slice(0, colonIndex);
           const service = targetId.slice(colonIndex + 1);
+          const identity = identities.get(projectSlug);
 
           // Get hostPort from the internal http monitor's URL.
           //
@@ -219,8 +237,9 @@ export const dashboardRoutes: FastifyPluginAsync<Opts> = async (app, opts) => {
             service,
             hostPort,
             hostname,
-            iconSlug: null,
-            iconUrl: null,
+            iconSlug: identity?.iconSlug ?? null,
+            iconUrl: identity?.iconUrl ?? null,
+            description: identity?.description ?? null,
             status,
             tier,
             monitors: monitorSummaries,

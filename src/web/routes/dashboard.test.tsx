@@ -36,6 +36,7 @@ function app(over: Partial<AppSummary> = {}): AppSummary {
     service: "web",
     hostPort: 8096,
     hostname: "jellyfin.example.com",
+    description: null,
     monitors: [],
     iconSlug: null,
     iconUrl: null,
@@ -134,6 +135,59 @@ describe("Dashboard", () => {
     expect(tile).toBeInTheDocument();
     expect(within(tile).getByText("Jellyfin")).toBeInTheDocument();
     expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("shows the project's icon and description", async () => {
+    stubDashboard({
+      apps: [
+        app({
+          iconSlug: "jellyfin",
+          description: "Films and TV for the house",
+        }),
+      ],
+      devices: [],
+      projectCount: 1,
+    });
+    renderDashboard();
+
+    const tile = await screen.findByRole("article");
+    expect(
+      within(tile).getByText("Films and TV for the house"),
+    ).toBeInTheDocument();
+    // Decorative: the name beside it already identifies the app, so the icon
+    // is not announced a second time.
+    const icon = tile.querySelector("img");
+    expect(icon).toHaveAttribute("src", "/api/icons/jellyfin");
+    expect(icon).toHaveAttribute("alt", "");
+  });
+
+  it("prefers the icon slug, and falls back to a bare URL", async () => {
+    stubDashboard({
+      apps: [app({ iconSlug: null, iconUrl: "https://example.com/i.png" })],
+      devices: [],
+      projectCount: 1,
+    });
+    renderDashboard();
+
+    const tile = await screen.findByRole("article");
+    expect(tile.querySelector("img")).toHaveAttribute(
+      "src",
+      "https://example.com/i.png",
+    );
+  });
+
+  it("renders neither when the project has no identity set", async () => {
+    // Most projects never get one. An empty <img> would show a broken-image
+    // glyph, which reads as a failure rather than an absence.
+    stubDashboard({
+      apps: [app({ iconSlug: null, iconUrl: null, description: null })],
+      devices: [],
+      projectCount: 1,
+    });
+    renderDashboard();
+
+    const tile = await screen.findByRole("article");
+    expect(tile.querySelector("img")).toBeNull();
   });
 
   it("keeps the checks hidden until the dot is tapped, then names each one", async () => {
