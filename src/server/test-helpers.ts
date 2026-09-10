@@ -25,6 +25,9 @@ import type {
   LogOptions,
 } from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
+import { dockerRunner } from "./monitoring/docker-runner.js";
+import { createHttpRunners } from "./monitoring/http-runner.js";
+import { Scheduler } from "./monitoring/scheduler.js";
 
 export type TestApp = FastifyInstance & {
   deps: AppDeps & { host: FakeHost; registryDigests: Map<string, string> };
@@ -232,7 +235,35 @@ export async function buildTestApp(): Promise<TestApp> {
     composeConfig,
     registry: { latestDigest: async (image) => registryDigests.get(image) ?? null },
   });
-  const app = await buildApp({ config, db, host, secrets, auth, composeConfig, jobs, images });
+  // Never started here — a ticking scheduler inside the test suite is exactly the kind
+  // of flakiness this project has already paid for. Its `fetch` is never expected to be
+  // called as a result.
+  const httpRunners = createHttpRunners({
+    fetch: async () => {
+      throw new Error("scheduler fetch should not be called in tests");
+    },
+  });
+  const scheduler = new Scheduler({
+    db,
+    host,
+    composeConfig,
+    runners: {
+      docker: dockerRunner,
+      http_internal: httpRunners.internal,
+      http_external: httpRunners.external,
+    },
+  });
+  const app = await buildApp({
+    config,
+    db,
+    host,
+    secrets,
+    auth,
+    composeConfig,
+    jobs,
+    images,
+    scheduler,
+  });
 
   // Assign each app instance its own source address to avoid rate-limit bucket
   // collisions. Better-Auth's sign-in rate limiter is process-global and keyed by IP.

@@ -12,6 +12,7 @@ import type { SecretStore } from "./crypto/secrets.js";
 import type { Db } from "./db/client.js";
 import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
+import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
 import { containerRoutes } from "./routes/containers.js";
 import { healthRoutes } from "./routes/health.js";
@@ -63,6 +64,7 @@ export type AppDeps = {
   composeConfig: ComposeConfigCache;
   jobs: JobRunner;
   images: ImageUpdateChecker;
+  scheduler: Scheduler;
 };
 
 declare module "fastify" {

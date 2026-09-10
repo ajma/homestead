@@ -10,6 +10,9 @@ import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
 import { LocalHost } from "./host/local-host.js";
 import { PreflightError, runMountPreflight } from "./host/preflight.js";
+import { dockerRunner } from "./monitoring/docker-runner.js";
+import { createHttpRunners } from "./monitoring/http-runner.js";
+import { Scheduler } from "./monitoring/scheduler.js";
 
 const config = loadConfig(process.env);
 
@@ -41,6 +44,17 @@ const registry = createRegistryClient({
   },
 });
 const images = new ImageUpdateChecker({ db, host, composeConfig, registry });
+const httpRunners = createHttpRunners({ fetch });
+const scheduler = new Scheduler({
+  db,
+  host,
+  composeConfig,
+  runners: {
+    docker: dockerRunner,
+    http_internal: httpRunners.internal,
+    http_external: httpRunners.external,
+  },
+});
 
 const app = await buildApp({
   config,
@@ -51,7 +65,10 @@ const app = await buildApp({
   composeConfig,
   jobs,
   images,
+  scheduler,
 });
+
+scheduler.start();
 
 // A single-process appliance on a NAS should log and keep serving rather than vanish.
 // The JobRunner.finish catch is the real fix for item 1; these are defence in depth so
