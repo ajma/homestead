@@ -2207,6 +2207,7 @@ git commit -m "feat: roll container states up to one app status"
 **Interfaces:**
 - Consumes: everything from Tasks 1–7
 - Produces: `GET /api/apps/scan`, `POST /api/apps/adopt`, `GET /api/apps`, `GET /api/apps/:id`, `PATCH /api/apps/:id`, `DELETE /api/apps/:id`
+- `FakeHost` gains a `listContainersCalls` counter, incremented in `listContainers`, so a test can assert the list route makes exactly one Docker call rather than one per app.
 
 Authorization: **scan, adopt, patch and delete require `app:config`; the list and detail reads require `app:read` and are scoped**. Viewers receive `ViewerApp`, admins receive `AdminApp`, chosen by `can(ctx, 'app:config')` rather than by an inline field check.
 
@@ -2346,6 +2347,72 @@ describe('app inventory API', () => {
     expect(res.statusCode).toBe(404)
     await app.close()
   })
+
+  it('gives colliding directory names distinct slugs', async () => {
+    // `My Media` and `my-media` both normalise to `mymedia`, and `apps_host_slug` is
+    // unique — so the second insert raised a constraint violation that surfaced as a
+    // 500 mid-adopt, losing the successful adoptions alongside it.
+    const app = await buildTestApp()
+    const { cookie } = await signUpAdmin(app)
+    app.deps.host.files.set('My Media/compose.yaml', 'services: {}\n')
+    app.deps.host.files.set('my-media/compose.yaml', 'services: {}\n')
+    app.deps.host.composeResults.set('config --format json', {
+      exitCode: 0, stdout: JSON.stringify({ name: 'p', services: {} }), stderr: '',
+    })
+    const res = await app.inject({
+      method: 'POST', url: '/api/apps/adopt', headers: { cookie },
+      payload: { directories: ['My Media', 'my-media'] },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().failed).toEqual([])
+    const slugs = res.json().adopted.map((a: { slug: string }) => a.slug)
+    expect(new Set(slugs).size).toBe(2)
+    expect(slugs).toContain('mymedia')
+    await app.close()
+  })
+
+  it('rejects a PATCH with no fields instead of crashing', async () => {
+    // Every field is optional, so `{}` parses cleanly, and Drizzle throws on an empty
+    // `set()` — a 500 for what is really a no-op request.
+    const app = await buildTestApp()
+    const { cookie } = await signUpAdmin(app)
+    app.deps.host.files.set('a/compose.yaml', 'services: {}\n')
+    app.deps.host.composeResults.set('config --format json', {
+      exitCode: 0, stdout: JSON.stringify({ name: 'a', services: {} }), stderr: '',
+    })
+    const adopted = await app.inject({
+      method: 'POST', url: '/api/apps/adopt', headers: { cookie },
+      payload: { directories: ['a'] },
+    })
+    const id = adopted.json().adopted[0].id
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/apps/${id}`, headers: { cookie }, payload: {},
+    })
+    expect(res.statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('lists every app with a single call to Docker', async () => {
+    // One round trip for the whole page. Per-row lookups meant one call per app on the
+    // screen that shows all of them — thirty on this NAS, every page load.
+    const app = await buildTestApp()
+    const { cookie } = await signUpAdmin(app)
+    for (const dir of ['a', 'b', 'c']) {
+      app.deps.host.files.set(`${dir}/compose.yaml`, 'services: {}\n')
+    }
+    app.deps.host.composeResults.set('config --format json', {
+      exitCode: 0, stdout: JSON.stringify({ name: 'p', services: {} }), stderr: '',
+    })
+    await app.inject({
+      method: 'POST', url: '/api/apps/adopt', headers: { cookie },
+      payload: { directories: ['a', 'b', 'c'] },
+    })
+    app.deps.host.listContainersCalls = 0
+    const res = await app.inject({ method: 'GET', url: '/api/apps', headers: { cookie } })
+    expect(res.json()).toHaveLength(3)
+    expect(app.deps.host.listContainersCalls).toBe(1)
+    await app.close()
+  })
 })
 ```
 
@@ -2409,6 +2476,7 @@ import { audit } from '../audit.js'
 import { can, requireCapability, visibleAppsWhere } from '../auth/context.js'
 import { apps } from '../db/schema.js'
 import { LOCAL_HOST_ID } from '../bootstrap.js'
+import type { ContainerSummary } from '../host/types.js'
 
 const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) })
 
@@ -2422,7 +2490,7 @@ const patchBody = z.object({
   sortOrder: z.number().int().optional(),
 })
 
-/** Compose normalises a project name: lowercase, non-alphanumerics stripped. */
+/** A URL-safe slug: lowercase, anything outside `[a-z0-9-]` dropped. */
 function normaliseSlug(directory: string): string {
   return directory.toLowerCase().replace(/[^a-z0-9-]/g, '') || 'app'
 }
@@ -2430,13 +2498,48 @@ function normaliseSlug(directory: string): string {
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   const { db, host, composeConfig } = app.deps
 
-  /** Current status for one app. Both reads need it, so it lives here once. */
-  async function statusFor(row: typeof apps.$inferSelect) {
+  /**
+   * Current status for one app.
+   *
+   * `containers` is passed in by the list route, which fetches once for every app.
+   * Letting each row call `listContainers` itself meant one Docker API round trip per
+   * app on a screen that shows all of them — thirty on this NAS, every page load.
+   */
+  async function statusFor(
+    row: typeof apps.$inferSelect,
+    containers?: ContainerSummary[],
+  ) {
     const target = { directory: row.directory, composeFile: row.composeFile }
     const resolved = await composeConfig.resolve(target)
     if (!resolved.valid) return { status: 'unknown' as const, detail: resolved.message }
-    const containers = await host.listContainers({ project: row.projectName })
-    return rollUpStatus(resolved.resolved.services, containers)
+    const found = containers ?? (await host.listContainers({ project: row.projectName ?? '' }))
+    return rollUpStatus(resolved.resolved.services, found)
+  }
+
+  /**
+   * A slug no other app on this host holds.
+   *
+   * `apps_host_slug` is unique, and `normaliseSlug` is lossy — `My Media` and
+   * `my-media` both become `mymedia`, as does any directory of pure punctuation via
+   * the `'app'` fallback. Without this, adopting the second one raises a constraint
+   * violation that surfaces as a 500 in the middle of a multi-directory adopt, losing
+   * the successes alongside it.
+   */
+  async function uniqueSlug(directory: string): Promise<string> {
+    const base = normaliseSlug(directory)
+    const rows = await db
+      .select({ slug: apps.slug })
+      .from(apps)
+      .where(eq(apps.hostId, LOCAL_HOST_ID))
+    const taken = new Set(rows.map((r) => r.slug))
+    if (!taken.has(base)) return base
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${base}-${n}`
+      if (!taken.has(candidate)) return candidate
+    }
+    // A thousand collisions on one base is not a real filesystem; fall back to
+    // something certainly unique rather than looping forever.
+    return `${base}-${ulid().toLowerCase()}`
   }
 
   app.get('/api/apps/scan', async (request) => {
@@ -2481,7 +2584,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       await db.insert(apps).values({
         id,
         hostId: LOCAL_HOST_ID,
-        slug: normaliseSlug(directory),
+        slug: await uniqueSlug(directory),
         displayName: directory,
         directory,
         composeFile: discovered.composeFile,
@@ -2506,10 +2609,23 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const ctx = requireCapability(request, 'app:read')
     const rows = await db.select().from(apps).where(visibleAppsWhere(ctx))
     const detailed = can(ctx, 'app:config')
+
+    // One Docker call for the whole page, partitioned by project. The per-row
+    // alternative was a round trip per app on the screen that lists them all.
+    const byProject = new Map<string, ContainerSummary[]>()
+    for (const container of await host.listContainers()) {
+      if (!container.project) continue
+      byProject.set(container.project, [
+        ...(byProject.get(container.project) ?? []),
+        container,
+      ])
+    }
+
     return Promise.all(
-      rows.map(async (row) =>
-        detailed ? toAdminApp(row, await statusFor(row)) : toViewerApp(row, await statusFor(row)),
-      ),
+      rows.map(async (row) => {
+        const status = await statusFor(row, byProject.get(row.projectName ?? '') ?? [])
+        return detailed ? toAdminApp(row, status) : toViewerApp(row, status)
+      }),
     )
   })
 
@@ -2529,6 +2645,10 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const ctx = requireCapability(request, 'app:config')
     const { id } = z.object({ id: z.string() }).parse(request.params)
     const body = patchBody.parse(request.body)
+
+    // Every field is optional, so `{}` parses cleanly — and Drizzle throws on an empty
+    // `set()`, which would surface as a 500 for what is really a no-op request.
+    if (Object.keys(body).length === 0) return reply.code(400).send({ error: 'no_fields' })
 
     const updated = await db.update(apps).set(body).where(eq(apps.id, id)).returning({ id: apps.id })
     if (updated.length === 0) return reply.code(404).send({ error: 'not_found' })
@@ -2569,7 +2689,7 @@ composeConfig: new ComposeConfigCache(host),
 - [ ] **Step 6: Run the tests and confirm they pass**
 
 Run: `pnpm vitest run src/server/routes/apps.test.ts && pnpm test`
-Expected: the focused file passes 8 tests; the full suite stays green.
+Expected: the focused file passes 11 tests; the full suite stays green.
 
 - [ ] **Step 7: Commit**
 
