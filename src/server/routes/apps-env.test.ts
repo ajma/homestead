@@ -189,4 +189,53 @@ describe(".env API", () => {
     expect(res.json()).toEqual({ entries: [], exists: false });
     await app.close();
   });
+
+  it("reconciles projectName after writing COMPOSE_PROJECT_NAME to .env", async () => {
+    // projectName is resolved once at adoption, then never revisited. Adding
+    // COMPOSE_PROJECT_NAME=other to .env leaves the row saying the old name, so
+    // listContainers({ project }) matches nothing and a healthy stack reads down.
+    const { app, cookie, id } = await withEnv();
+
+    // Get the current hash.
+    const revealed = (
+      await app.inject({
+        method: "POST",
+        url: `/api/apps/${id}/env/reveal`,
+        headers: { cookie },
+      })
+    ).json();
+
+    // Set up containers for the new project name.
+    app.deps.host.containers = [
+      { id: "abc", names: ["/other-web-1"], state: "running", status: "Up", service: "web", project: "other" },
+    ];
+
+    // Write .env with new project name.
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "other", services: { web: { image: "nginx" } } }),
+      stderr: "",
+    });
+
+    const write = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { content: "COMPOSE_PROJECT_NAME=other\n", expectedHash: revealed.hash },
+    });
+    expect(write.statusCode).toBe(200);
+
+    // The app row's projectName should have been updated.
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}`,
+      headers: { cookie },
+    });
+    expect(detail.json().projectName).toBe("other");
+
+    // And the status should find containers under the new name.
+    expect(detail.json().status).toBe("up");
+
+    await app.close();
+  });
 });

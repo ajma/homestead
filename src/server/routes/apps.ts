@@ -392,6 +392,21 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       const { hash } = await host.writeTextFile(relative, body.content, body.expectedHash);
       composeConfig.invalidate(target);
       await db.update(apps).set({ lastComposeHash: hash }).where(eq(apps.id, id));
+
+      // Re-resolve to pick up a changed project name. The resolve is already warm-cached
+      // against the new content. Do not fail the write if this fails.
+      try {
+        const resolved = await composeConfig.resolve(target);
+        if (resolved.valid && resolved.resolved.projectName !== row.projectName) {
+          await db
+            .update(apps)
+            .set({ projectName: resolved.resolved.projectName })
+            .where(eq(apps.id, id));
+        }
+      } catch {
+        // Best effort. See the .env route for the rationale.
+      }
+
       await audit(db, ctx, {
         action: "app.compose_written",
         targetType: "app",
@@ -480,7 +495,25 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       );
       // `.env` feeds ${VAR} interpolation and COMPOSE_PROJECT_NAME, so the resolved
       // config is now stale even though compose.yaml has not changed.
-      composeConfig.invalidate({ directory: row.directory, composeFile: row.composeFile });
+      const target = { directory: row.directory, composeFile: row.composeFile };
+      composeConfig.invalidate(target);
+
+      // Re-resolve to pick up COMPOSE_PROJECT_NAME from the new .env. The resolve is
+      // already warm-cached against the new content. Do not fail the write if this
+      // fails — the user's file is already saved.
+      try {
+        const resolved = await composeConfig.resolve(target);
+        if (resolved.valid && resolved.resolved.projectName !== row.projectName) {
+          await db
+            .update(apps)
+            .set({ projectName: resolved.resolved.projectName })
+            .where(eq(apps.id, id));
+        }
+      } catch {
+        // Best effort. A name that will be corrected on the next successful resolve is a
+        // smaller problem than a save reported as failed after it succeeded.
+      }
+
       await audit(db, ctx, {
         action: "app.env_written",
         targetType: "app",
