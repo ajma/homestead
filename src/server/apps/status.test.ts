@@ -135,7 +135,7 @@ describe("rollUpStatus", () => {
     // Each is a distinct switch branch, and a silent regression in any of them shows
     // the user a green dot over a stack that is not serving.
     expect(rollUpStatus([service("w")], [container("w", "created")]).status).toBe("starting");
-    expect(rollUpStatus([service("w")], [container("w", "paused")]).status).toBe("degraded");
+    expect(rollUpStatus([service("w")], [container("w", "paused")]).status).toBe("down");
     expect(rollUpStatus([service("w")], [container("w", "dead")]).status).toBe("down");
   });
 

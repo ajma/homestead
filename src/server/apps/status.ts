@@ -37,7 +37,7 @@ function classify(service: ResolvedService, container: ContainerSummary | undefi
     case "created":
       return "starting";
     case "paused":
-      return "degraded";
+      return "down";
     case "exited": {
       // A one-shot init or migration container finishing cleanly is normal. Reporting
       // it as a failure would make most real stacks permanently red.
