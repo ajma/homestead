@@ -1685,6 +1685,44 @@ describe('scanForApps', () => {
     expect(result.discovered[0]).toMatchObject({ projectName: 'stack', containerCount: 1 })
   })
 
+  it('leaves a directory whose name normalises to nothing unmatched', async () => {
+    // Compose will not derive a project name from `Медиа` either, so anything running
+    // was started under a name only the user knows. Reporting the containers as an
+    // orphan is the honest answer; inventing a match would be a guess.
+    const db = await seed()
+    const host = hostWith([['Медиа', 'compose.yaml']], [container('media', 'web')])
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered[0]).toMatchObject({ projectName: null, containerCount: 0 })
+    expect(result.orphans).toEqual([{ projectName: 'media', containerCount: 1 }])
+  })
+
+  it('lets two directories that normalise alike report the same stack', async () => {
+    // Faithful rather than tidy: compose treats `my_media` and `MY_MEDIA` as one
+    // project, so `up` in either really does control the same containers.
+    const db = await seed()
+    const host = hostWith(
+      [['my_media', 'compose.yaml'], ['MY_MEDIA', 'compose.yaml']],
+      [container('my_media', 'web')],
+    )
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered.map((d) => [d.directory, d.projectName, d.containerCount])).toEqual([
+      ['MY_MEDIA', 'my_media', 1],
+      ['my_media', 'my_media', 1],
+    ])
+    expect(result.orphans).toEqual([])
+  })
+
+  it('strips accents and leading dots the way compose does', async () => {
+    const db = await seed()
+    const host = hostWith(
+      [['Filmé', 'compose.yaml'], ['.hidden', 'compose.yaml']],
+      [container('film', 'web'), container('hidden', 'web')],
+    )
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered.map((d) => d.projectName).sort()).toEqual(['film', 'hidden'])
+    expect(result.orphans).toEqual([])
+  })
+
   it('prefers an adopted app\'s recorded name over what .env now says', async () => {
     // Adoption resolved the name through the CLI, so it is authoritative even if
     // someone edits .env afterwards without recreating the containers.
@@ -1742,6 +1780,19 @@ export type ScanResult = { discovered: DiscoveredApp[]; orphans: OrphanStack[] }
 function normaliseProjectName(directory: string): string {
   return directory.toLowerCase().replace(/[^a-z0-9_-]/g, '').replace(/^[_-]+/, '')
 }
+// Two names this cannot resolve, both left as they are on purpose:
+//
+// A name with nothing left after stripping — `Медиа`, `...` — normalises to `''`, which
+// never matches, so the directory reads as stopped and its containers list as an orphan.
+// That is the honest answer rather than a bug: compose refuses to derive a project name
+// from such a directory at all, so whatever is running was started with an explicit name
+// only the user knows. `byProject` never holds `''` because unlabelled containers are
+// skipped, so the empty lookup is inert.
+//
+// Two directories can normalise to the same name — `my_media` and `MY_MEDIA` — and both
+// then report the same containers. Measured, and faithful: compose treats them as one
+// project, so `up` in either directory really does control the same stack. Flagging it
+// would need a UI affordance that does not exist yet.
 
 /**
  * The project name compose would use for a directory that Homestead has not adopted.
@@ -1837,7 +1888,7 @@ export async function scanForApps(deps: {
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/adoption.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit**
 
