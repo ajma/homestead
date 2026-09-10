@@ -157,4 +157,29 @@ describe("rollUpStatus", () => {
     );
     expect(result.detail).toBe("2/3 services up, 1 missing");
   });
+
+  it("names the cause rather than only the shortfall", () => {
+    // The dot says something is wrong; this line says what. Without the cause clauses,
+    // three restarting containers and three absent ones both read "0/3 services up".
+    const detail = (containers: ContainerSummary[]) =>
+      rollUpStatus([service("a"), service("b"), service("c")], containers).detail;
+
+    expect(
+      detail([
+        container("a", "restarting"),
+        container("b", "restarting"),
+        container("c", "restarting"),
+      ]),
+    ).toBe("0/3 services up, 3 degraded");
+
+    expect(detail([])).toBe("0/3 services up, 3 missing");
+
+    expect(
+      detail([
+        container("a", "running", "Up 2 hours"),
+        container("b", "running", "Up 1 minute (unhealthy)"),
+        container("c", "running", "Up 3 seconds (health: starting)"),
+      ]),
+    ).toBe("1/3 services up, 1 starting, 1 failing");
+  });
 });
