@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
-import { z, ZodError } from "zod";
+import { ZodError, z } from "zod";
 import { scanForApps } from "../apps/adoption.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
@@ -16,25 +16,27 @@ import { HashMismatchError } from "../host/types.js";
 
 const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) });
 
-const launchUrlSchema = z.union([
-  z.null(),
-  z.literal(""),
-  z.string().refine(
-    (val) => {
-      // Only http: and https: schemes are safe for href attributes. javascript:, data:,
-      // and scheme-relative URLs (//) are all stored XSS vectors.
-      if (!val.startsWith("http://") && !val.startsWith("https://")) return false;
-      // Verify it's a valid URL after the scheme check.
-      try {
-        new URL(val);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    { message: "URL must use http: or https: scheme" },
-  ),
-]).optional();
+const launchUrlSchema = z
+  .union([
+    z.null(),
+    z.literal(""),
+    z.string().refine(
+      (val) => {
+        // Only http: and https: schemes are safe for href attributes. javascript:, data:,
+        // and scheme-relative URLs (//) are all stored XSS vectors.
+        if (!val.startsWith("http://") && !val.startsWith("https://")) return false;
+        // Verify it's a valid URL after the scheme check.
+        try {
+          new URL(val);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: "URL must use http: or https: scheme" },
+    ),
+  ])
+  .optional();
 
 const patchBody = z.object({
   displayName: z.string().min(1).optional(),
@@ -67,7 +69,10 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
    * an app the caller may not see exists.
    */
   async function loadApp(ctx: AuthContext, id: string) {
-    const [row] = await db.select().from(apps).where(and(eq(apps.id, id), visibleAppsWhere(ctx)));
+    const [row] = await db
+      .select()
+      .from(apps)
+      .where(and(eq(apps.id, id), visibleAppsWhere(ctx)));
     return row;
   }
 

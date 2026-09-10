@@ -207,7 +207,14 @@ describe(".env API", () => {
 
     // Set up containers for the new project name.
     app.deps.host.containers = [
-      { id: "abc", names: ["/other-web-1"], state: "running", status: "Up", service: "web", project: "other" },
+      {
+        id: "abc",
+        names: ["/other-web-1"],
+        state: "running",
+        status: "Up",
+        service: "web",
+        project: "other",
+      },
     ];
 
     // Write .env with new project name.
