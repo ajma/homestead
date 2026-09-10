@@ -1224,6 +1224,36 @@ describe('values', () => {
     const puid = parseEnv(sample).find((e) => e.kind === 'pair' && e.key === 'PUID')
     expect(puid?.kind === 'pair' && puid.comment).toBe('   # the media user')
   })
+
+  it('expands escapes in double quotes and leaves single quotes literal', () => {
+    const value = (content: string) => {
+      const entry = parseEnv(content).find((e) => e.kind === 'pair')
+      return entry?.kind === 'pair' ? entry.value : undefined
+    }
+    // These are passwords. Stripping the backslash from a single-quoted one is a
+    // silent corruption that surfaces as an app failing to authenticate.
+    expect(value("PASS='hunter\\2'")).toBe('hunter\\2')
+    expect(value('DESC="line1\\nline2"')).toBe('line1\nline2')
+    expect(value('P="C:\\dir"')).toBe('C:\\dir')  // unknown escape stays verbatim
+  })
+
+  it('finds the comment after an escaped quote', () => {
+    const entry = parseEnv('A="has \\" quote" # note').find((e) => e.kind === 'pair')
+    expect(entry?.kind === 'pair' && entry.value).toBe('has " quote')
+    expect(entry?.kind === 'pair' && entry.comment).toBe(' # note')
+  })
+
+  it('reads a file saved with CRLF line endings', () => {
+    // Measured against the first implementation: every line matched `other`, so a
+    // CRLF `.env` appeared to contain no variables at all.
+    const entries = parseEnv('A=1\r\nB=2\r\n')
+    const pairs = entries.filter((e) => e.kind === 'pair')
+    expect(pairs.map((p) => p.kind === 'pair' && [p.key, p.value])).toEqual([
+      ['A', '1'],
+      ['B', '2'],
+    ])
+    expect(serialiseEnv(entries)).toBe('A=1\r\nB=2\r\n')
+  })
 })
 
 describe('upsertEnv', () => {
@@ -1252,6 +1282,25 @@ describe('upsertEnv', () => {
     expect(back?.kind === 'pair' && back.value).toBe('say "hi"')
   })
 
+  it('rewrites the last occurrence of a duplicated key, which is the one compose reads', () => {
+    // Rewriting the first was measured to be a silent no-op: the UI reports success
+    // and the container still starts with the old value.
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1\nA=2'), 'A', '9'))).toBe('A=1\nA=9')
+  })
+
+  it('keeps a CRLF line CRLF when it rewrites it', () => {
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1\r\nB=2\r\n'), 'A', '9'))).toBe('A=9\r\nB=2\r\n')
+  })
+
+  it('never lets a written value restructure the file', () => {
+    // An API caller can supply anything. A literal newline written raw would split the
+    // line and silently invent a variable.
+    const text = serialiseEnv(upsertEnv(parseEnv('A=1'), 'A', 'one\ntwo'))
+    expect(text.split('\n')).toHaveLength(1)
+    const back = parseEnv(text).find((e) => e.kind === 'pair')
+    expect(back?.kind === 'pair' && back.value).toBe('one\ntwo')
+  })
+
   it('appends a new key at the end', () => {
     const text = serialiseEnv(upsertEnv(parseEnv('A=1\n'), 'B', '2'))
     expect(text).toBe('A=1\nB=2\n')
@@ -1274,7 +1323,20 @@ export type EnvEntry =
 /** Fixed width, so the mask reveals nothing about the secret's length. */
 const MASK = '••••••••'
 
-const PAIR = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/
+// `\r?$` tolerates a file last edited on Windows. Without it the whole right-hand
+// side keeps a trailing CR, the value is wrong, and — worse — every line reads as
+// `other`, so a CRLF `.env` appears to contain no variables at all.
+const PAIR = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*?)\r?$/
+
+/**
+ * Escape sequences compose expands inside double quotes. An unrecognised sequence is
+ * left verbatim, so a Windows path like `"C:\dir"` keeps its backslash.
+ */
+const ESCAPES: Record<string, string> = { n: '\n', r: '\r', t: '\t', '\\': '\\', '"': '"' }
+
+function unescapeDouble(value: string): string {
+  return value.replace(/\\(.)/g, (whole, ch: string) => ESCAPES[ch] ?? whole)
+}
 
 /**
  * Splits a `.env` right-hand side into its value and its trailing comment.
@@ -1293,6 +1355,14 @@ function splitValue(rest: string): { value: string; comment: string } {
   for (let i = 0; i < rest.length; i++) {
     const ch = rest[i]
     if (quote) {
+      // A backslash escapes the next character inside double quotes only. Without
+      // this, `A="has \" quote" # note` closes the quote at the escaped `"`, reopens
+      // at the closing one, and never finds the comment — the whole line lands in the
+      // value. Single quotes are literal, so a backslash there escapes nothing.
+      if (quote === '"' && ch === '\\') {
+        i++
+        continue
+      }
       if (ch === quote) quote = null
       continue
     }
@@ -1308,17 +1378,38 @@ function splitValue(rest: string): { value: string; comment: string } {
   return { value: unquote(rest.trim()), comment: '' }
 }
 
+/**
+ * Removes one layer of matching surrounding quotes.
+ *
+ * Compose is asymmetric here and so is this: a double-quoted value has its escape
+ * sequences expanded, a single-quoted value is literal. Unescaping both would corrupt
+ * `PASS='hunter\2'` into `hunter2` — and these are passwords, so the corruption is
+ * silent until an app fails to authenticate.
+ */
 function unquote(value: string): string {
   const first = value[0]
-  if ((first === '"' || first === "'") && value.length >= 2 && value.endsWith(first)) {
-    return value.slice(1, -1)
+  if (value.length >= 2 && value.endsWith(first ?? '')) {
+    if (first === '"') return unescapeDouble(value.slice(1, -1))
+    if (first === "'") return value.slice(1, -1)
   }
   return value
 }
 
-/** Re-quotes on the way out only when the value would not survive unquoted. */
+/**
+ * Re-quotes on the way out only when the value would not survive unquoted.
+ *
+ * The escaping here and `unescapeDouble` are a matched pair: whatever this writes must
+ * read back identically. Newlines and tabs become sequences rather than literals
+ * because a literal one would split the line and silently restructure the file.
+ */
 function quoteIfNeeded(value: string): string {
-  return /[\s#'"]/.test(value) ? `"${value.replace(/(["\\])/g, '\\$1')}"` : value
+  if (!/[\s#'"\\]/.test(value)) return value
+  const escaped = value
+    .replace(/([\\"])/g, '\\$1')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')
+  return `"${escaped}"`
 }
 
 /**
@@ -1359,19 +1450,27 @@ export function maskEnv(entries: EnvEntry[]): Array<{ key: string; masked: strin
  * would make editing one variable destroy the note explaining why it is set — the
  * precise loss this module exists to prevent, and one the user would only notice
  * later, over SSH.
+ *
+ * When a key appears more than once, the LAST occurrence is the one rewritten, because
+ * that is the one compose reads. Rewriting the first was measured to produce a silent
+ * no-op: `A=1\nA=2` edited to `9` became `A=9\nA=2`, the UI showed success, and the
+ * container still started with `2`.
  */
 export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvEntry[] {
-  const index = entries.findIndex((e) => e.kind === 'pair' && e.key === key)
+  const index = entries.findLastIndex((e) => e.kind === 'pair' && e.key === key)
   if (index >= 0) {
     const existing = entries[index]
     const comment = existing?.kind === 'pair' ? existing.comment : ''
+    // Preserve the line's own ending so one edit does not convert a CRLF file's line
+    // to LF and leave the file mixed.
+    const eol = existing?.raw.endsWith('\r') ? '\r' : ''
     const next = [...entries]
     next[index] = {
       kind: 'pair',
       key,
       value,
       comment,
-      raw: `${key}=${quoteIfNeeded(value)}${comment}`,
+      raw: `${key}=${quoteIfNeeded(value)}${comment}${eol}`,
     }
     return next
   }
@@ -1393,7 +1492,7 @@ export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvE
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/env-file.test.ts`
-Expected: PASS, 14 tests.
+Expected: PASS, 20 tests.
 
 - [ ] **Step 5: Commit**
 
