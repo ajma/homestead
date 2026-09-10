@@ -2842,6 +2842,32 @@ describe('parseImageRef', () => {
     expect(parseImageRef(input)).toEqual({ registry, repository, reference })
   })
 
+  it.each([
+    ['docker.io/library/postgres:16', 'registry-1.docker.io', 'library/postgres', '16'],
+    ['index.docker.io/linuxserver/radarr', 'registry-1.docker.io', 'linuxserver/radarr', 'latest'],
+  ])('rewrites %s to the host the v2 API actually lives on', (input, registry, repository, reference) => {
+    // `docker.io` redirects to `registry-1.docker.io`, and `fetch` strips Authorization
+    // across an origin change — so the authenticated retry would arrive unauthenticated
+    // and 401 again. Compose files do write `docker.io/…`.
+    expect(parseImageRef(input)).toEqual({ registry, repository, reference })
+  })
+
+  it('takes the digest and drops the tag when a reference carries both', () => {
+    // `nginx:1.25@sha256:…` is legal and common in pinned compose files. Taking only the
+    // digest left `:1.25` inside the repository, giving `library/nginx:1.25` — a path no
+    // registry answers.
+    expect(parseImageRef('nginx:1.25@sha256:abc')).toEqual({
+      registry: 'registry-1.docker.io', repository: 'library/nginx', reference: 'sha256:abc',
+    })
+  })
+
+  it.each([
+    ['nginx:', 'latest'],
+    ['nginx', 'latest'],
+  ])('treats %s as an untagged reference', (input, reference) => {
+    expect(parseImageRef(input).reference).toBe(reference)
+  })
+
   it('keeps a digest reference as the reference', () => {
     expect(parseImageRef('nginx@sha256:abc')).toEqual({
       registry: 'registry-1.docker.io', repository: 'library/nginx', reference: 'sha256:abc',
@@ -2913,6 +2939,47 @@ describe('registry client', () => {
     expect(await createRegistryClient({ fetch: impl }).latestDigest('nginx')).toBeNull()
   })
 
+  it('reports a reason for every failure, so a broken registry is diagnosable', async () => {
+    // `latestDigest` returns null for everything by design, so without this hook a
+    // systematically broken registry is silent across a daily sweep of every service of
+    // every app.
+    const reasons: Array<[string, string]> = []
+    const onError = (image: string, reason: string) => reasons.push([image, reason])
+
+    const { impl } = fakeFetch([{ status: 404, headers: {} }])
+    expect(await createRegistryClient({ fetch: impl, onError }).latestDigest('nginx')).toBeNull()
+
+    const throwing = (async () => {
+      throw new Error('getaddrinfo ENOTFOUND')
+    }) as unknown as typeof fetch
+    await createRegistryClient({ fetch: throwing, onError }).latestDigest('ghcr.io/x/y')
+
+    await createRegistryClient({ fetch: impl, onError }).latestDigest('')
+
+    expect(reasons.map(([image]) => image)).toEqual(['nginx', 'ghcr.io/x/y', ''])
+    expect(reasons[0]?.[1]).toContain('404')
+    expect(reasons[1]?.[1]).toContain('ENOTFOUND')
+    expect(reasons[2]?.[1]).toContain('cannot parse')
+  })
+
+  it('reads an unquoted challenge parameter', async () => {
+    // RFC 9110 allows a bare token. Every registry in practice quotes, but a parser that
+    // only reads quoted values returns nothing — indistinguishable from needing no auth.
+    const { impl } = fakeFetch([
+      { status: 401, headers: { 'www-authenticate': 'Bearer realm=https://auth.example/token,service=reg' } },
+      { status: 200, headers: {}, body: { token: 'tok' } },
+      { status: 200, headers: { 'docker-content-digest': 'sha256:ok' } },
+    ])
+    expect(await createRegistryClient({ fetch: impl }).latestDigest('nginx')).toBe('sha256:ok')
+  })
+
+  it('ignores a non-Bearer challenge rather than guessing', async () => {
+    const { impl } = fakeFetch([
+      { status: 401, headers: { 'www-authenticate': 'Basic realm="private"' } },
+    ])
+    expect(await createRegistryClient({ fetch: impl }).latestDigest('nginx')).toBeNull()
+  })
+
   it('returns null when the network fails, rather than failing the whole check', async () => {
     const failing = (async () => {
       throw new Error('getaddrinfo ENOTFOUND')
@@ -2965,32 +3032,46 @@ const ACCEPT = [
  * colon, or is exactly `localhost`. Otherwise `linuxserver/jellyfin` would parse as the
  * registry `linuxserver`. A single-segment name gets Docker Hub's implicit `library/`.
  */
+/**
+ * Hostnames that mean Docker Hub but are not where its v2 API lives.
+ *
+ * `https://docker.io/v2/…` redirects to `registry-1.docker.io`, and `fetch` strips the
+ * `Authorization` header across an origin change — so the authenticated retry after the
+ * token exchange arrives unauthenticated and 401s again. Compose files do write
+ * `docker.io/…`, so this is reachable, not theoretical.
+ */
+const HUB_ALIASES = new Set(['docker.io', 'index.docker.io', 'registry.hub.docker.com'])
+
 export function parseImageRef(image: string): ImageRef {
-  let rest = image
+  let rest = image.trim().replace(/^\/+/, '')
   let registry = DEFAULT_REGISTRY
 
   const slash = rest.indexOf('/')
   if (slash !== -1) {
     const head = rest.slice(0, slash)
     if (head === 'localhost' || head.includes('.') || head.includes(':')) {
-      registry = head
+      registry = HUB_ALIASES.has(head) ? DEFAULT_REGISTRY : head
       rest = rest.slice(slash + 1)
     }
   }
 
   let reference = 'latest'
+  // Digest first, then tag from whatever is left. `nginx:1.25@sha256:…` is legal and
+  // common in pinned compose files; taking only the digest left `:1.25` inside the
+  // repository, producing `library/nginx:1.25` and a request URL no registry answers.
   const at = rest.indexOf('@')
   if (at !== -1) {
     reference = rest.slice(at + 1)
     rest = rest.slice(0, at)
-  } else {
-    const colon = rest.lastIndexOf(':')
-    // A colon before a slash is a port on the host, not a tag — but the host has already
-    // been stripped above, so any remaining colon after the last slash is a tag.
-    if (colon !== -1 && colon > rest.lastIndexOf('/')) {
-      reference = rest.slice(colon + 1)
-      rest = rest.slice(0, colon)
-    }
+  }
+  const colon = rest.lastIndexOf(':')
+  // A colon before a slash would be a host port, but the host is already stripped, so
+  // any colon after the last slash is a tag.
+  if (colon !== -1 && colon > rest.lastIndexOf('/')) {
+    const tag = rest.slice(colon + 1)
+    rest = rest.slice(0, colon)
+    // A digest already claimed `reference`; a bare `nginx:` names no tag at all.
+    if (at === -1 && tag !== '') reference = tag
   }
 
   const repository = registry === DEFAULT_REGISTRY && !rest.includes('/') ? `library/${rest}` : rest
@@ -2998,16 +3079,36 @@ export function parseImageRef(image: string): ImageRef {
 }
 
 /** Parses `Bearer realm="…",service="…",scope="…"` into its parts. */
+/**
+ * Parses `Bearer realm="…",service="…",scope="…"` into its parts.
+ *
+ * Values may be unquoted — RFC 9110 allows a bare token — and every registry in practice
+ * quotes them, but a parser that only reads quoted values returns nothing for the ones
+ * that do not, which looks identical to a registry needing no auth.
+ */
 function parseChallenge(header: string): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const match of header.matchAll(/([a-zA-Z]+)="([^"]*)"/g)) {
-    const [, key, value] = match
+  if (!/^\s*Bearer\b/i.test(header)) return out
+  for (const match of header.matchAll(/([a-zA-Z_]+)=(?:"([^"]*)"|([^\s,]+))/g)) {
+    const [, key, quoted, bare] = match
+    const value = quoted ?? bare
     if (key !== undefined && value !== undefined) out[key.toLowerCase()] = value
   }
   return out
 }
 
-export function createRegistryClient(deps: { fetch: typeof fetch }) {
+export function createRegistryClient(deps: {
+  fetch: typeof fetch
+  /**
+   * Called once per failed lookup with the reason.
+   *
+   * `latestDigest` deliberately returns `null` for everything, so without this a
+   * systematically broken registry — a typo'd private host, expired credentials, a rate
+   * limit — is completely silent across a daily sweep of every service of every app. The
+   * caller decides whether to log; this module stays free of a logger dependency.
+   */
+  onError?: (image: string, reason: string) => void
+}) {
   /**
    * The digest the registry currently serves for a tag, or `null`.
    *
@@ -3016,8 +3117,17 @@ export function createRegistryClient(deps: { fetch: typeof fetch }) {
    * registry must not fail the others or surface as an error the user has to dismiss.
    */
   async function latestDigest(image: string): Promise<string | null> {
+    const fail = (reason: string): null => {
+      deps.onError?.(image, reason)
+      return null
+    }
     try {
       const ref = parseImageRef(image)
+      // A reference we cannot build a URL from is a configuration error, not a network
+      // one, and saying so is more useful than a 404 from a nonsense path.
+      if (ref.repository === '' || ref.repository.endsWith('/') || ref.reference === '') {
+        return fail(`cannot parse image reference "${image}"`)
+      }
       const url = `https://${ref.registry}/v2/${ref.repository}/manifests/${ref.reference}`
       const headers: Record<string, string> = { accept: ACCEPT }
 
@@ -3025,7 +3135,7 @@ export function createRegistryClient(deps: { fetch: typeof fetch }) {
 
       if (response.status === 401) {
         const challenge = parseChallenge(response.headers.get('www-authenticate') ?? '')
-        if (!challenge.realm) return null
+        if (!challenge.realm) return fail('401 without a usable Bearer challenge')
 
         const tokenUrl = new URL(challenge.realm)
         if (challenge.service) tokenUrl.searchParams.set('service', challenge.service)
@@ -3035,10 +3145,10 @@ export function createRegistryClient(deps: { fetch: typeof fetch }) {
         )
 
         const tokenResponse = await deps.fetch(tokenUrl.toString(), { method: 'GET' })
-        if (!tokenResponse.ok) return null
+        if (!tokenResponse.ok) return fail(`token endpoint returned ${tokenResponse.status}`)
         const body = (await tokenResponse.json()) as { token?: string; access_token?: string }
         const token = body.token ?? body.access_token
-        if (!token) return null
+        if (!token) return fail('token endpoint returned no token')
 
         headers.authorization = `Bearer ${token}`
         // Exactly one retry. A registry that rejects its own token will keep doing so,
@@ -3046,10 +3156,11 @@ export function createRegistryClient(deps: { fetch: typeof fetch }) {
         response = await deps.fetch(url, { method: 'HEAD', headers })
       }
 
-      if (!response.ok) return null
-      return response.headers.get('docker-content-digest')
-    } catch {
-      return null
+      if (!response.ok) return fail(`manifest request returned ${response.status}`)
+      const digest = response.headers.get('docker-content-digest')
+      return digest ?? fail('registry answered without a Docker-Content-Digest header')
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : 'registry request failed')
     }
   }
 
