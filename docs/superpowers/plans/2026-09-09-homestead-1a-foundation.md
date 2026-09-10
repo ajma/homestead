@@ -72,7 +72,7 @@ src/web/
   auth/useSession.ts  Session hook
   routes/
     Login.tsx
-    Shell.tsx         Authenticated layout
+    AppLayout.tsx     Authenticated layout: header, nav, sign-out. NOT a terminal.
     Placeholder.tsx   Stand-ins for 1B–1D routes
   index.css
 ```
@@ -3426,10 +3426,10 @@ git commit -m "feat: add user management API with first-admin bootstrap and last
 
 ---
 
-### Task 13: Web shell — Vite, Tailwind, router, login
+### Task 13: Web app skeleton — Vite, Tailwind, router, login
 
 **Files:**
-- Create: `vite.config.ts`, `tailwind.config.ts`, `postcss.config.js`, `index.html`, `src/web/main.tsx`, `src/web/App.tsx`, `src/web/index.css`, `src/web/api/client.ts`, `src/web/auth/useSession.ts`, `src/web/routes/Login.tsx`, `src/web/routes/Shell.tsx`, `src/web/routes/Placeholder.tsx`, `src/server/routes/spa.ts`
+- Create: `vite.config.ts`, `tailwind.config.ts`, `postcss.config.js`, `index.html`, `src/web/main.tsx`, `src/web/App.tsx`, `src/web/index.css`, `src/web/api/client.ts`, `src/web/auth/useSession.ts`, `src/web/routes/Login.tsx`, `src/web/routes/AppLayout.tsx`, `src/web/routes/Placeholder.tsx`, `src/server/routes/spa.ts`
 - Modify: `src/server/app.ts`
 - Test: `src/web/api/client.test.ts`
 
@@ -3719,7 +3719,7 @@ export function Placeholder({ title }: { title: string }) {
 }
 ```
 
-`src/web/routes/Shell.tsx`:
+`src/web/routes/AppLayout.tsx`:
 
 ```tsx
 import { useQueryClient } from '@tanstack/react-query'
@@ -3727,7 +3727,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { apiFetch } from '@web/api/client'
 import type { Me } from '@web/auth/useSession'
 
-export function Shell({ me }: { me: Me }) {
+export function AppLayout({ me }: { me: Me }) {
   const queryClient = useQueryClient()
   const isAdmin = me.role === 'admin'
 
@@ -3764,7 +3764,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { useSession } from '@web/auth/useSession'
 import { Login } from '@web/routes/Login'
 import { Placeholder } from '@web/routes/Placeholder'
-import { Shell } from '@web/routes/Shell'
+import { AppLayout } from '@web/routes/AppLayout'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -3780,7 +3780,7 @@ function Routed() {
 
   return (
     <Routes>
-      <Route element={<Shell me={me} />}>
+      <Route element={<AppLayout me={me} />}>
         <Route path="/" element={<Placeholder title="Launcher" />} />
         <Route
           path="/apps/*"
