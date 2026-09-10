@@ -12,7 +12,7 @@ import type { AuthContext } from "../auth/context.js";
 import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
 import { LOCAL_HOST_ID } from "../bootstrap.js";
 import type { Db } from "../db/client.js";
-import { apps } from "../db/schema.js";
+import { apps, probes } from "../db/schema.js";
 import type { ContainerSummary } from "../host/types.js";
 import { HashMismatchError } from "../host/types.js";
 
@@ -227,18 +227,33 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
       const { hash } = await host.readTextFile(`${directory}/${discovered.composeFile}`);
       const id = ulid();
+      // Resolved before the transaction opens, not inside it: `uniqueSlug` reads through
+      // the plain `db` handle rather than `tx`, and a plain read issued while a
+      // transaction is open on the same connection is rejected outright against the
+      // in-memory database the test suite runs on (see scheduler.ts's `serialise`).
+      const slug = await uniqueSlug(directory);
       try {
-        await db.insert(apps).values({
-          id,
-          hostId: LOCAL_HOST_ID,
-          slug: await uniqueSlug(directory),
-          displayName: directory,
-          directory,
-          composeFile: discovered.composeFile,
-          // From `docker compose config`, which already honours COMPOSE_PROJECT_NAME in
-          // the sibling .env. Deriving it from the directory name would be wrong.
-          projectName: resolved.resolved.projectName,
-          lastComposeHash: hash,
+        // The app row and its docker probe are inserted together. An adopted app with no
+        // probe is invisible to monitoring until someone notices and adds one by hand, so
+        // the probe insert cannot be allowed to fail silently after the app exists — and
+        // it cannot be allowed to leave a probeless app behind either. Wrapping both in one
+        // transaction means a probe-insert failure rolls the app insert back with it, so
+        // this directory lands in `failed` honestly instead of in `adopted` missing a
+        // probe, or in `failed` while the row sits in the database regardless.
+        await db.transaction(async (tx) => {
+          await tx.insert(apps).values({
+            id,
+            hostId: LOCAL_HOST_ID,
+            slug,
+            displayName: directory,
+            directory,
+            composeFile: discovered.composeFile,
+            // From `docker compose config`, which already honours COMPOSE_PROJECT_NAME in
+            // the sibling .env. Deriving it from the directory name would be wrong.
+            projectName: resolved.resolved.projectName,
+            lastComposeHash: hash,
+          });
+          await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker" });
         });
       } catch (error) {
         // `apps_host_slug` and `apps_host_directory` are unique. A concurrent adopt can
