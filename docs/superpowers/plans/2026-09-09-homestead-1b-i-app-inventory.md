@@ -522,6 +522,27 @@ describe.skipIf(!hasDocker)('runCompose', () => {
     expect(chunks.join('')).toContain('nginx:alpine')
   })
 
+  it('survives an onOutput callback that throws, without killing the process', async () => {
+    // Measured before this guard existed: the throw escaped as an uncaughtException
+    // while the promise still resolved with exitCode 0 and the full output — so a
+    // caller saw success while the process died. Phase 1B-ii passes an SSE writer
+    // here, and a disconnected client is ordinary, not exceptional.
+    const seen: string[] = []
+    process.once('uncaughtException', (error) => seen.push(String(error.message)))
+
+    const result = await host.runCompose(
+      { directory: 'good', composeFile: 'compose.yaml' },
+      ['config', '--format', 'json'],
+      { onOutput: () => { throw new Error('SSE client disconnected') } },
+    )
+
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(seen).toEqual([])
+    // Capture must continue despite the failing consumer.
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout).services.web.image).toBe('nginx:alpine')
+  })
+
   it('refuses a directory outside the compose root', async () => {
     await expect(
       host.runCompose({ directory: '../escape', composeFile: 'compose.yaml' }, ['config']),
@@ -598,15 +619,33 @@ import { execFile } from 'node:child_process'
 
     let stdout = ''
     let stderr = ''
+
+    /**
+     * A throw from `onOutput` must not escape.
+     *
+     * These run inside stream 'data' handlers, so a synchronous throw propagates out of
+     * `emit()` and becomes an `uncaughtException` — measured: the promise still resolved
+     * with `exitCode: 0` and the full output, while the process died. A caller would see
+     * success. Phase 1B-ii passes an SSE writer here, and a disconnected client is an
+     * ordinary event, not an exceptional one.
+     */
+    const emit = (text: string, stream: 'stdout' | 'stderr') => {
+      try {
+        opts.onOutput?.(text, stream)
+      } catch {
+        // The consumer's problem, not the subprocess's. Capture continues either way.
+      }
+    }
+
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8')
       stdout += text
-      opts.onOutput?.(text, 'stdout')
+      emit(text, 'stdout')
     })
     child.stderr?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8')
       stderr += text
-      opts.onOutput?.(text, 'stderr')
+      emit(text, 'stderr')
     })
 
     const exitCode = await new Promise<number>((resolve) => {
@@ -640,8 +679,17 @@ The fake must stay contract-compliant — Phase 1A's review rated a permissive f
     this.composeCalls.push({ target, args })
     const result = this.composeResults.get(args.join(' '))
     if (!result) throw new Error(`FakeHost: no scripted compose result for: ${args.join(' ')}`)
-    if (result.stdout) opts.onOutput?.(result.stdout, 'stdout')
-    if (result.stderr) opts.onOutput?.(result.stderr, 'stderr')
+    // Same swallow as LocalHost: a fake that propagates a callback throw would make
+    // tests pass or fail differently from production.
+    const emit = (text: string, stream: 'stdout' | 'stderr') => {
+      try {
+        opts.onOutput?.(text, stream)
+      } catch {
+        /* consumer's problem */
+      }
+    }
+    if (result.stdout) emit(result.stdout, 'stdout')
+    if (result.stderr) emit(result.stderr, 'stderr')
     return result
   }
 ```
