@@ -92,6 +92,10 @@ export class FakeHost implements Host {
     this.files.delete(rel);
   }
 
+  async fileExists(rel: string): Promise<boolean> {
+    return this.files.has(rel);
+  }
+
   async listContainers(filters?: { project?: string }): Promise<ContainerSummary[]> {
     this.listContainersCalls++;
     if (!filters?.project) return this.containers;

@@ -127,6 +127,15 @@ export class LocalHost implements Host {
     await rm(abs, { force: true });
   }
 
+  async fileExists(rel: string): Promise<boolean> {
+    try {
+      await this.guard.resolveExisting(rel);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async listContainers(filters?: { project?: string }): Promise<ContainerSummary[]> {
     const label = filters?.project ? [`com.docker.compose.project=${filters.project}`] : undefined;
     const raw = await this.docker.listContainers({

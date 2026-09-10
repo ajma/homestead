@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
 import { scanForApps } from "../apps/adoption.js";
+import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { rollUpStatus } from "../apps/status.js";
 import { audit } from "../audit.js";
@@ -71,6 +72,35 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       } catch {
         // Left behind. Accepted: see the note on abnormal termination below.
       }
+    }
+  }
+
+  /**
+   * Reads `.env`, distinguishing "there isn't one" from "there is one I cannot read".
+   *
+   * Collapsing those two was a data-loss path, and on the file holding the user's
+   * database passwords. `.env` files are routinely `chmod 600`, and if Homestead runs as
+   * a different uid the read fails — so the UI would report no `.env`, the user would
+   * write one with `expectedHash: null`, and `writeTextFile`'s own read would fail the
+   * same way, take `currentHash` as null, match, and replace the original.
+   *
+   * `fileExists` is what separates them: present-but-unreadable becomes an error the
+   * write refuses to act on, rather than an absence it happily fills.
+   */
+  type EnvFile =
+    | { state: "present"; content: string; hash: string }
+    | { state: "absent"; content: ""; hash: null }
+    | { state: "unreadable"; content: ""; hash: null };
+
+  async function readEnv(directory: string): Promise<EnvFile> {
+    const relative = `${directory}/.env`;
+    try {
+      const file = await host.readTextFile(relative);
+      return { state: "present", content: file.content, hash: file.hash };
+    } catch {
+      return (await host.fileExists(relative))
+        ? { state: "unreadable", content: "", hash: null }
+        : { state: "absent", content: "", hash: null };
     }
   }
 
@@ -353,5 +383,83 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     return validateContent(row.directory, body.content);
+  });
+
+  const UNREADABLE = {
+    error: "env_unreadable",
+    message: "A .env file exists but Homestead cannot read it. Check its ownership and mode.",
+  } as const;
+
+  app.get("/api/apps/:id/env", async (request, reply) => {
+    requireCapability(request, "app:config");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+
+    const file = await readEnv(row.directory);
+    if (file.state === "unreadable") return reply.code(409).send(UNREADABLE);
+    // Masked, always. The reveal endpoint is the only way to see values.
+    return { entries: maskEnv(parseEnv(file.content)), exists: file.state === "present" };
+  });
+
+  app.post("/api/apps/:id/env/reveal", async (request, reply) => {
+    const ctx = requireCapability(request, "app:secrets");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+
+    const file = await readEnv(row.directory);
+    if (file.state === "unreadable") return reply.code(409).send(UNREADABLE);
+    // A separate endpoint rather than a query flag, so revealing is always deliberate
+    // and always leaves a trace. Audited only once the read succeeded — an audit line
+    // saying a secret was revealed when it was not is worse than none.
+    await audit(db, ctx, {
+      action: "app.env_revealed",
+      targetType: "app",
+      targetId: id,
+      ip: request.ip,
+    });
+    return { content: file.content, hash: file.hash, exists: file.state === "present" };
+  });
+
+  app.put("/api/apps/:id/env", async (request, reply) => {
+    const ctx = requireCapability(request, "app:secrets");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = composeWriteBody.parse(request.body);
+
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+
+    // Refuse rather than overwrite. `writeTextFile` cannot tell an unreadable file from
+    // an absent one either, so a `null` expectedHash would sail straight through its
+    // guard and replace a `.env` full of passwords.
+    if ((await readEnv(row.directory)).state === "unreadable") {
+      return reply.code(409).send(UNREADABLE);
+    }
+
+    try {
+      const { hash } = await host.writeTextFile(
+        `${row.directory}/.env`,
+        body.content,
+        body.expectedHash,
+      );
+      // `.env` feeds ${VAR} interpolation and COMPOSE_PROJECT_NAME, so the resolved
+      // config is now stale even though compose.yaml has not changed.
+      composeConfig.invalidate({ directory: row.directory, composeFile: row.composeFile });
+      await audit(db, ctx, {
+        action: "app.env_written",
+        targetType: "app",
+        targetId: id,
+        ip: request.ip,
+      });
+      return { hash };
+    } catch (error) {
+      if (error instanceof HashMismatchError) {
+        return reply
+          .code(409)
+          .send({ error: "stale_hash", message: "The file changed on disk since it was loaded." });
+      }
+      throw error;
+    }
   });
 }
