@@ -876,6 +876,18 @@ describe('ComposeConfigCache', () => {
     expect(host.composeCalls).toHaveLength(2)
   })
 
+  it('does not treat an unreadable .env as an absent one', async () => {
+    // Cache once with no .env at all, then make a read fail for a different reason.
+    // A shared 'absent' marker would collide here and serve the stale valid result,
+    // even though the CLI — which reads .env itself — would now fail.
+    const host = hostWith(configJson)
+    const cache = new ComposeConfigCache(host)
+    await cache.resolve(target)
+    host.readTextFileErrors.set('jellyfin/.env', new Error('EACCES: permission denied'))
+    await cache.resolve(target)
+    expect(host.composeCalls).toHaveLength(2)
+  })
+
   it('re-runs the CLI when only the sibling .env changed', async () => {
     const host = hostWith(configJson)
     host.files.set('jellyfin/.env', 'COMPOSE_PROJECT_NAME=one\n')
@@ -1027,6 +1039,19 @@ export class ComposeConfigCache {
    * `compose.yaml` would serve a stale project name after an SSH edit to `.env` — and
    * an out-of-band edit is precisely the case content hashing exists to catch. A
    * missing `.env` is normal and contributes a constant.
+   *
+   * An unreadable `.env` must NOT hash the same as an absent one. A single `'absent'`
+   * for every failure breaks the invariant the hash exists to hold — that distinct
+   * input states produce distinct hashes — and the transition is reachable: resolve
+   * once with no `.env` (cached as absent), then have one appear that Homestead cannot
+   * read. The hashes match, the cache hits, and a stale `valid: true` is served for a
+   * stack whose real resolve would now fail. The error's own text is the marker.
+   *
+   * The marker is coarser than it looks, because `PathGuard.resolveExisting` throws the
+   * same `PathEscapeError` for a missing file and for one that resolves outside the
+   * compose root. So a `.env` symlinked out of the root still reads as absent here,
+   * while the compose CLI — which has no such guard — happily interpolates from it.
+   * Narrowing that needs an explicit existence check on `Host`; it is not this task.
    */
   private async inputHash(target: ComposeTarget): Promise<string> {
     const compose = await this.host.readTextFile(
@@ -1035,7 +1060,7 @@ export class ComposeConfigCache {
     const env = await this.host
       .readTextFile(`${target.directory}/.env`)
       .then((file) => file.hash)
-      .catch(() => 'absent')
+      .catch((error: unknown) => `unreadable:${error instanceof Error ? error.message : String(error)}`)
     return `${compose.hash}:${env}`
   }
 
