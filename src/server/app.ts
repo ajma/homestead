@@ -8,6 +8,9 @@ import type { Db } from "./db/client.js";
 import type { Host } from "./host/types.js";
 import { healthRoutes } from "./routes/health.js";
 
+/** Headers a client must never be able to set on the request Better-Auth sees. */
+const CLIENT_IP_HEADERS = new Set(["x-forwarded-for", "x-real-ip", "cf-connecting-ip"]);
+
 export type AppDeps = { config: Config; db: Db; host: Host; secrets: SecretStore; auth: Auth };
 
 declare module "fastify" {
@@ -45,10 +48,26 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     async handler(request, reply) {
       const url = new URL(request.url, deps.config.baseUrl);
       const headers = new Headers();
+
+      // Client-supplied IP headers are DROPPED, never forwarded.
+      //
+      // Better-Auth resolves the client IP from headers alone — `auth.handler` takes a
+      // Web API Request, which carries no connection peer, so its `trustedProxies`
+      // option can only walk the forwarded chain and cannot check who actually
+      // connected. Measured: a LAN peer sending
+      //   X-Forwarded-For: 203.0.113.99, 127.0.0.1
+      // had Better-Auth persist 203.0.113.99 as the session IP, because the walk skips
+      // the trusted tail and returns the first untrusted entry.
+      //
+      // Fastify has already computed the real peer in `request.ip`, honouring the
+      // narrowed `trustProxy` allowlist. So we substitute exactly one authoritative
+      // value and let nothing the client sent survive.
       for (const [key, value] of Object.entries(request.headers)) {
+        if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue;
         if (typeof value === "string") headers.set(key, value);
         else if (Array.isArray(value)) headers.set(key, value.join(","));
       }
+      headers.set("x-forwarded-for", request.ip);
       const response = await deps.auth.handler(
         new Request(url, {
           method: request.method,
