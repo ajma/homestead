@@ -3462,6 +3462,16 @@ git commit -m "feat: add masked .env read, audited reveal, and guarded write"
 
 ---
 
+## Superseded by the final fix wave
+
+The whole-branch review returned NOT READY. Where this plan's code blocks disagree with
+`docs/superpowers/plans/2026-09-09-homestead-1b-i-final-fixes.md`, that document wins: it
+is later, and each item in it exists because the version here was reproduced and shown to
+be wrong. It covers the unguarded `statusFor` fan-out that let one broken app blank the
+whole inventory, the eight routes that ignored the scope predicate, `projectName` never
+being reconciled after a `.env` write, the cache's blindness to override files, the
+unbounded subprocess fan-out, and `launchInternalUrl` accepting `javascript:`.
+
 ## Self-Review
 
 **Spec coverage for 1B-i's slice:**
