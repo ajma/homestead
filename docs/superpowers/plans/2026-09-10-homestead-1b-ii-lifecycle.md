@@ -560,6 +560,13 @@ Append to `src/server/host/run-compose.test.ts`:
   })
 ```
 
+**Also move the existing `'refuses a directory outside the compose root'` test out of the
+gated block.** The path guard rejects `../escape` before anything spawns, so it needs no
+daemon — and the 1B-i carry-forward names these files as holding the only coverage of
+compose-root confinement, coverage that silently disappears on a Docker-less CI while the
+suite still reports green. Leave `'passes arguments as an array'` gated: without a daemon the
+spawn fails immediately and both its assertions pass vacuously, which is worse than skipping.
+
 The third test must **not** be `skipIf(!hasDocker)`, and that includes not being nested inside
 a `describe.skipIf(!hasDocker)` block — the first attempt at this task put it there, which skips
 it just as thoroughly. Put it in its own `describe` outside the gated one. It exercises the path
