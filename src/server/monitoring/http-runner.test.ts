@@ -83,6 +83,19 @@ describe("http_internal", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("refuses a non-http scheme without making the request", async () => {
+    // The API rejects these when the user types one, but this is the code that performs
+    // the fetch, and a row can reach it by other routes. Measured before this check:
+    // `file:///etc/passwd` was passed to fetch.
+    const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
+    const runners = createHttpRunners({ fetch: impl });
+    for (const target of ["file:///etc/passwd", "ftp://x/y", "data:text/plain,hi"]) {
+      const result = await runners.internal.run(probe({ target }), ctx);
+      expect(result, target).toMatchObject({ status: "down", faultClass: "config" });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
   it("passes an abort signal derived from the probe timeout", async () => {
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
     await createHttpRunners({ fetch: impl }).internal.run(probe({ timeoutMs: 1234 }), ctx);

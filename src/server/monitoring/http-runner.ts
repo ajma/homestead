@@ -40,11 +40,26 @@ export function createHttpRunners(deps: {
     if (!probe.target) {
       return { failure: { status: "down", faultClass: "config", detail: { error: "no target" } } };
     }
+    // Scheme-check here as well as at the API. The probe API rejects a non-http(s) target
+    // when the user types it, but this is the code that actually makes the request, and a
+    // row can reach it by other routes — a migration, an import, a direct database edit.
+    // The component that performs the fetch is the right place to refuse a scheme it
+    // should never fetch.
+    let parsed: URL;
     try {
-      new URL(probe.target);
+      parsed = new URL(probe.target);
     } catch {
       return {
         failure: { status: "down", faultClass: "config", detail: { error: "target is not a URL" } },
+      };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return {
+        failure: {
+          status: "down",
+          faultClass: "config",
+          detail: { error: "target must be http or https" },
+        },
       };
     }
 
