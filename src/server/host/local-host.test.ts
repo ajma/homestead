@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashContent, LocalHost } from "@server/host/local-host";
@@ -79,6 +79,30 @@ describe("LocalHost filesystem", () => {
 
   it("rejects a path outside the root", async () => {
     await expect(host.readTextFile("../escape.txt")).rejects.toThrow();
+  });
+
+  it("creates new files owner-only, because .env holds secrets", async () => {
+    await host.writeTextFile("jellyfin/.env", "DB_PASSWORD=hunter2\n", null);
+    const { mode } = await stat(join(root, "jellyfin", ".env"));
+    expect(mode & 0o777).toBe(0o600);
+  });
+
+  it("preserves the existing mode instead of resetting it to the umask", async () => {
+    const target = join(root, "jellyfin", "locked.env");
+    await writeFile(target, "API_KEY=abc\n");
+    await chmod(target, 0o600);
+
+    const { hash } = await host.readTextFile("jellyfin/locked.env");
+    await host.writeTextFile("jellyfin/locked.env", "API_KEY=xyz\n", hash);
+
+    const { mode } = await stat(target);
+    expect(mode & 0o777).toBe(0o600); // Was silently becoming 0644 before this guard.
+  });
+
+  it("leaves no temp files behind", async () => {
+    await host.writeTextFile("jellyfin/compose.yaml", "services: {}\n", null).catch(() => {});
+    const entries = await readdir(join(root, "jellyfin"));
+    expect(entries.filter((e) => e.includes(".tmp"))).toHaveLength(0);
   });
 });
 
