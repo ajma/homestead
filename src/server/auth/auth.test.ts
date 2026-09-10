@@ -91,4 +91,36 @@ describe("authentication", () => {
     expect(cookies.toLowerCase()).not.toContain("secure");
     await app.close();
   });
+
+  it("rate-limits sign-in attempts from the same IP", async () => {
+    // The limiter's store is process-global, so this test must use a unique IP to avoid
+    // poisoning other tests.
+    const app = await buildTestApp();
+    const ip = "198.19.255.254";
+    await app.inject({
+      method: "POST",
+      url: "/api/auth/sign-up/email",
+      remoteAddress: ip,
+      payload: {
+        email: "hammered@example.com",
+        password: "correct-horse-battery",
+        name: "Hammered",
+      },
+    });
+
+    const attempts: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/auth/sign-in/email",
+        remoteAddress: ip,
+        payload: { email: "hammered@example.com", password: "correct-horse-battery" },
+      });
+      attempts.push(res.statusCode);
+    }
+
+    const rateLimited = attempts.filter((code) => code === 429);
+    expect(rateLimited.length).toBeGreaterThan(0);
+    await app.close();
+  });
 });

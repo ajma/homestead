@@ -134,14 +134,28 @@ export async function buildTestApp() {
 
 const TEST_PASSWORD = "correct-horse-battery";
 
+let ipCounter = 1;
+/** Generate a unique test IP address. Better-Auth's rate limiter is process-global and
+ * keyed by IP, so every test client needs its own address to avoid shared bucket exhaustion. */
+function getUniqueTestIp(): string {
+  return `198.18.${Math.floor(ipCounter / 256)}.${ipCounter++ % 256}`;
+}
+
 export async function signUpAdmin(app: FastifyInstance) {
+  const ip = getUniqueTestIp();
   const res = await app.inject({
     method: "POST",
     url: "/api/setup/admin",
+    remoteAddress: ip,
     payload: { email: "admin@example.com", password: TEST_PASSWORD, name: "Admin" },
   });
   const cookie = String(res.headers["set-cookie"] ?? "").split(";")[0] ?? "";
-  const me = await app.inject({ method: "GET", url: "/api/me", headers: { cookie } });
+  const me = await app.inject({
+    method: "GET",
+    url: "/api/me",
+    remoteAddress: ip,
+    headers: { cookie },
+  });
   return { cookie, id: me.json().id as string };
 }
 
@@ -150,10 +164,12 @@ export async function createViewer(
   adminCookie: string,
   scope: { scopeAllApps: boolean; appIds?: string[] } = { scopeAllApps: true },
 ) {
+  const ip = getUniqueTestIp();
   const email = `viewer-${Math.random().toString(36).slice(2)}@example.com`;
   const created = await app.inject({
     method: "POST",
     url: "/api/users",
+    remoteAddress: ip,
     headers: { cookie: adminCookie },
     payload: {
       email,
@@ -167,6 +183,7 @@ export async function createViewer(
   const signIn = await app.inject({
     method: "POST",
     url: "/api/auth/sign-in/email",
+    remoteAddress: ip,
     payload: { email, password: TEST_PASSWORD },
   });
   return {

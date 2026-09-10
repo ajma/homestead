@@ -105,12 +105,23 @@ describe("app inventory API", () => {
     });
     const viewer = await createViewer(app, adminCookie);
 
-    const asAdmin = (
-      await app.inject({ method: "GET", url: "/api/apps", headers: { cookie: adminCookie } })
-    ).json();
-    const asViewer = (
-      await app.inject({ method: "GET", url: "/api/apps", headers: { cookie: viewer.cookie } })
-    ).json();
+    const adminRes = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie: adminCookie },
+    });
+    const viewerRes = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie: viewer.cookie },
+    });
+
+    expect(adminRes.statusCode).toBe(200);
+    expect(viewerRes.statusCode).toBe(200);
+    const asAdmin = adminRes.json();
+    const asViewer = viewerRes.json();
+    expect(asAdmin).toHaveLength(1);
+    expect(asViewer).toHaveLength(1);
 
     expect(asAdmin[0]).toHaveProperty("directory");
     expect(asViewer[0]).not.toHaveProperty("directory");
@@ -140,6 +151,7 @@ describe("app inventory API", () => {
       url: "/api/apps",
       headers: { cookie: viewer.cookie },
     });
+    expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual([]);
     await app.close();
   });
@@ -311,25 +323,27 @@ describe("app inventory API", () => {
     });
     (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n# edited\n");
 
-    const asViewer = (
-      await app.inject({
-        method: "GET",
-        url: "/api/apps",
-        headers: { cookie: viewer.cookie },
-      })
-    ).json();
+    const viewerRes = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie: viewer.cookie },
+    });
+    expect(viewerRes.statusCode).toBe(200);
+    const asViewer = viewerRes.json();
+    expect(asViewer).toHaveLength(1);
     expect(JSON.stringify(asViewer)).not.toContain("sk-live");
     expect(JSON.stringify(asViewer)).not.toContain("/volume2");
     expect(asViewer[0].statusDetail).toBe("compose configuration is invalid");
 
     // The admin still needs the real message to fix the file.
-    const asAdmin = (
-      await app.inject({
-        method: "GET",
-        url: "/api/apps",
-        headers: { cookie },
-      })
-    ).json();
+    const adminRes = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie },
+    });
+    expect(adminRes.statusCode).toBe(200);
+    const asAdmin = adminRes.json();
+    expect(asAdmin).toHaveLength(1);
     expect(asAdmin[0].statusDetail).toBe(secret);
     await app.close();
   });
