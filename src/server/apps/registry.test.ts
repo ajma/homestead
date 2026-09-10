@@ -18,6 +18,37 @@ describe("parseImageRef", () => {
     expect(parseImageRef(input)).toEqual({ registry, repository, reference });
   });
 
+  it.each([
+    ["docker.io/library/postgres:16", "registry-1.docker.io", "library/postgres", "16"],
+    ["index.docker.io/linuxserver/radarr", "registry-1.docker.io", "linuxserver/radarr", "latest"],
+  ])(
+    "rewrites %s to the host the v2 API actually lives on",
+    (input, registry, repository, reference) => {
+      // `docker.io` redirects to `registry-1.docker.io`, and `fetch` strips Authorization
+      // across an origin change — so the authenticated retry would arrive unauthenticated
+      // and 401 again. Compose files do write `docker.io/…`.
+      expect(parseImageRef(input)).toEqual({ registry, repository, reference });
+    },
+  );
+
+  it("takes the digest and drops the tag when a reference carries both", () => {
+    // `nginx:1.25@sha256:…` is legal and common in pinned compose files. Taking only the
+    // digest left `:1.25` inside the repository, giving `library/nginx:1.25` — a path no
+    // registry answers.
+    expect(parseImageRef("nginx:1.25@sha256:abc")).toEqual({
+      registry: "registry-1.docker.io",
+      repository: "library/nginx",
+      reference: "sha256:abc",
+    });
+  });
+
+  it.each([
+    ["nginx:", "latest"],
+    ["nginx", "latest"],
+  ])("treats %s as an untagged reference", (input, reference) => {
+    expect(parseImageRef(input).reference).toBe(reference);
+  });
+
   it("keeps a digest reference as the reference", () => {
     expect(parseImageRef("nginx@sha256:abc")).toEqual({
       registry: "registry-1.docker.io",
@@ -96,6 +127,50 @@ describe("registry client", () => {
 
   it("returns null when the registry answers without a digest header", async () => {
     const { impl } = fakeFetch([{ status: 200, headers: {} }]);
+    expect(await createRegistryClient({ fetch: impl }).latestDigest("nginx")).toBeNull();
+  });
+
+  it("reports a reason for every failure, so a broken registry is diagnosable", async () => {
+    // `latestDigest` returns null for everything by design, so without this hook a
+    // systematically broken registry is silent across a daily sweep of every service of
+    // every app.
+    const reasons: Array<[string, string]> = [];
+    const onError = (image: string, reason: string) => reasons.push([image, reason]);
+
+    const { impl } = fakeFetch([{ status: 404, headers: {} }]);
+    expect(await createRegistryClient({ fetch: impl, onError }).latestDigest("nginx")).toBeNull();
+
+    const throwing = (async () => {
+      throw new Error("getaddrinfo ENOTFOUND");
+    }) as unknown as typeof fetch;
+    await createRegistryClient({ fetch: throwing, onError }).latestDigest("ghcr.io/x/y");
+
+    await createRegistryClient({ fetch: impl, onError }).latestDigest("");
+
+    expect(reasons.map(([image]) => image)).toEqual(["nginx", "ghcr.io/x/y", ""]);
+    expect(reasons[0]?.[1]).toContain("404");
+    expect(reasons[1]?.[1]).toContain("ENOTFOUND");
+    expect(reasons[2]?.[1]).toContain("cannot parse");
+  });
+
+  it("reads an unquoted challenge parameter", async () => {
+    // RFC 9110 allows a bare token. Every registry in practice quotes, but a parser that
+    // only reads quoted values returns nothing — indistinguishable from needing no auth.
+    const { impl } = fakeFetch([
+      {
+        status: 401,
+        headers: { "www-authenticate": "Bearer realm=https://auth.example/token,service=reg" },
+      },
+      { status: 200, headers: {}, body: { token: "tok" } },
+      { status: 200, headers: { "docker-content-digest": "sha256:ok" } },
+    ]);
+    expect(await createRegistryClient({ fetch: impl }).latestDigest("nginx")).toBe("sha256:ok");
+  });
+
+  it("ignores a non-Bearer challenge rather than guessing", async () => {
+    const { impl } = fakeFetch([
+      { status: 401, headers: { "www-authenticate": 'Basic realm="private"' } },
+    ]);
     expect(await createRegistryClient({ fetch: impl }).latestDigest("nginx")).toBeNull();
   });
 
