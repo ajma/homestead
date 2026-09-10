@@ -102,12 +102,20 @@ describe("http_internal", () => {
     expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("does not read an unbounded body", async () => {
-    // A probe must not pull a gigabyte off a misconfigured target.
-    const huge = "x".repeat(200_000);
-    const { impl } = fakeFetch(() => new Response(huge, { status: 200 }));
+  it("does not read a body at all on the internal path", async () => {
+    // The internal runner classifies on the status line alone, so it never touches the
+    // body. Asserting a size cap here would pass without any cap existing — the external
+    // runner is the one that reads, and it has its own test below.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(1000)));
+        controller.close();
+      },
+    });
+    const { impl } = fakeFetch(() => new Response(body, { status: 200 }));
     const result = await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx);
-    expect(JSON.stringify(result.detail).length).toBeLessThan(3000);
+    expect(result.status).toBe("up");
+    expect(JSON.stringify(result.detail)).not.toContain("xxx");
   });
 });
 
@@ -188,6 +196,39 @@ describe("http_external", () => {
         ctx,
       ),
     ).toMatchObject({ status: "up" });
+  });
+
+  it("stops reading a huge error body instead of buffering all of it", async () => {
+    // This is the path that DOES read a body — looking for Cloudflare's 1033 under a
+    // 5xx. `response.text()` would buffer the whole thing first, so an origin answering
+    // a 5xx with a gigabyte would be pulled in full every 60 seconds.
+    let produced = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        produced += 1;
+        // Bound the stream: 200 chunks of 64KB (~12.8 MB), then close.
+        // Without the fix, the test fails fast showing `produced` reached 200.
+        // With the fix, `produced` stays around 1 and `cancelled` is true.
+        if (produced >= 200) {
+          controller.close();
+        } else {
+          controller.enqueue(new TextEncoder().encode("x".repeat(64 * 1024)));
+        }
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { impl } = fakeFetch(() => new Response(body, { status: 520 }));
+    const result = await createHttpRunners({ fetch: impl, accessCredentials: creds }).external.run(
+      external(),
+      ctx,
+    );
+    expect(result.status).toBe("down");
+    // A handful of 64KB chunks, not an unbounded stream, and the transfer was stopped.
+    expect(produced).toBeLessThan(5);
+    expect(cancelled).toBe(true);
   });
 
   it("never leaks the service token into the detail payload", async () => {

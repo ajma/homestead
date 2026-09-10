@@ -20,13 +20,43 @@ function classifyThrown(error: unknown): ProbeResult {
   };
 }
 
+/**
+ * Reads at most `BODY_SAMPLE_BYTES` and then stops the transfer.
+ *
+ * `response.text()` would buffer the WHOLE body before slicing, so an origin behind the
+ * tunnel that answers a 5xx with a gigabyte would be read in full — every 60 seconds,
+ * for the life of the probe. Streaming and cancelling bounds what crosses the wire, not
+ * just what we keep.
+ */
 async function sampleBody(response: Response): Promise<string> {
+  const body = response.body;
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    const text = await response.text();
-    return text.slice(0, BODY_SAMPLE_BYTES);
+    while (total < BODY_SAMPLE_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    }
   } catch {
-    return "";
+    // A truncated or broken body is not worth failing the classification over.
+  } finally {
+    // Stops the transfer rather than merely ignoring the rest of it.
+    await reader.cancel().catch(() => {});
   }
+
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined.slice(0, BODY_SAMPLE_BYTES));
 }
 
 export function createHttpRunners(deps: {
