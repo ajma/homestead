@@ -160,4 +160,37 @@ describe("log streaming", () => {
     expect(app.deps.host.logCalls[0]?.signal).toBeInstanceOf(AbortSignal);
     await app.close();
   });
+
+  it("emits exactly one done event", async () => {
+    // Mutation testing found that deleting the terminal done event left all tests passing.
+    // A regression would be silent — the pane would never show the "stream ended" state.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.logLines.set("container-1", [{ text: "x\n", stream: "stdout" }]);
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}/containers/container-1/logs`,
+      headers: { cookie },
+    });
+    expect(res.body.match(/event: done/g)).toHaveLength(1);
+    await app.close();
+  });
+
+  it("clears the heartbeat interval when the stream closes", async () => {
+    // Mutation testing found that gutting finish() so the heartbeat was never cleared left
+    // all tests passing. A regression would leak one timer per stream, writing to a dead
+    // socket every 25s for the life of the process.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.logLines.set("container-1", [{ text: "x\n", stream: "stdout" }]);
+    const baseline = (process as { _getActiveHandles(): unknown[] })._getActiveHandles().length;
+    await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}/containers/container-1/logs`,
+      headers: { cookie },
+    });
+    // The interval is cleared when the stream ends. Without it, this would be baseline + 1.
+    expect((process as { _getActiveHandles(): unknown[] })._getActiveHandles().length).toBe(
+      baseline,
+    );
+    await app.close();
+  });
 });

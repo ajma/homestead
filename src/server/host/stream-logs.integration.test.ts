@@ -116,4 +116,34 @@ describe.skipIf(!hasDocker)("streamLogs against real Docker", () => {
       await run("docker", ["rm", "-f", idleName]).catch(() => {});
     }
   });
+
+  it("projects exposed-but-unpublished ports to null, not zero", async () => {
+    // Docker gives HostPort: "" for a port that is exposed but not published. Number("")
+    // is 0, which is finite, so a naive coercion reports the app as reachable on port 0.
+    // Mutation testing found that removing the guard left all FakeHost tests passing.
+    const portTestName = `homestead-porttest-${Date.now()}`;
+    try {
+      // Expose 8080 but don't publish it.
+      await run("docker", [
+        "run",
+        "-d",
+        "--name",
+        portTestName,
+        "--expose",
+        "8080",
+        "alpine:3",
+        "sleep",
+        "60",
+      ]);
+      const host = new LocalHost("local", "/tmp", "/var/run/docker.sock");
+      await host.init();
+      const inspected = await host.inspectContainer(portTestName);
+      const port8080 = inspected.ports.find((p) => p.container === 8080);
+      expect(port8080).toBeDefined();
+      // Not 0 — that would tell the user the app is reachable on port 0.
+      expect(port8080?.host).toBeNull();
+    } finally {
+      await run("docker", ["rm", "-f", portTestName]).catch(() => {});
+    }
+  });
 });
