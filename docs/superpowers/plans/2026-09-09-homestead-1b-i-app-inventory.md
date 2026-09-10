@@ -1705,9 +1705,10 @@ describe('scanForApps', () => {
       [container('my_media', 'web')],
     )
     const result = await scanForApps({ db, host, hostId: 'local' })
+    // `localeCompare` puts lowercase first, so `my_media` leads.
     expect(result.discovered.map((d) => [d.directory, d.projectName, d.containerCount])).toEqual([
-      ['MY_MEDIA', 'my_media', 1],
       ['my_media', 'my_media', 1],
+      ['MY_MEDIA', 'my_media', 1],
     ])
     expect(result.orphans).toEqual([])
   })
