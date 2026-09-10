@@ -1169,6 +1169,13 @@ describe('PathGuard', () => {
     await expect(guard.resolveForWrite('jellyfin/brand-new.env')).resolves.toContain('brand-new.env')
   })
 
+  it.each(['', '.', './', '  '])('rejects %j, which addresses the root itself', async (rel) => {
+    const guard = new PathGuard(root)
+    await guard.init()
+    await expect(guard.resolveExisting(rel)).rejects.toBeInstanceOf(PathEscapeError)
+    await expect(guard.resolveForWrite(rel)).rejects.toBeInstanceOf(PathEscapeError)
+  })
+
   it('allows a write to a not-yet-existing file inside the root', async () => {
     const guard = new PathGuard(root)
     await guard.init()
@@ -1219,15 +1226,29 @@ export class PathGuard {
     this.roots = configured === real ? [configured] : [configured, real]
   }
 
-  private assertInitialised(): void {
-    if (this.roots.length === 0) throw new Error('PathGuard.init() was not awaited')
+  /**
+   * Returns the configured root, proving initialisation in the same step.
+   * Returning the value rather than asserting a side condition is what lets callers
+   * avoid both a non-null assertion (which Biome's noNonNullAssertion rejects) and a
+   * redundant second undefined check.
+   */
+  private requireRoot(): string {
+    const root = this.roots[0]
+    if (!root) throw new Error('PathGuard.init() was not awaited')
+    return root
+  }
+
+  /** Rejects paths that address the root itself rather than something within it. */
+  private assertAddressesChild(rel: string): void {
+    const trimmed = rel.trim()
+    if (trimmed === '' || trimmed === '.' || trimmed === './') throw new PathEscapeError(rel)
   }
 
   /** Resolves a path that must already exist, following symlinks before the check. */
   async resolveExisting(rel: string): Promise<string> {
-    this.assertInitialised()
     if (isAbsolute(rel)) throw new PathEscapeError(rel)
-    const candidate = resolve(this.roots[0]!, rel)
+    this.assertAddressesChild(rel)
+    const candidate = resolve(this.requireRoot(), rel)
     let real: string
     try {
       real = await realpath(candidate)
@@ -1244,9 +1265,9 @@ export class PathGuard {
    * already exists it must also resolve inside the root.
    */
   async resolveForWrite(rel: string): Promise<string> {
-    this.assertInitialised()
     if (isAbsolute(rel)) throw new PathEscapeError(rel)
-    const candidate = resolve(this.roots[0]!, rel)
+    this.assertAddressesChild(rel)
+    const candidate = resolve(this.requireRoot(), rel)
 
     // Check 1: the parent must exist and resolve inside the root. Stops
     // `escape -> /etc` being used to write `escape/newfile`.
