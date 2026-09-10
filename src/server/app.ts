@@ -12,6 +12,7 @@ import type { Db } from "./db/client.js";
 import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
 import { appRoutes } from "./routes/apps.js";
+import { containerRoutes } from "./routes/containers.js";
 import { healthRoutes } from "./routes/health.js";
 import { jobRoutes } from "./routes/jobs.js";
 import { logRoutes } from "./routes/logs.js";
@@ -166,6 +167,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(appRoutes);
   await app.register(jobRoutes);
   await app.register(logRoutes);
+  await app.register(containerRoutes);
   await app.register(spaRoutes);
 
   return app;
