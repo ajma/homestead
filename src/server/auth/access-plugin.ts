@@ -23,6 +23,11 @@ export function clearJwksCache(): void {
   jwksCache.clear();
 }
 
+/** Exported for testing only - injects a cache entry with a specific timestamp */
+export function injectJwksCache(teamDomain: string, keys: JWK[], fetchedAt: number): void {
+  jwksCache.set(teamDomain, { keys, fetchedAt });
+}
+
 /** The `kid` a token claims, read WITHOUT verification. Used only to route the refetch
  *  decision — never to decide whether the token is trustworthy. */
 function decodeKid(token: string): string | undefined {

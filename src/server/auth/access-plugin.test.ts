@@ -1,4 +1,9 @@
-import { clearJwksCache, isAccessEnabled, verifyAccessJwt } from "@server/auth/access-plugin";
+import {
+  clearJwksCache,
+  injectJwksCache,
+  isAccessEnabled,
+  verifyAccessJwt,
+} from "@server/auth/access-plugin";
 import { loadConfig } from "@server/config";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -126,7 +131,10 @@ describe("JWKS refetch is not an amplification vector", () => {
     const domain = `refetch-known-${Math.random().toString(36).slice(2)}`;
 
     for (let i = 0; i < 10; i++) {
-      const forged = await mint({ aud: "wrong-aud" }); // valid signature, known kid
+      const forged = await mint({
+        iss: `https://${domain}.cloudflareaccess.com`,
+        aud: "wrong-aud",
+      }); // valid signature, known kid
       await verifyAccessJwt({
         token: forged,
         teamDomain: domain,
@@ -152,7 +160,7 @@ describe("JWKS refetch is not an amplification vector", () => {
     for (let i = 0; i < 10; i++) {
       const forged = await new SignJWT({ email: "mallory@example.com" })
         .setProtectedHeader({ alg: "RS256", kid: `unknown-${i}` })
-        .setIssuer(ISSUER)
+        .setIssuer(`https://${domain}.cloudflareaccess.com`)
         .setAudience(AUD)
         .setIssuedAt()
         .setExpirationTime("1h")
@@ -168,6 +176,55 @@ describe("JWKS refetch is not an amplification vector", () => {
     // One cold-cache fetch, plus at most one rotation probe. The cooldown absorbs the
     // rest — otherwise ten unauthenticated requests would mean ten outbound fetches.
     expect(fetches).toBeLessThanOrEqual(2);
+  });
+
+  it("actually refetches on key rotation and succeeds with the new key", async () => {
+    // Generate two key pairs - oldKey is initially in the cache, newKey represents rotation
+    const oldKeyPair = await generateKeyPair("RS256");
+    const oldJwk = { ...(await exportJWK(oldKeyPair.publicKey)), kid: "old-key", alg: "RS256" };
+
+    const newKeyPair = await generateKeyPair("RS256");
+    const newJwk = { ...(await exportJWK(newKeyPair.publicKey)), kid: "new-key", alg: "RS256" };
+
+    let fetches = 0;
+    const fetchJwks = async () => {
+      fetches += 1;
+      // Return the new key (simulating Cloudflare having rotated keys)
+      return { keys: [newJwk] };
+    };
+
+    const domain = `rotation-${Math.random().toString(36).slice(2)}`;
+
+    // Inject a cache entry with only the old key, timestamped 10 minutes ago.
+    // This is fresh enough not to be replaced immediately (< 60 min TTL) but old
+    // enough to bypass the refetch cooldown (> 5 min).
+    const cacheTimestamp = Date.now() - 10 * 60 * 1000;
+    injectJwksCache(domain, [oldJwk], cacheTimestamp);
+
+    // Now verify a token signed by the NEW key
+    const newToken = await new SignJWT({ email: "bob@example.com" })
+      .setProtectedHeader({ alg: "RS256", kid: "new-key" })
+      .setIssuer(`https://${domain}.cloudflareaccess.com`)
+      .setAudience(AUD)
+      .setIssuedAt()
+      .setExpirationTime("1h")
+      .sign(newKeyPair.privateKey);
+
+    const result = await verifyAccessJwt({
+      token: newToken,
+      teamDomain: domain,
+      aud: AUD,
+      fetchJwks,
+    });
+
+    // Should have fetched exactly once (the refetch), because:
+    // 1. Cache hit (fresh, < 60 min old, contains oldJwk)
+    // 2. Verification fails (kid "new-key" not in cached [oldJwk])
+    // 3. Refetch triggers because kid is unknown AND sinceLastFetch > 5 min
+    // 4. Fetch returns [newJwk]
+    // 5. Second verification succeeds with the new key
+    expect(fetches).toBe(1);
+    expect(result.email).toBe("bob@example.com");
   });
 });
 
