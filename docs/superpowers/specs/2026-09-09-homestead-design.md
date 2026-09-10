@@ -78,7 +78,7 @@ Per the user's global defaults, greenfield web:
 | Layout | Single package, `src/{web,server,shared}`, `@shared/*` path alias |
 | Package manager | pnpm |
 | Language | TypeScript, ESM, `strict: true`, `moduleResolution: bundler`, `target: ES2022` |
-| Frontend | Vite + React, react-router-dom v6, TanStack Query v5, Tailwind |
+| Frontend | Vite + React, react-router-dom v7, TanStack Query v5, Tailwind |
 | Backend | Fastify |
 | DB | SQLite (libSQL) + Drizzle |
 | Auth | Better-Auth + a custom Cloudflare Access plugin |

@@ -6,7 +6,7 @@
 
 **Architecture:** Single Node process. Fastify serves a JSON API and the Vite-built SPA. Everything touching the machine goes through a `Host` interface whose only implementation is `LocalHost`. Better-Auth owns sessions; a custom plugin for Cloudflare Access identity is written but stays dormant until configured. Authorization is one composable scope predicate used by every app-reading query.
 
-**Tech Stack:** TypeScript (ESM, strict), pnpm, Fastify, Vite + React, react-router-dom v6, TanStack Query v5, Tailwind, Drizzle + libSQL (SQLite), Better-Auth, dockerode, zod, Vitest, Biome, tsup.
+**Tech Stack:** TypeScript (ESM, strict), pnpm, Fastify, Vite + React, react-router-dom v7, TanStack Query v5, Tailwind, Drizzle + libSQL (SQLite), Better-Auth, dockerode, zod, Vitest, Biome, tsup.
 
 **Spec:** `docs/superpowers/specs/2026-09-09-homestead-design.md`
 
