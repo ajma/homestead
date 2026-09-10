@@ -167,7 +167,8 @@ that day was it up".
 
 ### `exposures`
 
-`id, appId, hostname, zoneId, dnsRecordId, tunnelId, ingressService, accessAppId, accessAppAud,
+`id, appId, hostname, zoneId, dnsRecordId, tunnelId, originMode('host_port'|'container_name'),
+ingressService, networkAlias, accessAppId, accessAppAud,
 state('provisioning'|'ready'|'error'|'drifted'), lastError, lastSyncedAt`
 
 Plus three ownership flags — `dnsRecordCreatedByUs`, `ingressRuleCreatedByUs`,
@@ -437,11 +438,39 @@ It then writes `/volume2/docker/cloudflared/` as an ordinary Homestead-managed a
 `cloudflare/cloudflared` with `tunnel --no-autoupdate run`, tunnel token in its `.env`. It
 appears on the dashboard with a docker probe and logs, flagged `isSystem`.
 
-**Default `network_mode: host`**, so `ingressService` can be `http://localhost:<published-port>`
-for every app. The alternative — attaching cloudflared to each stack's bridge network — requires
-editing every adopted compose file, which conflicts with adopting hand-maintained stacks. The
-accepted cost is that the tunnel container can reach anything on the NAS, making the ingress
-list the effective boundary on what is exposed.
+### cloudflared networking and origin modes
+
+cloudflared is **not** run with `network_mode: host`. Host networking would place it outside
+Docker's embedded DNS — container names would be unresolvable — and the mode is exclusive, so
+the container could not also join a bridge network. Instead:
+
+- cloudflared joins a dedicated external bridge network, **`homestead-edge`**, created and owned
+  by Homestead.
+- It also gets `extra_hosts: ["host.docker.internal:host-gateway"]` (verified on the target
+  machine: resolves to `172.17.0.1`).
+
+This supports two origin modes, recorded per exposure as `originMode`:
+
+| Mode | `ingressService` | Requires |
+|---|---|---|
+| `host_port` (default) | `http://host.docker.internal:<published-port>` | Nothing — works with any adopted stack unchanged |
+| `container_name` | `http://<alias>:<container-port>` | The app's service joins `homestead-edge` |
+
+`host_port` keeps the promise that adopting a hand-maintained stack changes nothing about it.
+
+`container_name` requires an additive edit to that app's compose file — declaring
+`homestead-edge` as an external network and attaching the target service to it — which Homestead
+performs only with explicit approval, through the same hash-guarded write path as the editor.
+Joining a new network recreates the container, so exposing an app in this mode restarts it once.
+
+**Each service attached to `homestead-edge` is given an explicit network alias derived from the
+app slug.** Compose otherwise makes services resolvable by their service name, and service names
+collide freely across stacks — two projects each containing a `web` service would be
+indistinguishable on a shared network.
+
+`container_name` is the better mode where it is available: the app needs no published host port
+at all, so it becomes reachable *only* through the tunnel. It also narrows what cloudflared can
+reach, which host networking left wide open.
 
 ### Exposing an app
 
@@ -553,9 +582,26 @@ someone adds a property; a separate projection fails closed.
 ### Hygiene
 
 First run with zero users serves a one-time setup wizard that creates the initial admin and then
-permanently disables itself. Cookies are httpOnly, `SameSite=Lax`, `Secure`. Fastify runs with
-`trustProxy` and reads `CF-Connecting-IP` so audit entries record real client IPs. Login is
-rate-limited. Every audit row records which path authenticated the actor.
+permanently disables itself. Login is rate-limited. Every audit row records which path
+authenticated the actor.
+
+**Homestead is reachable at two origins by design** — an internal LAN URL and, optionally, an
+external hostname through the tunnel — and this constrains cookie configuration:
+
+- Cookies are httpOnly and `SameSite=Lax`. **`Secure` is conditional on the request actually
+  being HTTPS**, which is Better-Auth's default behaviour; `advanced.useSecureCookies` must not
+  be forced on. Browsers do not send `Secure` cookies over plain HTTP, and while
+  `http://localhost` is treated as a secure context, a LAN address such as
+  `http://192.168.1.5:8080` is not — forcing the flag would make LAN logins fail silently, which
+  is precisely the access path the dual-auth design exists to protect.
+- **Both origins must be registered in `trustedOrigins`**, or Better-Auth's origin check rejects
+  whichever one is missing.
+- Client IPs come from `advanced.ipAddress.trustedProxies` with `CF-Connecting-IP` among the
+  trusted headers, so audit entries record the real client rather than the tunnel — while LAN
+  requests, which carry no such header, still record their true source.
+
+If Homestead is never exposed externally, the Access path simply stays dormant and password auth
+over the LAN is the whole system.
 
 ---
 
@@ -681,8 +727,9 @@ later from settings.
 
 1. **Create admin.** First account, becomes admin, closes the bootstrap route permanently.
 2. **Verify host.** Confirm compose root (default `/volume2/docker`); prove the Docker socket
-   works by displaying the actual `docker version` response. Fail loudly here rather than later
-   during a deploy.
+   works by displaying the actual `docker version` response; run the **mount round-trip
+   preflight** from Section 10 and show its result. Fail loudly here rather than later during a
+   deploy, when the symptom would be a stack silently starting with empty volumes.
 3. **Import from disk.** The adoption scan as a multi-select table: directory, resolved project
    name, compose file, container count, running state, suggested display name and icon.
    Read-only with respect to the user's files.
@@ -731,11 +778,44 @@ its own exposure in Phase 2. The environment variables exist only as an override
 where Homestead is placed behind an Access application it did not create. When neither source
 supplies both values, the Access sign-in path stays dormant (Section 7).
 
+### The path-identity constraint
+
 **The compose root must be bind-mounted at the same absolute path inside the container as on the
 host.** Homestead runs `docker compose -f /volume2/docker/<app>/compose.yaml`, but the Docker
-daemon resolves that stack's own relative bind mounts against the **host** filesystem. Mounting
-the share at, say, `/data` would make Homestead emit paths the daemon cannot resolve, and stacks
-would come up with empty or wrongly-created volumes.
+daemon resolves that stack's own relative bind mounts against the **host** filesystem.
+
+Two behaviours, both verified on the target machine, define the exact constraint:
+
+- **Compose does not canonicalise paths.** Given a compose file under a symlinked directory, it
+  emitted the bind source as `/tmp/hs-test/link/myapp/config` — the symlinked path, passed
+  through verbatim. So the invariant is not "the container path must be a real directory"; it is
+  **the path string Homestead emits must be meaningful on the host**.
+- **The daemon resolves symlinked bind sources correctly**, reading through to the real target.
+
+Therefore:
+
+- **Symlinks on the host are supported.** If `/volume2/docker` is itself a symlink on the NAS,
+  the daemon follows it and everything works.
+- **Mounting the share at a different path inside the container is not supported.** Mounting it
+  at `/data` while telling Homestead the root is `/volume2/docker` happens to work only if that
+  path also exists on the host; mounting at `/data` *and* configuring `/data` emits host-invalid
+  paths.
+
+**The failure mode is silent, which is why this gets a preflight rather than documentation.**
+A bind source that does not exist on the host is not an error — Docker creates an empty directory
+and proceeds. A misconfigured mount therefore produces a running stack with empty config and data
+volumes: Immich or Paperless come up looking freshly installed, which is indistinguishable from
+data loss until someone checks.
+
+**Startup preflight.** Before serving traffic, Homestead writes a marker file under the compose
+root, launches a throwaway container binding that same path, and reads the marker back through
+the daemon. If the marker is missing or the directory reads empty, the mount is misconfigured and
+Homestead **refuses to start**, naming the mismatch. This catches the entire class of mount error
+at boot rather than at first deploy. The same check runs as onboarding step 2.
+
+Path confinement (Section 4) resolves `realpath` inside the container, which will differ from the
+configured root when a symlink is involved; the check therefore accepts membership under **either**
+the configured root or its container-resolved real path.
 
 Homestead is a normal container and can, once running, adopt and manage itself — with the same
 `isSystem` protection as `cloudflared`.
@@ -798,7 +878,10 @@ editor; resource metrics (likely never — Prometheus does it better).
 | Read-only container detail panel instead | Most of the diagnostic value, no new risk, works on distroless |
 | SSE throughout, no websockets | Nothing needs bidirectional transport once exec is gone; passes Access cleanly |
 | Remotely-managed tunnel | Ingress changes need no restart, defusing the self-lock hazard |
-| `network_mode: host` for cloudflared | Avoids editing every adopted stack's networks |
+| cloudflared on a shared `homestead-edge` bridge + `host-gateway`, not `network_mode: host` | Host networking blocks container-name DNS and is exclusive; this supports both origin modes at once |
+| Two origin modes per exposure, `host_port` default | Adopted stacks work untouched; `container_name` available where an additive compose edit is acceptable |
+| Startup preflight round-trips a marker file through the daemon | A wrong mount path is silent — Docker creates an empty dir — and looks like data loss |
+| Cookie `Secure` conditional on HTTPS, not forced | Homestead is reachable over plain HTTP on the LAN by design; forcing it breaks LAN login |
 | One shared monitor service token + reusable policy | Single rotation operation instead of N |
 | Local accounts + verified Access bypass | SSO externally, password on LAN, no lockout during Cloudflare outage |
 | Viewers: status and health only | Safe to hand a login to housemates; no config exposure |
