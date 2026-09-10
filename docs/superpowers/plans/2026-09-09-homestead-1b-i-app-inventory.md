@@ -1983,7 +1983,35 @@ describe('rollUpStatus', () => {
       [container('web', 'running', 'Up 2 hours'), container('init', 'exited', 'Exited (0) 2 hours ago')],
     )
     expect(result.status).toBe('up')
-    expect(result.detail).toContain('1 completed')
+    expect(result.detail).toBe('2/2 services up, 1 completed')
+  })
+
+  it('counts a completed one-shot toward the numerator', () => {
+    // Excluding it produced a green dot beside "0/1 services up", which reads as broken.
+    expect(rollUpStatus([service('init', 'no')], [container('init', 'exited', 'Exited (0)')]))
+      .toEqual({ status: 'up', detail: '1/1 services up, 1 completed' })
+  })
+
+  it('takes the worst state across a scaled service\'s replicas', () => {
+    // Keying containers by service name kept only the last, so two healthy replicas
+    // beside one unhealthy reported the app as up — a green dot over a broken service.
+    const result = rollUpStatus(
+      [service('web')],
+      [
+        container('web', 'running', 'Up 2 hours (healthy)'),
+        container('web', 'running', 'Up 2 hours (unhealthy)'),
+        container('web', 'running', 'Up 2 hours (healthy)'),
+      ],
+    )
+    expect(result.status).toBe('down')
+  })
+
+  it('calls a scaled service up when every replica is up', () => {
+    const result = rollUpStatus(
+      [service('web')],
+      [container('web', 'running', 'Up 2 hours'), container('web', 'running', 'Up 1 hour')],
+    )
+    expect(result).toEqual({ status: 'up', detail: '1/1 services up' })
   })
 
   it('is down when a one-shot exits non-zero', () => {
@@ -2098,21 +2126,52 @@ function classify(service: ResolvedService, container: ContainerSummary | undefi
   }
 }
 
+/** Worst-first, so a service's state is the worst of its replicas'. */
+const SEVERITY: ServiceState[] = ['down', 'degraded', 'starting', 'up', 'completed']
+
+/**
+ * Collapses one service's containers into a single state.
+ *
+ * A service can have more than one container — `deploy.replicas`, or a `scale` left
+ * over from a manual `docker compose up --scale`. Keying a Map by service name kept
+ * only the last one, so two healthy replicas beside one unhealthy reported the whole
+ * app as up: a green dot over a partly broken service, which is the exact failure this
+ * module exists to prevent.
+ */
+function worst(states: ServiceState[]): ServiceState {
+  for (const candidate of SEVERITY) {
+    if (states.includes(candidate)) return candidate
+  }
+  return 'down'
+}
+
 export function rollUpStatus(
   expected: ResolvedService[],
   containers: ContainerSummary[],
 ): AppStatusSummary {
   if (expected.length === 0) return { status: 'unknown', detail: null }
 
-  const byService = new Map(containers.map((c) => [c.service ?? '', c]))
-  const states = expected.map((service) => classify(service, byService.get(service.name)))
+  const byService = new Map<string, ContainerSummary[]>()
+  for (const c of containers) {
+    const key = c.service ?? ''
+    byService.set(key, [...(byService.get(key) ?? []), c])
+  }
+
+  const states = expected.map((service) => {
+    const found = byService.get(service.name) ?? []
+    if (found.length === 0) return classify(service, undefined)
+    return worst(found.map((c) => classify(service, c)))
+  })
 
   const count = (state: ServiceState) => states.filter((s) => s === state).length
   const up = count('up')
   const completed = count('completed')
-  const missing = expected.filter((s) => !byService.has(s.name)).length
+  const missing = expected.filter((s) => (byService.get(s.name) ?? []).length === 0).length
 
-  const parts = [`${up}/${expected.length} services up`]
+  // `completed` counts toward the numerator. A one-shot that exited zero IS in its
+  // intended state, and excluding it produced a green dot beside the words
+  // "0/1 services up" — which reads as broken. The trailing clause disambiguates.
+  const parts = [`${up + completed}/${expected.length} services up`]
   if (completed > 0) parts.push(`${completed} completed`)
   if (missing > 0) parts.push(`${missing} missing`)
   const detail = parts.join(', ')
@@ -2127,7 +2186,7 @@ export function rollUpStatus(
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/status.test.ts`
-Expected: PASS, 13 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Commit**
 
