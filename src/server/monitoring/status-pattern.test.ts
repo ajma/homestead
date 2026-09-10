@@ -1,4 +1,4 @@
-import { matchesStatusPattern } from "@server/monitoring/status-pattern";
+import { isValidStatusPattern, matchesStatusPattern } from "@server/monitoring/status-pattern";
 import { describe, expect, it } from "vitest";
 
 describe("matchesStatusPattern", () => {
@@ -33,6 +33,18 @@ describe("matchesStatusPattern", () => {
   it("ignores an unparseable term but honours the rest", () => {
     expect(matchesStatusPattern("banana,2xx", 200)).toBe(true);
     expect(matchesStatusPattern("banana,2xx", 404)).toBe(false);
+  });
+
+  it("validates a pattern independently of any status", () => {
+    // The matcher fails closed, which is right — but a user who types `2x` for `2xx`
+    // then sees their app go red with nothing saying the pattern is the problem. The
+    // probe API rejects it at the point they type it instead.
+    for (const good of ["2xx", "2xx,3xx", "200", "200,204,301", " 2XX , 301 "]) {
+      expect(isValidStatusPattern(good), good).toBe(true);
+    }
+    for (const bad of ["", "   ", ",,,", "banana", "2x", "20", "6xx", "1000"]) {
+      expect(isValidStatusPattern(bad), bad).toBe(false);
+    }
   });
 
   it("does not treat a class as a prefix match", () => {
