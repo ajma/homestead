@@ -2005,6 +2005,25 @@ describe('rollUpStatus', () => {
     expect(rollUpStatus([], []).status).toBe('unknown')
   })
 
+  it('covers the remaining container states', () => {
+    // Each is a distinct switch branch, and a silent regression in any of them shows
+    // the user a green dot over a stack that is not serving.
+    expect(rollUpStatus([service('w')], [container('w', 'created')]).status).toBe('starting')
+    expect(rollUpStatus([service('w')], [container('w', 'paused')]).status).toBe('degraded')
+    expect(rollUpStatus([service('w')], [container('w', 'dead')]).status).toBe('down')
+  })
+
+  it('ignores a container the compose file no longer declares', () => {
+    // `docker compose up` without `--remove-orphans` leaves the container of a deleted
+    // service running. The rollup answers "are the declared services healthy", so an
+    // undeclared extra is not a fault here; the adoption scan is where strays surface.
+    const result = rollUpStatus(
+      [service('web')],
+      [container('web', 'running', 'Up 2 hours'), container('removed', 'running', 'Up 9 days')],
+    )
+    expect(result).toEqual({ status: 'up', detail: '1/1 services up' })
+  })
+
   it('summarises counts in the detail string', () => {
     const result = rollUpStatus(
       [service('a'), service('b'), service('c')],
@@ -2066,7 +2085,12 @@ function classify(service: ResolvedService, container: ContainerSummary | undefi
     case 'exited': {
       // A one-shot init or migration container finishing cleanly is normal. Reporting
       // it as a failure would make most real stacks permanently red.
-      const isOneShot = service.restart === null || service.restart === 'no'
+      //
+      // Only an EXPLICIT `restart: "no"` counts. Treating an absent policy as one-shot
+      // too would cover almost every service in a typical compose file — the field is
+      // usually omitted — so a web server that exited cleanly would read as success and
+      // the app would show green while nothing was serving.
+      const isOneShot = service.restart === 'no'
       return isOneShot && exitCodeOf(container.status) === 0 ? 'completed' : 'down'
     }
     default:
@@ -2103,7 +2127,7 @@ export function rollUpStatus(
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/status.test.ts`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit**
 
