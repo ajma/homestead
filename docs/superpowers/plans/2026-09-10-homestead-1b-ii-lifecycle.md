@@ -959,6 +959,21 @@ describe('FakeHost.streamLogs', () => {
   })
 })
 
+describe('streamLogs cleanup contract', () => {
+  it('opens nothing until the first next()', async () => {
+    // The body is a generator: obtaining the iterable must not touch Docker. Measured
+    // against the real daemon, five un-iterated iterables left the handle count
+    // unchanged — this pins the same property against the fake.
+    const host = new FakeHost()
+    host.logLines.set('abc', [{ text: 'x', stream: 'stdout' }])
+    const iterable = host.streamLogs({ containerId: 'abc' })
+    expect(host.logCalls).toEqual([])
+    // Only once someone asks for a value does it record the call.
+    await iterable[Symbol.asyncIterator]().next()
+    expect(host.logCalls).toHaveLength(1)
+  })
+})
+
 describe('inspectContainer port projection', () => {
   it('reports an exposed-but-unpublished port as null, not port zero', async () => {
     // Docker gives `HostPort: ""` for a port that is exposed but not published, and
@@ -1043,6 +1058,16 @@ const MASK = "••••••••";
    * with an 8-byte header per chunk, so the bytes must be demultiplexed or the log fills
    * with control characters.
    */
+  /**
+   * Consume this with `for await`, or call `return()` on the iterator yourself.
+   *
+   * The body is a generator, so nothing runs — and no socket is opened — until the first
+   * `next()`. Measured: obtaining five iterables and never iterating them left the
+   * process's handle count unchanged. But an iterator advanced once and then abandoned
+   * without `return()` does leak, because only `return()` runs the `finally` below:
+   * three such iterators added three handles. `for await` always calls `return()` on
+   * break or throw, which is why every caller in this phase uses it.
+   */
   async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
     const container = this.docker.getContainer(opts.containerId);
     const details = await container.inspect();
@@ -1109,7 +1134,16 @@ const MASK = "••••••••";
         }
         queue.close();
       });
-      stream.on("error", () => queue.close());
+      stream.on("error", () => {
+        // Same flush as the `end` path. A socket dying mid-character would otherwise
+        // drop it, and the two paths differing is how one of them silently rots.
+        if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+        if (ttyDecoder) {
+          const trailing = ttyDecoder.end();
+          if (trailing !== "") queue.push({ text: trailing, stream: "stdout" });
+        }
+        queue.close();
+      });
     }
 
     try {
@@ -1215,6 +1249,16 @@ Add `StringDecoder` from `node:string_decoder`, `ChunkQueue` and `LogDemultiplex
   inspectCalls: string[] = [];
   images = new Map<string, ImageInspect>();
 
+  /**
+   * Consume this with `for await`, or call `return()` on the iterator yourself.
+   *
+   * The body is a generator, so nothing runs — and no socket is opened — until the first
+   * `next()`. Measured: obtaining five iterables and never iterating them left the
+   * process's handle count unchanged. But an iterator advanced once and then abandoned
+   * without `return()` does leak, because only `return()` runs the `finally` below:
+   * three such iterators added three handles. `for await` always calls `return()` on
+   * break or throw, which is why every caller in this phase uses it.
+   */
   async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
     this.logCalls.push(opts);
     for (const line of this.logLines.get(opts.containerId) ?? []) yield line;
