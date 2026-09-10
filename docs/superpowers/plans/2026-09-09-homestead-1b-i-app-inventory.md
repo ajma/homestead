@@ -2937,6 +2937,48 @@ describe('compose file API', () => {
     expect(res.json().valid).toBe(true)
     await app.close()
   })
+
+  it('leaves no scratch file behind, on either outcome', async () => {
+    // The compose root is an SMB share the user browses. A stray
+    // `.homestead-validate-*.yaml` beside their compose file is litter they would have
+    // to clean up by hand, and it appears once per keystroke on a debounced editor.
+    const { app, cookie, id } = await withAdoptedApp()
+    const validate = (content: string) =>
+      app.inject({
+        method: 'POST', url: `/api/apps/${id}/compose/validate`,
+        headers: { cookie }, payload: { content },
+      })
+
+    await validate('services:\n  web:\n    image: nginx\n')
+    app.deps.host.composeResults.set('config --format json', {
+      exitCode: 1, stdout: '', stderr: 'bad',
+    })
+    await validate('nonsense\n')
+
+    const strays = [...app.deps.host.files.keys()].filter((f) => f.includes('homestead-validate'))
+    expect(strays).toEqual([])
+    await app.close()
+  })
+
+  it('does not let two concurrent validations collide', async () => {
+    // A debounced editor issues overlapping requests as a matter of course. With one
+    // fixed scratch filename the first request's cleanup deleted the file the second
+    // was still resolving, and each validation left a permanent cache entry behind.
+    const { app, cookie, id } = await withAdoptedApp()
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        app.inject({
+          method: 'POST', url: `/api/apps/${id}/compose/validate`, headers: { cookie },
+          payload: { content: `services:\n  web:\n    image: nginx:${i}\n` },
+        }),
+      ),
+    )
+    expect(results.map((r) => r.statusCode)).toEqual([200, 200, 200, 200, 200])
+    expect(results.every((r) => r.json().valid)).toBe(true)
+    expect([...app.deps.host.files.keys()].filter((f) => f.includes('homestead-validate')))
+      .toEqual([])
+    await app.close()
+  })
 })
 ```
 
@@ -2954,6 +2996,35 @@ const composeWriteBody = z.object({
   content: z.string(),
   expectedHash: z.string().nullable(),
 })
+
+/**
+ * Resolves candidate compose content without touching the app's real file.
+ *
+ * Compose only reads from a path, so the content goes to a scratch file beside the
+ * real one — the same directory, so `.env` interpolation and the derived project name
+ * resolve exactly as they will after the save.
+ *
+ * The name carries a ULID for two reasons. A fixed name races: the editor validates on
+ * a debounce, so two calls for one app overlap routinely, and the first one's `finally`
+ * deletes the file the second is mid-resolve on. And the cache is keyed by path, so a
+ * fixed name would serve one keystroke's verdict for the next; a unique name plus the
+ * `invalidate` below keeps the cache from growing by one permanent entry per keystroke.
+ */
+async function validateContent(
+  directory: string,
+  content: string,
+): Promise<{ valid: true } | { valid: false; message: string }> {
+  const composeFile = `.homestead-validate-${ulid()}.yaml`
+  const target = { directory, composeFile }
+  await host.writeTextFile(`${directory}/${composeFile}`, content, null)
+  try {
+    const check = await composeConfig.resolve(target)
+    return check.valid ? { valid: true } : { valid: false, message: check.message }
+  } finally {
+    composeConfig.invalidate(target)
+    await host.deleteFile(`${directory}/${composeFile}`)
+  }
+}
 
   app.get('/api/apps/:id/compose', async (request, reply) => {
     requireCapability(request, 'app:config')
@@ -2976,14 +3047,9 @@ const composeWriteBody = z.object({
 
     // Validate BEFORE writing. An invalid compose file makes the app unmanageable, and
     // the editor is where the user should learn about it — not the next deploy.
-    // Written to a sibling scratch file so the real one is never briefly invalid.
-    const scratch = `${row.directory}/.homestead-validate.yaml`
-    await host.writeTextFile(scratch, body.content, null)
-    try {
-      const check = await composeConfig.resolve({ ...target, composeFile: '.homestead-validate.yaml' })
-      if (!check.valid) return reply.code(422).send({ error: 'invalid_compose', message: check.message })
-    } finally {
-      await host.deleteFile(scratch)
+    const check = await validateContent(row.directory, body.content)
+    if (!check.valid) {
+      return reply.code(422).send({ error: 'invalid_compose', message: check.message })
     }
 
     try {
@@ -3008,16 +3074,7 @@ const composeWriteBody = z.object({
     const [row] = await db.select().from(apps).where(eq(apps.id, id))
     if (!row) return reply.code(404).send({ error: 'not_found' })
 
-    const scratch = `${row.directory}/.homestead-validate.yaml`
-    await host.writeTextFile(scratch, body.content, null)
-    try {
-      const check = await composeConfig.resolve({
-        directory: row.directory, composeFile: '.homestead-validate.yaml',
-      })
-      return check.valid ? { valid: true } : { valid: false, message: check.message }
-    } finally {
-      await host.deleteFile(scratch)
-    }
+    return validateContent(row.directory, body.content)
   })
 ```
 
@@ -3053,7 +3110,7 @@ with `rm` added to the `node:fs/promises` import. In `FakeHost`:
 - [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `pnpm vitest run src/server/routes/apps-compose.test.ts && pnpm test`
-Expected: the focused file passes 6 tests; the full suite stays green.
+Expected: the focused file passes 8 tests; the full suite stays green.
 
 - [ ] **Step 6: Commit**
 
