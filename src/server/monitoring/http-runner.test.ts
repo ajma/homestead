@@ -231,6 +231,19 @@ describe("http_external", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("finds a marker that straddles the sample boundary", async () => {
+    // Slicing the accumulated bytes back to exactly the cap cut a marker in half: 2047
+    // filler bytes then "1033" decoded as "…1", so a tunnel outage was reported as an
+    // application fault. The read is already bounded; the slice only created this.
+    const { impl } = fakeFetch(() => new Response(`${"x".repeat(2047)}1033`, { status: 530 }));
+    expect(
+      await createHttpRunners({ fetch: impl, accessCredentials: creds }).external.run(
+        external(),
+        ctx,
+      ),
+    ).toMatchObject({ status: "down", faultClass: "network" });
+  });
+
   it("never leaks the service token into the detail payload", async () => {
     const { impl } = fakeFetch(() => new Response(null, { status: 500 }));
     const result = await createHttpRunners({ fetch: impl, accessCredentials: creds }).external.run(

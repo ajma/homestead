@@ -56,7 +56,14 @@ async function sampleBody(response: Response): Promise<string> {
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(joined.slice(0, BODY_SAMPLE_BYTES));
+  // Decode everything we read, deliberately WITHOUT slicing to the cap.
+  //
+  // The loop already stopped once `total` reached the cap, so memory is bounded by the
+  // cap plus one chunk either way — the slice bounded nothing extra. What it did do was
+  // cut a marker that straddled the boundary: a body of 2047 filler bytes followed by
+  // "1033" decoded as "…1", `includes('1033')` failed, and a tunnel outage was reported
+  // as an application fault.
+  return new TextDecoder().decode(joined);
 }
 
 export function createHttpRunners(deps: {
@@ -111,6 +118,11 @@ export function createHttpRunners(deps: {
 
   const internal: ProbeRunner = {
     kind: "http_internal",
+    // The default pattern accepts 3xx, which the spec specifies. That is right here and
+    // not the blind spot the external classification exists to close: an app redirecting
+    // to its own login page is reachable, which is all an internal probe asks. Access
+    // redirecting to *its* login page is an interception by something that is not the
+    // app, which is why only the external runner inspects the destination.
     async run(probe: ProbeRow, _ctx: ProbeContext): Promise<ProbeResult> {
       const attempt = await request(probe, {});
       if ("failure" in attempt) return attempt.failure;
