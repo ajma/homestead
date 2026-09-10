@@ -215,7 +215,7 @@ export class FakeHost implements Host {
   }
 }
 
-export async function buildTestApp(): Promise<TestApp> {
+export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Promise<TestApp> {
   const config = loadConfig({
     HOMESTEAD_SECRET_KEY: Buffer.alloc(32, 1).toString("base64"),
     HOMESTEAD_BASE_URL: "http://localhost:3000",
@@ -244,7 +244,7 @@ export async function buildTestApp(): Promise<TestApp> {
       throw new Error("scheduler fetch should not be called in tests");
     },
   });
-  const events = new EventBus();
+  const events = new EventBus({ maxStreamMs: overrides.maxStreamMs });
   const scheduler = new Scheduler({
     db,
     host,

@@ -31,7 +31,7 @@ const publicUser = {
 const otherUsers = alias(users, "other_users");
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
-  const { db, auth } = app.deps;
+  const { db, auth, events } = app.deps;
 
   const countUsers = async () => (await db.select({ id: users.id }).from(users)).length;
 
@@ -209,6 +209,10 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       detail: body,
       ip: request.ip,
     });
+    // Role is what `inScope`/`can` are evaluated against; changing it can turn what an
+    // open SSE stream shows into something the user should no longer see. Only a role
+    // change forces the reconnect — a name-only edit changes nothing it evaluates.
+    if (body.role !== undefined) events.closeForUser(id);
     const [row] = await db.select(publicUser).from(users).where(eq(users.id, id));
     return row;
   });
@@ -241,6 +245,9 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       detail: body,
       ip: request.ip,
     });
+    // A narrowed scope must not let an already-open stream keep emitting events for apps
+    // it no longer covers; a widened one just reconnects once, which is harmless.
+    events.closeForUser(id);
     return { scopeAllApps: body.scopeAllApps, appIds: body.appIds };
   });
 
@@ -266,6 +273,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       targetId: id,
       ip: request.ip,
     });
+    // A deleted user's open stream must not outlive the account it was opened under.
+    events.closeForUser(id);
     return reply.code(204).send();
   });
 }

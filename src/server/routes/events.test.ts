@@ -1,4 +1,6 @@
+import { request } from "node:http";
 import type { PersistedTransition } from "@server/monitoring/persist";
+import { EventBus } from "@server/routes/events";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { describe, expect, it } from "vitest";
 
@@ -107,6 +109,171 @@ describe("/api/events", () => {
     const { app, cookie, id } = await withApp();
     await collect(app, cookie, () => app.deps.events.publish(transition(id)));
     // The bus must not retain a listener per closed tab.
+    expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("clears the lifetime-cap timer when the stream ends before the cap fires", async () => {
+    // Mutation testing analogue: gutting the cap's `clearTimeout` leaves every test above
+    // green, because none of them run long enough to observe the cap firing. Without it,
+    // every closed stream leaks a Timeout scheduled up to MAX_STREAM_MS in the future —
+    // one per abandoned tab, for the life of the process.
+    const { app, cookie, id } = await withApp();
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const before = timers();
+    await collect(app, cookie, () => app.deps.events.publish(transition(id)));
+    expect(timers()).toBe(before);
+    await app.close();
+  });
+
+  it("closes a stream once its lifetime cap elapses", async () => {
+    // A small injected cap stands in for the real 15-minute one — see MAX_STREAM_MS in
+    // events.ts. This is the backstop: no mutation route runs here, nothing calls
+    // `closeForUser` or `closeAll`, only the cap itself ends the stream.
+    const app = await buildTestApp({ maxStreamMs: 30 });
+    const { cookie } = await signUpAdmin(app);
+    const res = await app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("unsubscribes on a real socket disconnect, not just after inject's mock socket settles", async () => {
+    // app.inject() runs on light-my-request's mock socket: app.close() alone never fires
+    // `close` on request.raw/reply.raw, so this path was previously verified by
+    // inspection only. A listening server plus a real node:http client closes the actual
+    // gap.
+    const { app, cookie } = await withApp();
+    try {
+      await app.listen({ port: 0, host: "127.0.0.1" });
+      const address = app.server.address();
+      if (address === null || typeof address === "string") {
+        throw new Error("expected a bound TCP address");
+      }
+
+      const waitUntil = async (predicate: () => boolean) => {
+        const deadline = Date.now() + 2000;
+        while (!predicate()) {
+          if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      };
+
+      const req = request({
+        host: "127.0.0.1",
+        port: address.port,
+        path: "/api/events",
+        method: "GET",
+        headers: { cookie },
+      });
+      req.end();
+      await new Promise<void>((resolve, reject) => {
+        req.on("response", (res) => {
+          res.resume();
+          resolve();
+        });
+        req.on("error", reject);
+      });
+
+      await waitUntil(() => app.deps.events.subscriberCount() === 1);
+      req.destroy();
+      await waitUntil(() => app.deps.events.subscriberCount() === 0);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("EventBus.closeForUser", () => {
+  it("ends only the named user's streams", () => {
+    const bus = new EventBus();
+    let closedB = false;
+    // Each `onClose` calls its own `unsubscribe`, mirroring what the route's `finally`
+    // does once `onClose` resolves its `finished` promise.
+    const unsubA = bus.subscribe(
+      "user-a",
+      () => {},
+      () => unsubA(),
+    );
+    const unsubB = bus.subscribe(
+      "user-b",
+      () => {},
+      () => {
+        closedB = true;
+        unsubB();
+      },
+    );
+
+    bus.closeForUser("user-a");
+
+    expect(closedB).toBe(false);
+    expect(bus.subscriberCount()).toBe(1);
+  });
+});
+
+describe("closing a user's stream when their access changes", () => {
+  function openStream(app: Awaited<ReturnType<typeof withApp>>["app"], cookie: string) {
+    return app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
+  }
+
+  it("closes an open stream when an admin changes that user's role", async () => {
+    const { app, cookie } = await withApp();
+    const viewer = await createViewer(app, cookie);
+    const streaming = openStream(app, viewer.cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/users/${viewer.id}`,
+      headers: { cookie },
+      payload: { role: "admin" },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    const res = await streaming;
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("closes an open stream when an admin narrows that user's scope", async () => {
+    const { app, cookie } = await withApp();
+    const viewer = await createViewer(app, cookie);
+    const streaming = openStream(app, viewer.cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    const scoped = await app.inject({
+      method: "PUT",
+      url: `/api/users/${viewer.id}/scope`,
+      headers: { cookie },
+      payload: { scopeAllApps: false, appIds: [] },
+    });
+    expect(scoped.statusCode).toBe(200);
+
+    const res = await streaming;
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("closes an open stream when an admin deletes that user", async () => {
+    const { app, cookie } = await withApp();
+    const viewer = await createViewer(app, cookie);
+    const streaming = openStream(app, viewer.cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/users/${viewer.id}`,
+      headers: { cookie },
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const res = await streaming;
+    expect(res.statusCode).toBe(200);
     expect(app.deps.events.subscriberCount()).toBe(0);
     await app.close();
   });

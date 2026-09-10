@@ -4,26 +4,53 @@ import type { PersistedTransition } from "../monitoring/persist.js";
 import { sseResponse } from "../sse.js";
 
 /**
+ * Backstop for the lifetime cap on `/api/events`, below. `AuthContext` is resolved once
+ * at connect time and never refreshed for the life of the stream — see the cap's comment
+ * on the route. Named so the number itself, and the reason it is not larger or smaller,
+ * live in one place.
+ */
+const MAX_STREAM_MS = 15 * 60_000;
+
+type Subscription = {
+  userId: string;
+  listener: (t: PersistedTransition) => void;
+  onClose?: () => void;
+};
+
+/**
  * The fan-out point between the scheduler and every open browser tab.
  *
  * Kept separate from the scheduler so the route does not reach into it, and so a test can
  * publish a transition without running a tick.
  */
 export class EventBus {
-  private readonly subscribers = new Set<(t: PersistedTransition) => void>();
-  private readonly closers = new Set<() => void>();
+  private readonly subscriptions = new Set<Subscription>();
+
+  /**
+   * `maxStreamMs` defaults to `MAX_STREAM_MS`; a test overrides it the same way the
+   * scheduler's `now`/`random` are overridden — an optional constructor field rather than
+   * a second, parallel configuration mechanism.
+   */
+  constructor(private readonly opts: { maxStreamMs?: number } = {}) {}
+
+  get maxStreamMs(): number {
+    return this.opts.maxStreamMs ?? MAX_STREAM_MS;
+  }
 
   /**
    * `onClose` is separate from the transition channel on purpose. Pushing a sentinel
    * value through `subscribe` would make every subscriber type-check for something that
    * is not a transition, to serve one test affordance.
    */
-  subscribe(listener: (t: PersistedTransition) => void, onClose?: () => void): () => void {
-    this.subscribers.add(listener);
-    if (onClose) this.closers.add(onClose);
+  subscribe(
+    userId: string,
+    listener: (t: PersistedTransition) => void,
+    onClose?: () => void,
+  ): () => void {
+    const subscription: Subscription = { userId, listener, onClose };
+    this.subscriptions.add(subscription);
     return () => {
-      this.subscribers.delete(listener);
-      if (onClose) this.closers.delete(onClose);
+      this.subscriptions.delete(subscription);
     };
   }
 
@@ -31,9 +58,9 @@ export class EventBus {
     // Transitions only. Emitting every sample would put one message per probe per
     // interval on every open tab, for a status that did not change.
     if (!transition.changed) return;
-    for (const subscriber of [...this.subscribers]) {
+    for (const subscription of [...this.subscriptions]) {
       try {
-        subscriber(transition);
+        subscription.listener(transition);
       } catch {
         // One tab's failure is not another's.
       }
@@ -41,7 +68,7 @@ export class EventBus {
   }
 
   subscriberCount(): number {
-    return this.subscribers.size;
+    return this.subscriptions.size;
   }
 
   /**
@@ -49,7 +76,24 @@ export class EventBus {
    * cannot settle while a stream is open — and the hook a graceful shutdown will call.
    */
   closeAll(): void {
-    for (const close of [...this.closers]) close();
+    for (const subscription of [...this.subscriptions]) subscription.onClose?.();
+  }
+
+  /**
+   * Ends only the streams belonging to `userId`, and nothing else. Called after a user's
+   * role, scope, or account is changed, so a revoked or narrowed viewer's tab reconnects
+   * and re-resolves its `AuthContext` instead of continuing to evaluate `inScope` against
+   * a stale snapshot.
+   */
+  closeForUser(userId: string): void {
+    for (const subscription of [...this.subscriptions]) {
+      if (subscription.userId !== userId) continue;
+      try {
+        subscription.onClose?.();
+      } catch {
+        // One stream's failure to close is not another's.
+      }
+    }
   }
 }
 
@@ -68,6 +112,7 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
     });
 
     const unsubscribe = events.subscribe(
+      ctx.userId,
       (transition) => {
         // The scope predicate, applied per event. A scoped viewer must not learn that an
         // app they cannot see exists, let alone that it just went down.
@@ -84,9 +129,16 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
 
     void sse.closed.then(() => done?.());
 
+    // The lifetime cap: the backstop for any path that changes what this user may see
+    // without going through the three routes that call `closeForUser`. Forcing a
+    // reconnect here re-runs `preHandler`, which re-resolves `AuthContext` from current
+    // data instead of the snapshot this stream was opened with.
+    const capTimer = setTimeout(() => done?.(), events.maxStreamMs);
+
     try {
       await finished;
     } finally {
+      clearTimeout(capTimer);
       unsubscribe();
       sse.close();
     }
