@@ -1029,12 +1029,20 @@ describe('http_internal', () => {
     expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal)
   })
 
-  it('does not read an unbounded body', async () => {
-    // A probe must not pull a gigabyte off a misconfigured target.
-    const huge = 'x'.repeat(200_000)
-    const { impl } = fakeFetch(() => new Response(huge, { status: 200 }))
+  it('does not read a body at all on the internal path', async () => {
+    // The internal runner classifies on the status line alone, so it never touches the
+    // body. Asserting a size cap here would pass without any cap existing — the external
+    // runner is the one that reads, and it has its own test below.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(1000)))
+        controller.close()
+      },
+    })
+    const { impl } = fakeFetch(() => new Response(body, { status: 200 }))
     const result = await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx)
-    expect(JSON.stringify(result.detail).length).toBeLessThan(3000)
+    expect(result.status).toBe('up')
+    expect(JSON.stringify(result.detail)).not.toContain('xxx')
   })
 })
 
@@ -1099,6 +1107,31 @@ describe('http_external', () => {
     ).toMatchObject({ status: 'up' })
   })
 
+  it('stops reading a huge error body instead of buffering all of it', async () => {
+    // This is the path that DOES read a body — looking for Cloudflare's 1033 under a
+    // 5xx. `response.text()` would buffer the whole thing first, so an origin answering
+    // a 5xx with a gigabyte would be pulled in full every 60 seconds.
+    let produced = 0
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        produced += 1
+        controller.enqueue(new TextEncoder().encode('x'.repeat(64 * 1024)))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const { impl } = fakeFetch(() => new Response(body, { status: 520 }))
+    const result = await createHttpRunners({ fetch: impl, accessCredentials: creds }).external.run(
+      external(), ctx,
+    )
+    expect(result.status).toBe('down')
+    // A handful of 64KB chunks, not an unbounded stream, and the transfer was stopped.
+    expect(produced).toBeLessThan(5)
+    expect(cancelled).toBe(true)
+  })
+
   it('never leaks the service token into the detail payload', async () => {
     const { impl } = fakeFetch(() => new Response(null, { status: 500 }))
     const result = await createHttpRunners({ fetch: impl, accessCredentials: creds }).external.run(
@@ -1139,13 +1172,43 @@ function classifyThrown(error: unknown): ProbeResult {
   }
 }
 
+/**
+ * Reads at most `BODY_SAMPLE_BYTES` and then stops the transfer.
+ *
+ * `response.text()` would buffer the WHOLE body before slicing, so an origin behind the
+ * tunnel that answers a 5xx with a gigabyte would be read in full — every 60 seconds,
+ * for the life of the probe. Streaming and cancelling bounds what crosses the wire, not
+ * just what we keep.
+ */
 async function sampleBody(response: Response): Promise<string> {
+  const body = response.body
+  if (!body) return ''
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
   try {
-    const text = await response.text()
-    return text.slice(0, BODY_SAMPLE_BYTES)
+    while (total < BODY_SAMPLE_BYTES) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        chunks.push(value)
+        total += value.byteLength
+      }
+    }
   } catch {
-    return ''
+    // A truncated or broken body is not worth failing the classification over.
+  } finally {
+    // Stops the transfer rather than merely ignoring the rest of it.
+    await reader.cancel().catch(() => {})
   }
+
+  const joined = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    joined.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(joined.slice(0, BODY_SAMPLE_BYTES))
 }
 
 export function createHttpRunners(deps: {
