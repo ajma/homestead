@@ -9,6 +9,7 @@ import type { Db } from "./db/client.js";
 import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
 import { healthRoutes } from "./routes/health.js";
+import { spaRoutes } from "./routes/spa.js";
 import { userRoutes } from "./routes/users.js";
 
 /** Headers a client must never be able to set on the request Better-Auth sees. */
@@ -123,13 +124,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   await app.register(healthRoutes);
   await app.register(userRoutes);
-
-  app.setNotFoundHandler(async (request, reply) => {
-    if (request.url.startsWith("/api/")) {
-      return reply.code(404).send({ error: "not_found", path: request.url });
-    }
-    return reply.code(404).send({ error: "not_found" });
-  });
+  await app.register(spaRoutes);
 
   app.setErrorHandler(async (error, request, reply) => {
     request.log.error({ err: error }, "request failed");

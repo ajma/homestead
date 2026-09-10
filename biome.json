@@ -6,5 +6,6 @@
     "enabled": true,
     "rules": { "preset": "recommended", "suspicious": { "noExplicitAny": "error" } }
   },
-  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "css": { "parser": { "tailwindDirectives": true } }
 }
