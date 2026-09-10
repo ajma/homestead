@@ -44,7 +44,7 @@ describe.skipIf(!hasDocker)("runCompose", () => {
       "config",
       "--format",
       "json",
-    ]);
+    ]).result;
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout).services.web.image).toBe("nginx:alpine");
   });
@@ -52,59 +52,24 @@ describe.skipIf(!hasDocker)("runCompose", () => {
   it("exits non-zero with a usable message for an invalid project", async () => {
     const result = await host.runCompose({ directory: "bad", composeFile: "compose.yaml" }, [
       "config",
-    ]);
+    ]).result;
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("ghost");
   });
 
-  it("streams output when a callback is supplied", async () => {
+  it("streams output as the process runs", async () => {
     const chunks: string[] = [];
-    await host.runCompose({ directory: "good", composeFile: "compose.yaml" }, ["config"], {
-      onOutput: (chunk) => chunks.push(chunk),
-    });
+    const handle = host.runCompose({ directory: "good", composeFile: "compose.yaml" }, ["config"]);
+    for await (const chunk of handle.output) chunks.push(chunk.text);
     expect(chunks.join("")).toContain("nginx:alpine");
   });
 
-  it("survives an onOutput callback that throws, without killing the process", async () => {
-    // Measured before this guard existed: the throw escaped as an uncaughtException
-    // while the promise still resolved with exitCode 0 and the full output — so a
-    // caller saw success while the process died. Phase 1B-ii passes an SSE writer
-    // here, and a disconnected client is ordinary, not exceptional.
-    const seen: string[] = [];
-    const onUncaught = (error: Error) => seen.push(String(error.message));
-    // Removed in `finally`. Vitest runs many files in one worker, so a listener left
-    // registered would intercept the FIRST genuine uncaughtException anywhere later in
-    // the run and quietly prevent the crash that should have failed the suite — an
-    // uncaughtException handler is the worst kind to leak, since its whole job is
-    // swallowing the signal that something went badly wrong.
-    process.on("uncaughtException", onUncaught);
-
-    let result: Awaited<ReturnType<typeof host.runCompose>>;
-    try {
-      result = await host.runCompose(
-        { directory: "good", composeFile: "compose.yaml" },
-        ["config", "--format", "json"],
-        {
-          onOutput: () => {
-            throw new Error("SSE client disconnected");
-          },
-        },
-      );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    } finally {
-      process.removeListener("uncaughtException", onUncaught);
-    }
-
-    expect(seen).toEqual([]);
-    // Capture must continue despite the failing consumer.
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout).services.web.image).toBe("nginx:alpine");
-  });
-
   it("refuses a directory outside the compose root", async () => {
-    await expect(
-      host.runCompose({ directory: "../escape", composeFile: "compose.yaml" }, ["config"]),
-    ).rejects.toThrow();
+    const result = await host.runCompose({ directory: "../escape", composeFile: "compose.yaml" }, [
+      "config",
+    ]).result;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("escape");
   });
 
   it("passes arguments as an array, so shell metacharacters are inert", async () => {
@@ -113,8 +78,41 @@ describe.skipIf(!hasDocker)("runCompose", () => {
       "config",
       "--format",
       "json; id",
-    ]);
+    ]).result;
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).not.toMatch(/uid=\d+/);
+  });
+
+  it.skipIf(!hasDocker)("streams output before the process exits", async () => {
+    const handle = host.runCompose({ directory: "good", composeFile: "compose.yaml" }, [
+      "config",
+      "--format",
+      "json",
+    ]);
+    const chunks: string[] = [];
+    for await (const chunk of handle.output) chunks.push(chunk.text);
+    const result = await handle.result;
+    expect(result.exitCode).toBe(0);
+    // The point of the handle: output was observable as an iterable, not only at the end.
+    expect(chunks.join("")).toContain("services");
+  });
+
+  it.skipIf(!hasDocker)("settles result even when nobody reads output", async () => {
+    const result = await host.runCompose({ directory: "good", composeFile: "compose.yaml" }, [
+      "config",
+      "--format",
+      "json",
+    ]).result;
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("settles result when the compose path does not resolve", async () => {
+    // No Docker needed: the path guard rejects before anything spawns. Without the
+    // `.catch` on the async IIFE this hangs forever instead of resolving.
+    const result = await host.runCompose({ directory: "nope", composeFile: "compose.yaml" }, [
+      "config",
+    ]).result;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).not.toBe("");
   });
 });

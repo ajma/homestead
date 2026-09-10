@@ -490,14 +490,18 @@ describe("app inventory API", () => {
     let inFlight = 0;
     let peakConcurrency = 0;
     const originalRunCompose = app.deps.host.runCompose.bind(app.deps.host);
-    app.deps.host.runCompose = async (target, args, opts) => {
-      inFlight++;
-      peakConcurrency = Math.max(peakConcurrency, inFlight);
-      // Small delay to ensure promises actually overlap and concurrency is measurable.
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const result = await originalRunCompose(target, args, opts);
-      inFlight--;
-      return result;
+    app.deps.host.runCompose = (target, args) => {
+      const handle = originalRunCompose(target, args);
+      const wrappedResult = (async () => {
+        inFlight++;
+        peakConcurrency = Math.max(peakConcurrency, inFlight);
+        // Small delay to ensure promises actually overlap and concurrency is measurable.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const result = await handle.result;
+        inFlight--;
+        return result;
+      })();
+      return { output: handle.output, result: wrappedResult, cancel: handle.cancel };
     };
 
     await app.inject({

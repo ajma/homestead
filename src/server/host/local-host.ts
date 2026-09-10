@@ -1,8 +1,9 @@
-import { execFile } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import Docker from "dockerode";
+import { ChunkQueue } from "./chunk-queue.js";
 import { PathGuard } from "./paths.js";
 import type {
   ComposeOptions,
@@ -12,6 +13,7 @@ import type {
   DiscoveredDir,
   FileRead,
   Host,
+  JobHandle,
 } from "./types.js";
 import { HashMismatchError } from "./types.js";
 
@@ -158,62 +160,86 @@ export class LocalHost implements Host {
     return this.docker.getContainer(id).inspect();
   }
 
-  async runCompose(
-    target: ComposeTarget,
-    args: string[],
-    opts: ComposeOptions = {},
-  ): Promise<ComposeResult> {
-    // PathGuard resolves and confines the compose file, so a caller cannot point the
-    // CLI at a path outside the compose root.
-    const composePath = await this.guard.resolveExisting(
-      join(target.directory, target.composeFile),
-    );
+  /** Output kept for the `result` tail, per stream. Beyond this the head is discarded. */
+  private static readonly TAIL_BYTES = 256 * 1024;
 
-    // execFile with an ARGUMENT ARRAY — never a shell string. `args` reaches us from
-    // request handlers, and a concatenated command would be an injection point.
-    const child = execFile("docker", ["compose", "-f", composePath, ...args], {
-      timeout: opts.timeoutMs ?? 60_000,
-      maxBuffer: 16 * 1024 * 1024,
-    });
+  /**
+   * Spawns `docker compose` and returns a handle rather than a finished result.
+   *
+   * `spawn`, not `execFile`: `execFile` buffers the entire output while we also read it
+   * chunk by chunk — two copies of a `pull`'s output — and its `maxBuffer` kills the
+   * process outright at the cap. The argument array and absence of a shell are unchanged,
+   * which is what keeps this injection-resistant.
+   */
+  runCompose(target: ComposeTarget, args: string[], opts: ComposeOptions = {}): JobHandle {
+    const queue = new ChunkQueue();
+    const state = { child: null as ChildProcess | null, cancelled: false };
+    const tails = { stdout: "", stderr: "" };
 
-    let stdout = "";
-    let stderr = "";
-
-    /**
-     * A throw from `onOutput` must not escape.
-     *
-     * These run inside stream 'data' handlers, so a synchronous throw propagates out of
-     * `emit()` and becomes an `uncaughtException` — measured: the promise still resolved
-     * with `exitCode: 0` and the full output, while the process died. A caller would see
-     * success. Phase 1B-ii passes an SSE writer here, and a disconnected client is an
-     * ordinary event, not an exceptional one.
-     */
-    const emit = (text: string, stream: "stdout" | "stderr") => {
-      try {
-        opts.onOutput?.(text, stream);
-      } catch {
-        // The consumer's problem, not the subprocess's. Capture continues either way.
-      }
+    const keepTail = (stream: "stdout" | "stderr", text: string) => {
+      const combined = tails[stream] + text;
+      tails[stream] =
+        combined.length > LocalHost.TAIL_BYTES
+          ? combined.slice(combined.length - LocalHost.TAIL_BYTES)
+          : combined;
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stdout += text;
-      emit(text, "stdout");
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stderr += text;
-      emit(text, "stderr");
+    const result = (async (): Promise<ComposeResult> => {
+      const composePath = await this.guard.resolveExisting(
+        join(target.directory, target.composeFile),
+      );
+      if (state.cancelled) {
+        queue.close();
+        return { exitCode: 130, stdout: "", stderr: "cancelled before start" };
+      }
+
+      return await new Promise<ComposeResult>((resolve) => {
+        const child = spawn("docker", ["compose", "-f", composePath, ...args], {
+          timeout: opts.timeoutMs ?? 60_000,
+          killSignal: "SIGTERM",
+        });
+        state.child = child;
+
+        for (const stream of ["stdout", "stderr"] as const) {
+          const pipe = child[stream];
+          pipe?.setEncoding("utf8");
+          pipe?.on("data", (text: string) => {
+            keepTail(stream, text);
+            queue.push({ text, stream });
+          });
+        }
+
+        child.on("error", (error) => {
+          queue.close();
+          resolve({ exitCode: 1, stdout: tails.stdout, stderr: error.message });
+        });
+
+        child.on("close", (code, signal) => {
+          queue.close();
+          // A signalled exit reports 128+n the way a shell would, so a killed `pull` is
+          // distinguishable from a compose file that genuinely failed to validate.
+          const exitCode = code ?? (signal === "SIGTERM" ? 143 : 1);
+          resolve({ exitCode, stdout: tails.stdout, stderr: tails.stderr });
+        });
+      });
+    })().catch((error: unknown) => {
+      // A path-guard rejection lands here. The handle must still settle; a caller
+      // awaiting `result` would otherwise hang forever on a typo in a directory name.
+      queue.close();
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+      };
     });
 
-    const exitCode = await new Promise<number>((resolve) => {
-      // 'close' rather than 'exit': it fires after the streams have drained, so no
-      // output is lost. `error` (spawn failure, timeout kill) also lands here.
-      child.on("close", (code) => resolve(code ?? 1));
-      child.on("error", () => resolve(1));
-    });
-
-    return { exitCode, stdout, stderr };
+    return {
+      output: queue,
+      result,
+      cancel: () => {
+        state.cancelled = true;
+        state.child?.kill("SIGTERM");
+      },
+    };
   }
 }

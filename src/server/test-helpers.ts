@@ -7,19 +7,32 @@ import { ensureLocalHost } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
+import { ChunkQueue } from "./host/chunk-queue.js";
 import { COMPOSE_FILENAMES, hashContent } from "./host/local-host.js";
 import type {
-  ComposeOptions,
   ComposeResult,
   ComposeTarget,
   ContainerSummary,
   DiscoveredDir,
   FileRead,
   Host,
+  JobHandle,
 } from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
 
 export type TestApp = FastifyInstance & { deps: AppDeps & { host: FakeHost } };
+
+/**
+ * Splits text into `count` pieces at arbitrary offsets — deliberately NOT on line
+ * boundaries. Code that assumes a chunk is a whole line is the bug this exists to catch.
+ */
+function splitIntoChunks(text: string, count: number): string[] {
+  if (text === "") return [];
+  const size = Math.max(1, Math.ceil(text.length / count));
+  const pieces: string[] = [];
+  for (let i = 0; i < text.length; i += size) pieces.push(text.slice(i, i + size));
+  return pieces;
+}
 
 /**
  * In-memory `Host` for tests.
@@ -36,13 +49,32 @@ export class FakeHost implements Host {
   files = new Map<string, string>();
   containers: ContainerSummary[] = [];
   inspected: string[] = [];
-  /** Scripted results, keyed by the joined args. Unmatched calls throw rather than
-   *  returning a plausible empty success, which would let a test pass vacuously. */
+  /** Scripted per `args.join(" ")`, as before. */
   composeResults = new Map<string, ComposeResult>();
   composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
   readTextFileErrors = new Map<string, Error>();
   deleteFileErrors = new Map<string, Error>();
   listContainersCalls = 0;
+  /**
+   * How many pieces to split scripted stdout into. Real output arrives in many chunks
+   * split at arbitrary byte boundaries — never once, whole, and never on line boundaries.
+   */
+  composeChunkCount = 3;
+  /** Set to have `runCompose` hang until `releaseCompose()` is called. */
+  private composeGate: Promise<void> | null = null;
+  private releaseComposeGate: (() => void) | null = null;
+
+  gateCompose(): void {
+    this.composeGate = new Promise((resolve) => {
+      this.releaseComposeGate = resolve;
+    });
+  }
+
+  releaseCompose(): void {
+    this.releaseComposeGate?.();
+    this.composeGate = null;
+    this.releaseComposeGate = null;
+  }
 
   async listAppDirectories(): Promise<DiscoveredDir[]> {
     const directories = new Set<string>();
@@ -107,26 +139,38 @@ export class FakeHost implements Host {
     return {};
   }
 
-  async runCompose(
-    target: ComposeTarget,
-    args: string[],
-    opts: ComposeOptions = {},
-  ): Promise<ComposeResult> {
+  runCompose(target: ComposeTarget, args: string[]): JobHandle {
     this.composeCalls.push({ target, args });
-    const result = this.composeResults.get(args.join(" "));
-    if (!result) throw new Error(`FakeHost: no scripted compose result for: ${args.join(" ")}`);
-    // Same swallow as LocalHost: a fake that propagates a callback throw would make
-    // tests pass or fail differently from production.
-    const emit = (text: string, stream: "stdout" | "stderr") => {
-      try {
-        opts.onOutput?.(text, stream);
-      } catch {
-        /* consumer's problem */
-      }
+    const scripted = this.composeResults.get(args.join(" ")) ?? {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
     };
-    if (result.stdout) emit(result.stdout, "stdout");
-    if (result.stderr) emit(result.stderr, "stderr");
-    return result;
+    const queue = new ChunkQueue();
+    let cancelled = false;
+
+    const result = (async (): Promise<ComposeResult> => {
+      if (this.composeGate) await this.composeGate;
+      if (cancelled) {
+        queue.close();
+        return { exitCode: 143, stdout: "", stderr: "cancelled" };
+      }
+      for (const piece of splitIntoChunks(scripted.stdout, this.composeChunkCount)) {
+        queue.push({ text: piece, stream: "stdout" });
+      }
+      if (scripted.stderr !== "") queue.push({ text: scripted.stderr, stream: "stderr" });
+      queue.close();
+      return scripted;
+    })();
+
+    return {
+      output: queue,
+      result,
+      cancel: () => {
+        cancelled = true;
+        this.releaseCompose();
+      },
+    };
   }
 }
 

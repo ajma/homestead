@@ -17,11 +17,22 @@ export type ComposeTarget = { directory: string; composeFile: string };
 
 export type ComposeResult = { exitCode: number; stdout: string; stderr: string };
 
+export type JobChunk = { text: string; stream: "stdout" | "stderr" };
+
 export type ComposeOptions = {
-  /** Called as output arrives. Phase 1B-ii uses this for lifecycle job streaming. */
-  onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
-  /** Defaults to 60s. Lifecycle operations in 1B-ii will raise it. */
+  /**
+   * Defaults to 60s, which suits `config`. Lifecycle callers pass a much larger value:
+   * `docker compose pull` on a large stack runs for minutes and must not be killed.
+   */
   timeoutMs?: number;
+};
+
+export type JobHandle = {
+  /** Bounded, drop-oldest. Ignoring it entirely does not slow or block the process. */
+  output: AsyncIterable<JobChunk>;
+  result: Promise<ComposeResult>;
+  /** Idempotent. Sends SIGTERM; `result` still resolves, with a non-zero exit code. */
+  cancel(): void;
 };
 
 export interface Host {
@@ -37,7 +48,7 @@ export interface Host {
   fileExists(rel: string): Promise<boolean>;
   listContainers(filters?: { project?: string }): Promise<ContainerSummary[]>;
   inspectContainer(id: string): Promise<unknown>;
-  runCompose(target: ComposeTarget, args: string[], opts?: ComposeOptions): Promise<ComposeResult>;
+  runCompose(target: ComposeTarget, args: string[], opts?: ComposeOptions): JobHandle;
 }
 
 export class HashMismatchError extends Error {

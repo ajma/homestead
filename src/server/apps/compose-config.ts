@@ -179,7 +179,7 @@ export class ComposeConfigCache {
     const cached = this.entries.get(key);
     if (cached && cached.hash === hash) return { valid: true, resolved: cached.resolved };
 
-    const result = await this.host.runCompose(target, ["config", "--format", "json"]);
+    const result = await this.host.runCompose(target, ["config", "--format", "json"]).result;
 
     if (result.exitCode !== 0) {
       // Deliberately not cached. A failure is a state the user is actively fixing, and
