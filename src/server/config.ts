@@ -13,7 +13,7 @@ const schema = z.object({
   HOMESTEAD_DB_PATH: z.string().default("./data/homestead.db"),
   HOMESTEAD_COMPOSE_ROOT: z.string().default("/volume2/docker"),
   HOMESTEAD_DOCKER_SOCKET: z.string().default("/var/run/docker.sock"),
-  HOMESTEAD_BASE_URL: z.string().url(),
+  HOMESTEAD_BASE_URL: z.url(),
   HOMESTEAD_TRUSTED_ORIGINS: z.string().default(""),
   HOMESTEAD_ACCESS_TEAM_DOMAIN: optionalString,
   HOMESTEAD_ACCESS_AUD: optionalString,
