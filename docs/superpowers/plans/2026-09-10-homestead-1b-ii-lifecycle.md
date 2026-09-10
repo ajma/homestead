@@ -599,7 +599,9 @@ git commit -m "Return a JobHandle from runCompose instead of a finished result"
 
 ```ts
 export type DemuxedChunk = { text: string; stream: 'stdout' | 'stderr' }
+export class LogFramingError extends Error {}
 export class LogDemultiplexer {
+  /** Throws `LogFramingError` if the stream is not actually framed. */
   push(buffer: Buffer): DemuxedChunk[]
   /** Flushes whatever the decoders are holding. Call once when the stream ends. */
   flush(): DemuxedChunk[]
@@ -622,7 +624,7 @@ of otherwise valid log lines.
 
 ```ts
 import { describe, expect, it } from 'vitest'
-import { LogDemultiplexer } from '@server/host/log-demux'
+import { LogDemultiplexer, LogFramingError } from '@server/host/log-demux'
 
 /** Builds one Docker log frame: 1 byte stream, 3 padding, 4-byte big-endian length. */
 function frame(stream: 1 | 2, text: string): Buffer {
@@ -708,6 +710,39 @@ describe('LogDemultiplexer', () => {
     expect(new LogDemultiplexer().push(frame(1, ''))).toEqual([])
   })
 
+  it('throws rather than buffering forever on an impossible frame length', () => {
+    // A four-byte length can claim 4 GB. The payload never arrives, so a parser that just
+    // waits grows `pending` for the life of the process — and misframing never
+    // resynchronises, because every later header is read at the wrong offset. The
+    // realistic cause is a raw TTY stream being fed through the frame parser, where
+    // ordinary log text is read as a length.
+    const header = Buffer.alloc(8)
+    header.writeUInt8(1, 0)
+    header.writeUInt32BE(0xffffffff, 4)
+    const demux = new LogDemultiplexer()
+    expect(() => demux.push(header)).toThrow(LogFramingError)
+    // And it does not keep the bytes it could not parse.
+    expect(() => demux.push(Buffer.from('more'))).not.toThrow()
+  })
+
+  it('accepts a frame right at the size limit', () => {
+    const header = Buffer.alloc(8)
+    header.writeUInt8(1, 0)
+    header.writeUInt32BE(16 * 1024 * 1024, 4)
+    // Declared but not yet delivered: it waits, rather than rejecting a legal frame.
+    expect(new LogDemultiplexer().push(header)).toEqual([])
+  })
+
+  it('discards a partial frame on flush rather than emitting half a payload', () => {
+    const demux = new LogDemultiplexer()
+    const header = Buffer.alloc(8)
+    header.writeUInt8(1, 0)
+    header.writeUInt32BE(4, 4)
+    demux.push(Buffer.concat([header, Buffer.from('ab')])) // 2 of 4 bytes
+    expect(demux.flush()).toEqual([])
+    expect(demux.flush()).toEqual([])
+  })
+
   it('treats an unknown stream byte as stdout rather than dropping the payload', () => {
     // Docker uses 0 for stdin on some endpoints. Losing the text would be worse than
     // filing it under the wrong stream.
@@ -736,6 +771,25 @@ export type DemuxedChunk = { text: string; stream: 'stdout' | 'stderr' }
 const HEADER_BYTES = 8
 
 /**
+ * Largest payload a single frame may declare.
+ *
+ * Docker's own log lines are capped far below this, so a larger figure means the bytes
+ * are not framed at all — the likeliest cause being a stream we decided was non-TTY that
+ * is actually raw, in which case arbitrary log text is being read as a length field. A
+ * four-byte length can claim 4 GB; without this the parser waits forever for a payload
+ * that never comes while `pending` grows for the life of the process.
+ */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024
+
+/** Thrown when the byte stream cannot be framed. The caller should end the stream. */
+export class LogFramingError extends Error {
+  constructor(readonly declaredLength: number) {
+    super(`Log frame declares ${declaredLength} bytes; the stream is not multiplexed`)
+    this.name = 'LogFramingError'
+  }
+}
+
+/**
  * Reassembles Docker's multiplexed log framing.
  *
  * A container without a TTY gets stdout and stderr interleaved on one connection, each
@@ -761,6 +815,13 @@ export class LogDemultiplexer {
 
     while (this.pending.length >= HEADER_BYTES) {
       const length = this.pending.readUInt32BE(4)
+      // Fail loudly rather than buffering forever. Misframing does not resynchronise on
+      // its own — every subsequent header is read at the wrong offset — so continuing
+      // would emit garbage indefinitely while memory climbed.
+      if (length > MAX_FRAME_BYTES) {
+        this.pending = Buffer.alloc(0)
+        throw new LogFramingError(length)
+      }
       if (this.pending.length < HEADER_BYTES + length) break // payload still arriving
 
       // Anything other than 2 is stdout. Docker uses 0 for stdin on some endpoints, and
@@ -776,6 +837,10 @@ export class LogDemultiplexer {
     return out
   }
 
+  /**
+   * Ends both decoders. A partial frame still in `pending` is discarded: its payload
+   * never arrived, so there is nothing to decode. Safe to call twice.
+   */
   flush(): DemuxedChunk[] {
     const out: DemuxedChunk[] = []
     for (const stream of ['stdout', 'stderr'] as const) {
@@ -791,7 +856,7 @@ export class LogDemultiplexer {
 - [ ] **Step 4: Run it and confirm it passes**
 
 Run: `pnpm exec vitest run src/server/host/log-demux.test.ts`
-Expected: PASS, 8 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -979,15 +1044,37 @@ const MASK = "••••••••";
     // dockerode types `logs` as Buffer | ReadableStream depending on `follow`; at runtime
     // with follow:true it is a stream, and with follow:false a Buffer.
     if (Buffer.isBuffer(stream)) {
-      for (const chunk of demux ? demux.push(stream) : [{ text: stream.toString("utf8"), stream: "stdout" as const }]) {
-        queue.push(chunk);
+      try {
+        for (const chunk of demux
+          ? demux.push(stream)
+          : [{ text: stream.toString("utf8"), stream: "stdout" as const }]) {
+          queue.push(chunk);
+        }
+        if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+      } catch (error) {
+        queue.push({
+          text: `\n[log stream ended: ${error instanceof Error ? error.message : "framing error"}]\n`,
+          stream: "stderr",
+        });
       }
-      if (demux) for (const chunk of demux.flush()) queue.push(chunk);
       queue.close();
     } else {
       stream.on("data", (buffer: Buffer) => {
         if (demux) {
-          for (const chunk of demux.push(buffer)) queue.push(chunk);
+          try {
+            for (const chunk of demux.push(buffer)) queue.push(chunk);
+          } catch (error) {
+            // `LogFramingError`: the bytes are not framed after all — most likely the
+            // container was recreated with a TTY between our inspect and this stream.
+            // End cleanly rather than throwing from a 'data' handler, which would be an
+            // unhandled rejection rather than a closed log pane.
+            queue.push({
+              text: `\n[log stream ended: ${error instanceof Error ? error.message : "framing error"}]\n`,
+              stream: "stderr",
+            });
+            queue.close();
+            stream.destroy();
+          }
         } else if (ttyDecoder) {
           const text = ttyDecoder.write(buffer);
           if (text !== "") queue.push({ text, stream: "stdout" });
@@ -1472,7 +1559,7 @@ export class JobRunner {
 - [ ] **Step 4: Run it and confirm it passes**
 
 Run: `pnpm exec vitest run src/server/apps/job-runner.test.ts`
-Expected: PASS, 8 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Run everything and commit**
 
