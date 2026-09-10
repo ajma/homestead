@@ -531,4 +531,71 @@ describe("app inventory API", () => {
     expect(peakConcurrency).toBeLessThanOrEqual(4);
     await app.close();
   });
+
+  it("list and detail agree on status when the stored project name is stale", async () => {
+    // Measured with the stored name stale: GET /api/apps/:id reports "up, 1/1 services up"
+    // while GET /api/apps reports "down, 0/1 services up, 1 missing" — the same app, the
+    // same instant, two answers. The stored copy is written at adoption and reconciled
+    // after writes through Homestead, but an SSH edit to .env setting COMPOSE_PROJECT_NAME
+    // changes it underneath us.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("jellyfin/compose.yaml", "services:\n  web:\n    image: nginx\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx" } } }),
+      stderr: "",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin"] },
+    });
+
+    // Simulate an SSH edit that changes what compose resolves to. An edit to .env or
+    // compose.yaml changes the file content, which invalidates the cache.
+    app.deps.host.files.set(
+      "jellyfin/compose.yaml",
+      "services:\n  web:\n    image: nginx:latest\n",
+    );
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "media", services: { web: { image: "nginx:latest" } } }),
+      stderr: "",
+    });
+    // The container is running under the NEW name.
+    app.deps.host.containers = [
+      {
+        id: "c1",
+        names: ["media-web-1"],
+        image: "nginx",
+        state: "running",
+        status: "Up 2 hours",
+        project: "media",
+        service: "web",
+        labels: {},
+      },
+    ];
+
+    const list = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+    expect(list.statusCode).toBe(200);
+    const listApp = list.json()[0];
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/apps/${listApp.id}`,
+      headers: { cookie },
+    });
+    expect(detail.statusCode).toBe(200);
+    const detailApp = detail.json();
+
+    // The two routes must agree on the app's status.
+    expect(listApp.status).toBe(detailApp.status);
+    expect(listApp.statusDetail).toBe(detailApp.statusDetail);
+    // Both must report the container as up.
+    expect(listApp.status).toBe("up");
+    expect(listApp.statusDetail).toBe("1/1 services up");
+    await app.close();
+  });
 });

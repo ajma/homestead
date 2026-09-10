@@ -6,7 +6,7 @@ import { z } from "zod";
 import { scanForApps } from "../apps/adoption.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
-import { statusFor } from "../apps/status-for.js";
+import { currentProjectName, statusFor } from "../apps/status-for.js";
 import { audit } from "../audit.js";
 import type { AuthContext } from "../auth/context.js";
 import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
@@ -306,10 +306,11 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
             const status = { status: "unknown" as const, detail: "Docker is unreachable" };
             return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
           }
+          const project = await currentProjectName({ host, composeConfig }, row);
           const status = await statusFor(
             { host, composeConfig },
             row,
-            byProject.get(row.projectName ?? "") ?? [],
+            byProject.get(project) ?? [],
           );
           return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
         }),
