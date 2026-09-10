@@ -1345,7 +1345,7 @@ describe.skipIf(!hasDocker)('streamLogs against real Docker', () => {
 - [ ] **Step 7: Run everything**
 
 Run: `pnpm exec vitest run src/server/host/stream-logs.test.ts && pnpm test && pnpm exec tsc --noEmit`
-Expected: the focused file passes 6 tests; the full suite stays green.
+Expected: the focused file passes 7 tests; the full suite stays green.
 
 - [ ] **Step 8: Commit**
 
@@ -2673,6 +2673,22 @@ describe('container detail', () => {
     await app.close()
   })
 
+  it('answers 503 on the detail endpoint when Docker is unreachable', async () => {
+    // The list can render nothing; the detail endpoint cannot. Without the container
+    // list its ownership check is unanswerable, and 404 would tell the user the
+    // container does not exist when the truth is that we cannot see it.
+    const { app, cookie, id } = await withApp()
+    app.deps.host.listContainers = async () => {
+      throw new Error('connect ENOENT /var/run/docker.sock')
+    }
+    const res = await app.inject({
+      method: 'GET', url: `/api/apps/${id}/containers/container-1`, headers: { cookie },
+    })
+    expect(res.statusCode).toBe(503)
+    expect(res.json().error).toBe('docker_unreachable')
+    await app.close()
+  })
+
   it('stays 200 with an empty list when Docker is unreachable', async () => {
     // Same rule as the app list: a wedged socket must not 500 the screen.
     const { app, cookie, id } = await withApp()
@@ -2704,22 +2720,38 @@ import { loadApp } from './apps.js'
 export async function containerRoutes(app: FastifyInstance): Promise<void> {
   const { db, host } = app.deps
 
-  /** The app's containers, or an empty list. Never a 500: a wedged socket must not take
-   *  out the screen, which is the same rule the app list follows. */
-  async function containersFor(projectName: string | null): Promise<ContainerSummary[]> {
+  /**
+   * The app's containers, or a signal that Docker could not be asked.
+   *
+   * The two callers want different things from a failure, so the failure is returned
+   * rather than swallowed. The list renders an empty set — a wedged socket must not take
+   * out the screen, the same rule the app list follows. The detail endpoint cannot do
+   * that: with an empty list its ownership check would answer 404, telling the user the
+   * container does not exist when the truth is that we cannot tell.
+   */
+  async function containersFor(
+    projectName: string | null,
+  ): Promise<{ ok: true; containers: ContainerSummary[] } | { ok: false }> {
     try {
-      return await host.listContainers({ project: projectName ?? '' })
+      return { ok: true, containers: await host.listContainers({ project: projectName ?? '' }) }
     } catch {
-      return []
+      return { ok: false }
     }
   }
+
+  const DOCKER_UNREACHABLE = {
+    error: 'docker_unreachable',
+    message: 'Docker is not reachable, so container details are unavailable.',
+  } as const
 
   app.get('/api/apps/:id/containers', async (request, reply) => {
     const ctx = requireCapability(request, 'app:config')
     const { id } = z.object({ id: z.string() }).parse(request.params)
     const row = await loadApp(db, ctx, id)
     if (!row) return reply.code(404).send({ error: 'not_found' })
-    return containersFor(row.projectName)
+    const found = await containersFor(row.projectName)
+    // An unreachable Docker renders as no containers here, deliberately.
+    return found.ok ? found.containers : []
   })
 
   app.get('/api/apps/:id/containers/:containerId', async (request, reply) => {
@@ -2733,8 +2765,12 @@ export async function containerRoutes(app: FastifyInstance): Promise<void> {
 
     // Ownership, not just existence. A raw container id would otherwise reach any
     // container on the host, including one from an app this caller cannot see.
-    const containers = await containersFor(row.projectName)
-    if (!containers.some((container) => container.id === containerId)) {
+    const found = await containersFor(row.projectName)
+    // 503, not 404. Without the list the ownership question is unanswerable, and 404
+    // would assert the container does not exist when we simply cannot see it. The log
+    // route answers the same way for the same reason.
+    if (!found.ok) return reply.code(503).send(DOCKER_UNREACHABLE)
+    if (!found.containers.some((container) => container.id === containerId)) {
       return reply.code(404).send({ error: 'not_found' })
     }
 
