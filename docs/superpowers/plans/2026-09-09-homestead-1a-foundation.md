@@ -16,6 +16,8 @@ Every task's requirements implicitly include this section.
 
 - **Node 24, pnpm 11.** Use the newest stable major of every dependency; no RCs or betas.
 - **TypeScript:** ESM only, `strict: true`, `moduleResolution: "bundler"`, `target: "ES2022"`. No CommonJS, no `require`.
+- **Installed toolchain, verified during Task 1:** TypeScript 7.0.2, Vitest 5.0.0, Biome 2.5.12, Fastify 5.12.3.
+- **TypeScript 7 removed `baseUrl`.** Never add it. Every `paths` target must be relative with a leading `./`, or compilation fails with `TS5102` / `TS5090`.
 - **Layout:** single package, three zones — `src/web`, `src/server`, `src/shared`. Path aliases `@shared/*`, `@server/*`, `@web/*`.
 - **No `Co-Authored-By` trailers and no AI-attribution lines in commit messages.** Plain author commits only.
 - **Biome is the only linter/formatter.** No ESLint, no Prettier.
@@ -141,16 +143,19 @@ Merge into `package.json`:
     "isolatedModules": true,
     "jsx": "react-jsx",
     "types": ["node", "vitest/globals"],
-    "baseUrl": ".",
     "paths": {
-      "@shared/*": ["src/shared/*"],
-      "@server/*": ["src/server/*"],
-      "@web/*": ["src/web/*"]
+      "@shared/*": ["./src/shared/*"],
+      "@server/*": ["./src/server/*"],
+      "@web/*": ["./src/web/*"]
     }
   },
   "include": ["src", "*.config.ts"]
 }
 ```
+
+**No `baseUrl`, and every `paths` target is relative with a leading `./`.** TypeScript 7 removed
+`baseUrl` outright (`error TS5102`) and rejects non-relative path targets (`error TS5090`).
+Verified against the installed TypeScript 7.0.2.
 
 - [ ] **Step 4: Write `biome.json`**
 
