@@ -87,6 +87,43 @@ describe("launchInternalUrl validation", () => {
     await app.close();
   });
 
+  it("accepts an uppercased scheme, which browsers treat as equivalent", async () => {
+    // Schemes are case-insensitive per RFC 3986. A `startsWith` prefix check rejected
+    // HTTPS://nas.local while every browser accepts it, so validation now parses and
+    // reads `protocol`, which URL normalises to lowercase.
+    const { app, cookie, id } = await adoptApp();
+    for (const url of ["HTTPS://nas.local:8096", "HtTp://nas.local:8096"]) {
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+        payload: { launchInternalUrl: url },
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    await app.close();
+  });
+
+  it("rejects a hostile scheme however it is cased or padded", async () => {
+    const { app, cookie, id } = await adoptApp();
+    for (const url of [
+      "JavaScript:alert(1)",
+      "\njavascript:alert(1)",
+      "  javascript:alert(1)",
+      "DATA:text/html,<script>alert(1)</script>",
+      "file:///etc/passwd",
+    ]) {
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+        payload: { launchInternalUrl: url },
+      });
+      expect(res.statusCode).toBe(400);
+    }
+    await app.close();
+  });
+
   it("accepts null to clear the URL", async () => {
     const { app, cookie, id } = await adoptApp();
     const res = await app.inject({

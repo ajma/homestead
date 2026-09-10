@@ -23,13 +23,16 @@ const launchUrlSchema = z
     z.literal(""),
     z.string().refine(
       (val) => {
-        // Only http: and https: schemes are safe for href attributes. javascript:, data:,
-        // and scheme-relative URLs (//) are all stored XSS vectors.
-        if (!val.startsWith("http://") && !val.startsWith("https://")) return false;
-        // Verify it's a valid URL after the scheme check.
+        // Only http: and https: are safe for an href. `javascript:`, `data:` and
+        // scheme-relative `//host` are all stored XSS vectors, and this value reaches
+        // the viewer DTO, so an admin could otherwise plant one for a housemate.
+        //
+        // Parse first and read `protocol`, rather than matching a prefix. Schemes are
+        // case-insensitive per RFC 3986, so a prefix check rejected `HTTPS://nas.local`
+        // — which every browser accepts — while `new URL` normalises it for us.
         try {
-          new URL(val);
-          return true;
+          const parsed = new URL(val);
+          return parsed.protocol === "http:" || parsed.protocol === "https:";
         } catch {
           return false;
         }
@@ -282,6 +285,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
         continue;
       }
 
+      // Deliberately not `loadApp`: this reads back the row just inserted under an id
+      // generated here. Composing the scope predicate would return nothing for a scoped
+      // principal, so a successful adoption would report an empty `adopted` list.
       const [row] = await db.select().from(apps).where(eq(apps.id, id));
       if (row) adopted.push(toAdminApp(row, await statusFor(row)));
       await audit(db, ctx, {
