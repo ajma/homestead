@@ -6,7 +6,12 @@ describe("app scope enforcement", () => {
   // principal with an empty allowlist should get 404 from all of them, not 403 (which
   // would confirm that an app they may not see exists), and never a body carrying secrets.
 
-  const ROUTES = [
+  const ROUTES: Array<{
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+    path: string;
+    desc: string;
+    payload?: Record<string, unknown>;
+  }> = [
     { method: "GET", path: "/api/apps/:id", desc: "detail" },
     { method: "PATCH", path: "/api/apps/:id", desc: "update", payload: { displayName: "New" } },
     { method: "DELETE", path: "/api/apps/:id", desc: "delete" },

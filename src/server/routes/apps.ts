@@ -1,7 +1,8 @@
+import type { AdminApp, ViewerApp } from "@shared/dto";
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
-import { ZodError, z } from "zod";
+import { z } from "zod";
 import { scanForApps } from "../apps/adoption.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
@@ -323,7 +324,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // irony: we collapsed thirty Docker API calls into one above, then fan out thirty
     // processes beside it.
     const CONCURRENCY_LIMIT = 4;
-    const results: (typeof rows.$inferSelect & { status: unknown })[] = [];
+    const results: Array<ViewerApp | AdminApp> = [];
 
     for (let i = 0; i < rows.length; i += CONCURRENCY_LIMIT) {
       const chunk = rows.slice(i, i + CONCURRENCY_LIMIT);

@@ -210,6 +210,8 @@ describe(".env API", () => {
       {
         id: "abc",
         names: ["/other-web-1"],
+        image: "nginx",
+        labels: {},
         state: "running",
         status: "Up",
         service: "web",
