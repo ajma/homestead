@@ -2907,6 +2907,27 @@ describe('visibleAppsWhere', () => {
       .where(and(visibleAppsWhere(viewerAll), eq(apps.slug, 'b')))
     expect(rows).toHaveLength(1)
   })
+
+  it('still yields nothing when an empty allowlist is composed with other conditions', async () => {
+    const db = await seed()
+    const none: AuthContext = { ...viewerScoped, appIds: [] }
+    // `sql`1 = 0`` must survive being ANDed with a condition that would otherwise match.
+    const rows = await db
+      .select()
+      .from(apps)
+      .where(and(visibleAppsWhere(none), eq(apps.slug, 'b')))
+    expect(rows).toHaveLength(0)
+  })
+})
+
+describe('requireAdmin and requireCapability cannot diverge', () => {
+  it('admin passes both, viewer fails both', () => {
+    const asRequest = (auth: AuthContext) => ({ auth }) as unknown as FastifyRequest
+    expect(() => requireAdmin(asRequest(admin))).not.toThrow()
+    expect(can(admin, 'user:manage')).toBe(true)
+    expect(() => requireAdmin(asRequest(viewerAll))).toThrow()
+    expect(can(viewerAll, 'user:manage')).toBe(false)
+  })
 })
 ```
 
@@ -2991,10 +3012,19 @@ export function requireCapability(request: FastifyRequest, capability: Capabilit
   return ctx
 }
 
+/**
+ * Requires the capability to manage users, which today only `admin` holds.
+ *
+ * Expressed as a capability rather than a role check on purpose. An earlier version
+ * tested `ctx.role !== 'admin'` while throwing `ForbiddenError('user:manage')`, which
+ * mixed the two models: the code enforced role membership while the error told callers
+ * a capability was missing. Worse, the two would diverge the moment a third role was
+ * granted `user:manage` — `requireCapability` would admit it and `requireAdmin` would
+ * not. Delegating means there is exactly one place that decides what "may manage users"
+ * means, and it is the capability table.
+ */
 export function requireAdmin(request: FastifyRequest): AuthContext {
-  const ctx = requireAuth(request)
-  if (ctx.role !== 'admin') throw new ForbiddenError('user:manage')
-  return ctx
+  return requireCapability(request, 'user:manage')
 }
 ```
 
@@ -3013,9 +3043,16 @@ import { userAppScope, users } from './db/schema.js'
 
 app.addHook('preHandler', async (request) => {
   const headers = new Headers()
+  // Same IP-header discipline as the /api/auth/* route. `getSession` validates a cookie
+  // rather than an address today, so this is defence in depth — but Better-Auth resolves
+  // client IPs from headers in several places, and one inconsistent call site is how the
+  // forgery this codebase already fixed would come back.
   for (const [key, value] of Object.entries(request.headers)) {
+    if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue
     if (typeof value === 'string') headers.set(key, value)
   }
+  headers.set('x-forwarded-for', request.ip)
+
   const session = await deps.auth.api.getSession({ headers })
   if (!session?.user) return
 
