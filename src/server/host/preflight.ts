@@ -45,17 +45,21 @@ export async function runMountPreflight(opts: {
   const markerName = `${randomUUID()}.marker`;
   const token = randomUUID();
 
+  // One try/finally around EVERYTHING that can create the marker directory, so no
+  // early return can skip its removal. An earlier version returned from the write
+  // failure before entering the block whose `finally` did the cleanup, leaking
+  // `.homestead-preflight` into the user's compose root.
   try {
-    await mkdir(markerDir, { recursive: true });
-    await writeFile(join(markerDir, markerName), token, "utf8");
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `cannot write a marker into ${opts.composeRoot}: ${String(error)}`,
-    };
-  }
+    try {
+      await mkdir(markerDir, { recursive: true });
+      await writeFile(join(markerDir, markerName), token, "utf8");
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `cannot write a marker into ${opts.composeRoot}: ${String(error)}`,
+      };
+    }
 
-  try {
     await ensureImage(docker, image);
 
     const container = await docker.createContainer({
@@ -70,10 +74,24 @@ export async function runMountPreflight(opts: {
     try {
       const logs = await container.attach({ stream: true, stdout: true, stderr: true });
       const chunks: Buffer[] = [];
-      logs.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+      // `container.wait()` resolving means the container exited, NOT that every
+      // 'data' event has fired. Reading the buffer immediately can miss the tail and
+      // report a healthy mount as broken — a false negative that refuses to boot.
+      const streamDrained = new Promise<void>((resolveDrained) => {
+        logs.on("data", (chunk: Buffer) => chunks.push(chunk));
+        logs.on("end", resolveDrained);
+        logs.on("close", resolveDrained);
+        logs.on("error", resolveDrained);
+      });
 
       await container.start();
       await container.wait();
+
+      const drainTimeout = new Promise<void>((resolveTimeout) => {
+        setTimeout(resolveTimeout, 2000).unref();
+      });
+      await Promise.race([streamDrained, drainTimeout]);
 
       // Strip Docker's 8-byte stream multiplexing headers.
       const output = demultiplex(Buffer.concat(chunks));
@@ -97,15 +115,33 @@ export async function runMountPreflight(opts: {
   }
 }
 
-/** Docker frames non-TTY output as [type, 0, 0, 0, len32be, ...payload]. */
+/**
+ * Docker frames non-TTY output as [type, 0, 0, 0, len32be, ...payload].
+ *
+ * The header is validated rather than assumed: in TTY mode output is unframed, and
+ * unframed bytes whose first eight happen to parse as a header would otherwise have
+ * their first eight bytes silently eaten. Validating type and padding makes the
+ * "is this framed?" question answerable instead of guessed.
+ */
+function looksLikeFrameHeader(buffer: Buffer, offset: number): boolean {
+  const streamType = buffer[offset];
+  if (streamType === undefined || streamType > 2) return false;
+  if (buffer[offset + 1] !== 0 || buffer[offset + 2] !== 0 || buffer[offset + 3] !== 0)
+    return false;
+  return offset + 8 + buffer.readUInt32BE(offset + 4) <= buffer.length;
+}
+
 function demultiplex(buffer: Buffer): string {
+  if (buffer.length < 8 || !looksLikeFrameHeader(buffer, 0)) return buffer.toString("utf8");
+
   let offset = 0;
   const parts: string[] = [];
-  while (offset + 8 <= buffer.length) {
+  while (offset + 8 <= buffer.length && looksLikeFrameHeader(buffer, offset)) {
     const length = buffer.readUInt32BE(offset + 4);
     parts.push(buffer.subarray(offset + 8, offset + 8 + length).toString("utf8"));
     offset += 8 + length;
   }
-  // If framing did not apply (TTY mode), fall back to the raw buffer.
-  return parts.length > 0 ? parts.join("") : buffer.toString("utf8");
+  // Trailing bytes that are not a valid frame belong to the payload.
+  if (offset < buffer.length) parts.push(buffer.subarray(offset).toString("utf8"));
+  return parts.join("");
 }

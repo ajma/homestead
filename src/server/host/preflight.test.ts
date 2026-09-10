@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMountPreflight } from "@server/host/preflight";
@@ -30,12 +30,53 @@ describe.skipIf(!hasDocker)("runMountPreflight", () => {
     }
   }, 60_000);
 
-  it("fails when the configured path is not the one the daemon sees", async () => {
+  // NOTE ON COVERAGE: the branch this whole check exists for — the compose root being
+  // writable here but resolving to a different directory on the host — cannot be
+  // exercised from a test process that IS the host. It is reachable only when Homestead
+  // runs containerised with a mismatched bind mount. The tests below cover the two
+  // failure branches that ARE reachable. Do not read green tests as proof that the
+  // path-mismatch detection works; that is verified by deploying.
+  it("fails when the compose root cannot be written to at all", async () => {
     const result = await runMountPreflight({
       composeRoot: "/definitely/not/mounted/anywhere",
       dockerSocket: "/var/run/docker.sock",
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toMatch(/marker/i);
+  }, 60_000);
+
+  it("removes the marker directory even when writing the marker fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hs-preflight-leak-"));
+    const markerDir = join(root, ".homestead-preflight");
+    try {
+      // Pre-create it read-only: mkdir(recursive) succeeds, writeFile fails.
+      await mkdir(markerDir);
+      await chmod(markerDir, 0o500);
+
+      const result = await runMountPreflight({
+        composeRoot: root,
+        dockerSocket: "/var/run/docker.sock",
+      });
+
+      expect(result.ok).toBe(false);
+      await expect(readdir(root)).resolves.not.toContain(".homestead-preflight");
+    } finally {
+      await chmod(markerDir, 0o700).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("returns a failure rather than throwing when the Docker socket is unreachable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hs-preflight-sock-"));
+    try {
+      const result = await runMountPreflight({
+        composeRoot: root,
+        dockerSocket: "/var/run/definitely-not-a-socket.sock",
+      });
+      expect(result.ok).toBe(false);
+      await expect(readdir(root)).resolves.toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }, 60_000);
 });
