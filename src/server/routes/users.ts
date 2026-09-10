@@ -209,10 +209,15 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       detail: body,
       ip: request.ip,
     });
-    // Role is what `inScope`/`can` are evaluated against; changing it can turn what an
-    // open SSE stream shows into something the user should no longer see. Only a role
-    // change forces the reconnect — a name-only edit changes nothing it evaluates.
-    if (body.role !== undefined) events.closeForUser(id);
+    // `role`, `scopeAllApps`, and `disabled` are exactly the fields `AuthContext` is
+    // evaluated against — `can`/`inScope` for the first two, and the `preHandler` gate
+    // that rejects a disabled user for the third. Any of them can turn what an open SSE
+    // stream shows into something the user should no longer see, or should not be able
+    // to see at all, so any of them forces the reconnect. `name` changes none of that,
+    // so a name-only edit must not close a stream over a rename.
+    const changesAuthContext =
+      body.role !== undefined || body.scopeAllApps !== undefined || body.disabled !== undefined;
+    if (changesAuthContext) events.closeForUser(id);
     const [row] = await db.select(publicUser).from(users).where(eq(users.id, id));
     return row;
   });

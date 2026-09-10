@@ -216,7 +216,7 @@ describe("closing a user's stream when their access changes", () => {
     return app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
   }
 
-  it("closes an open stream when an admin changes that user's role", async () => {
+  it("closes an open stream when PATCH changes that user's role", async () => {
     const { app, cookie } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
@@ -234,6 +234,81 @@ describe("closing a user's stream when their access changes", () => {
     const res = await streaming;
     expect(res.statusCode).toBe(200);
     expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("closes an open stream when PATCH narrows that user's scopeAllApps", async () => {
+    // scopeAllApps is also settable through PATCH, not only through PUT .../scope. This
+    // is the same boundary as the PUT test below, reached through the other route.
+    const { app, cookie } = await withApp();
+    const viewer = await createViewer(app, cookie);
+    const streaming = openStream(app, viewer.cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/users/${viewer.id}`,
+      headers: { cookie },
+      payload: { scopeAllApps: false },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    const res = await streaming;
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("closes an open stream when PATCH disables that user", async () => {
+    // preHandler already 401s a disabled user's new requests (app.ts). Without this, an
+    // already-open stream is the one place that lockout does not reach: it never
+    // re-enters preHandler, so a disabled housemate keeps a live status feed regardless.
+    const { app, cookie } = await withApp();
+    const viewer = await createViewer(app, cookie);
+    const streaming = openStream(app, viewer.cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/users/${viewer.id}`,
+      headers: { cookie },
+      payload: { disabled: true },
+    });
+    expect(patched.statusCode).toBe(200);
+
+    const res = await streaming;
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("does not close a stream over a name-only PATCH", async () => {
+    // The negative case: nothing AuthContext is evaluated against changed, so the stream
+    // must survive the edit and keep delivering events. Without this, a later "simplify"
+    // could close on every PATCH and reconnect every open tab on a rename.
+    const { app, cookie, id } = await withApp();
+    const viewer = await createViewer(app, cookie);
+    const streaming = openStream(app, viewer.cookie);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/users/${viewer.id}`,
+      headers: { cookie },
+      payload: { name: "Renamed" },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(app.deps.events.subscriberCount()).toBe(1);
+
+    app.deps.events.publish(transition(id));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    app.deps.scheduler.stop();
+    app.deps.events.closeAll();
+    const res = await streaming;
+    expect(res.body).toContain("event: status");
     await app.close();
   });
 
