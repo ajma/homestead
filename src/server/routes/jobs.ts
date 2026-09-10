@@ -102,22 +102,22 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     // reply, so a throw here reaches `setErrorHandler`, which calls `reply.send()` on a
     // socket whose headers have already gone out: it cannot report the error, and the
     // stream is never closed, leaving the heartbeat running forever.
+    let finished: typeof jobs.$inferSelect | undefined;
     try {
       for await (const chunk of live.output) {
         if (disconnected) break;
         sse.send("output", chunk);
       }
       await live.done;
-
-      const [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-      sse.send("done", {
-        status: finished?.status ?? "failed",
-        exitCode: finished?.exitCode ?? null,
-      });
+      [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId));
     } catch (error) {
       request.log.error({ err: error, jobId }, "job stream failed");
       sse.send("error", { message: "The job stream ended unexpectedly." });
     } finally {
+      sse.send("done", {
+        status: finished?.status ?? "failed",
+        exitCode: finished?.exitCode ?? null,
+      });
       sse.close();
     }
     // No `return reply`: the reply is hijacked, so returning it would ask Fastify to

@@ -106,15 +106,44 @@ describe("log streaming", () => {
     await app.close();
   });
 
-  it("clamps an absurd tail rather than passing it through", async () => {
+  it("clamps a too-large tail but defaults an unparseable one", async () => {
+    // Two different failures with two different right answers. Clamping garbage to the
+    // maximum served 5000 lines for `?tail=abc` — the most expensive response available,
+    // handed out for input that meant nothing.
     const { app, cookie, id } = await withApp();
     app.deps.host.logLines.set("container-1", [{ text: "x\n", stream: "stdout" }]);
-    await app.inject({
+    const tailFor = async (query: string) => {
+      app.deps.host.logCalls.length = 0;
+      await app.inject({
+        method: "GET",
+        url: `/api/apps/${id}/containers/container-1/logs${query}`,
+        headers: { cookie },
+      });
+      return app.deps.host.logCalls[0]?.tail;
+    };
+    expect(await tailFor("?tail=999999")).toBe(5000);
+    expect(await tailFor("?tail=abc")).toBe(200);
+    expect(await tailFor("?tail=-5")).toBe(200);
+    expect(await tailFor("?tail=0")).toBe(200);
+    expect(await tailFor("")).toBe(200);
+    await app.close();
+  });
+
+  it("answers 503 rather than 500 when Docker cannot be reached", async () => {
+    // The ownership check needs a container list. A wedged socket must not surface as an
+    // opaque 500, and must NOT fall through to streaming — an empty list would make the
+    // ownership check vacuous.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.listContainers = async () => {
+      throw new Error("connect ENOENT /var/run/docker.sock");
+    };
+    const res = await app.inject({
       method: "GET",
-      url: `/api/apps/${id}/containers/container-1/logs?tail=999999`,
+      url: `/api/apps/${id}/containers/container-1/logs`,
       headers: { cookie },
     });
-    expect(app.deps.host.logCalls[0]?.tail).toBe(5000);
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe("docker_unreachable");
     await app.close();
   });
 });

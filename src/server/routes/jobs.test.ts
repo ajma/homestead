@@ -205,6 +205,58 @@ describe("lifecycle routes", () => {
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain("partial");
     expect(res.body).toContain("event: error");
+    expect(res.body.match(/event: done/g)).toHaveLength(1);
+    app.deps.host.releaseCompose();
+    await app.close();
+  });
+
+  it("sends exactly one terminal event whether the job succeeds or throws", async () => {
+    // A client that tears down its EventSource on `done` is left hanging if the stream
+    // sends `error` but no `done`. Every path must send exactly one terminal event.
+    const { app, cookie, id } = await withApp();
+
+    // Success case
+    app.deps.host.composeResults.set("up -d", { exitCode: 0, stdout: "ok", stderr: "" });
+    const success = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/up`,
+      headers: { cookie },
+    });
+    const successStream = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${success.json().jobId}/stream`,
+      headers: { cookie },
+    });
+    expect(successStream.body.match(/event: done/g)).toHaveLength(1);
+    expect(successStream.body).not.toContain("event: error");
+
+    // Failure case
+    app.deps.host.composeResults.set("down", { exitCode: 0, stdout: "x", stderr: "" });
+    app.deps.host.gateCompose();
+    const fail = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/down`,
+      headers: { cookie },
+    });
+    const failJobId = fail.json().jobId;
+    const live = app.deps.jobs.live(failJobId);
+    if (live) {
+      Object.defineProperty(live, "output", {
+        value: {
+          async *[Symbol.asyncIterator]() {
+            yield { text: "starting", stream: "stdout" as const };
+            throw new Error("failed");
+          },
+        },
+      });
+    }
+    const failStream = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${failJobId}/stream`,
+      headers: { cookie },
+    });
+    expect(failStream.body).toContain("event: error");
+    expect(failStream.body.match(/event: done/g)).toHaveLength(1);
     app.deps.host.releaseCompose();
     await app.close();
   });
