@@ -1292,6 +1292,26 @@ describe('upsertEnv', () => {
     expect(serialiseEnv(upsertEnv(parseEnv('A=1\r\nB=2\r\n'), 'A', '9'))).toBe('A=9\r\nB=2\r\n')
   })
 
+  it('appends to a CRLF file with CRLF, leaving no mixed endings', () => {
+    // Measured: a bare LF here turned a clean CRLF file mixed on the first key added.
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1\r\nB=2\r\n'), 'C', '3'))).toBe(
+      'A=1\r\nB=2\r\nC=3\r\n',
+    )
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1\nB=2\n'), 'C', '3'))).toBe('A=1\nB=2\nC=3\n')
+  })
+
+  it('leaves an unterminated quote alone rather than guessing', () => {
+    // `A="test\"` never closes its quote — the `\"` is escaped. There is no correct
+    // value to recover, so the best-effort result is documented rather than "fixed".
+    // The well-formed `A="test\""` is the case that must give `test"`.
+    const value = (content: string) => {
+      const entry = parseEnv(content).find((e) => e.kind === 'pair')
+      return entry?.kind === 'pair' ? entry.value : undefined
+    }
+    expect(value('A="test\\""')).toBe('test"')
+    expect(value('A="test\\"')).toBe('test\\')
+  })
+
   it('never lets a written value restructure the file', () => {
     // An API caller can supply anything. A literal newline written raw would split the
     // line and silently invent a variable.
@@ -1482,12 +1502,15 @@ export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvE
   }
 
   const trailingBlank = entries.length > 0 && entries[entries.length - 1]?.raw === ''
+  // An appended line inherits the file's prevailing ending. Giving it a bare LF was
+  // measured to turn a clean CRLF file mixed on the first key added.
+  const eol = entries.some((e) => e.raw.endsWith('\r')) ? '\r' : ''
   const newEntry: EnvEntry = {
     kind: 'pair',
     key,
     value,
     comment: '',
-    raw: `${key}=${quoteIfNeeded(value)}`,
+    raw: `${key}=${quoteIfNeeded(value)}${eol}`,
   }
   return trailingBlank
     ? [...entries.slice(0, -1), newEntry, { kind: 'other', raw: '' }]
@@ -1498,7 +1521,7 @@ export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvE
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/env-file.test.ts`
-Expected: PASS, 20 tests.
+Expected: PASS, 22 tests.
 
 - [ ] **Step 5: Commit**
 
