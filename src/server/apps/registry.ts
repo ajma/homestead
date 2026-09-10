@@ -3,6 +3,16 @@ export type ImageRef = { registry: string; repository: string; reference: string
 const DEFAULT_REGISTRY = "registry-1.docker.io";
 
 /**
+ * How long to wait for a registry response before giving up.
+ *
+ * `POST /images/check` runs the whole loop inside the request, and 1C will run it across
+ * every app, so one registry that accepts a connection and then says nothing stalls the
+ * sweep. 10s is enough for a distant private registry yet short enough to prevent the
+ * whole check from hanging indefinitely.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
  * Every media type a manifest endpoint might answer with.
  *
  * Without the list and index types a multi-arch image — which is most of them — returns
@@ -136,7 +146,11 @@ export function createRegistryClient(deps: {
       const url = `https://${ref.registry}/v2/${ref.repository}/manifests/${ref.reference}`;
       const headers: Record<string, string> = { accept: ACCEPT };
 
-      let response = await deps.fetch(url, { method: "HEAD", headers });
+      let response = await deps.fetch(url, {
+        method: "HEAD",
+        headers,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
 
       if (response.status === 401) {
         const challenge = parseChallenge(response.headers.get("www-authenticate") ?? "");
@@ -146,7 +160,10 @@ export function createRegistryClient(deps: {
         if (challenge.service) tokenUrl.searchParams.set("service", challenge.service);
         tokenUrl.searchParams.set("scope", challenge.scope ?? `repository:${ref.repository}:pull`);
 
-        const tokenResponse = await deps.fetch(tokenUrl.toString(), { method: "GET" });
+        const tokenResponse = await deps.fetch(tokenUrl.toString(), {
+          method: "GET",
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
         if (!tokenResponse.ok) return fail(`token endpoint returned ${tokenResponse.status}`);
         const body = (await tokenResponse.json()) as { token?: string; access_token?: string };
         const token = body.token ?? body.access_token;
@@ -155,7 +172,11 @@ export function createRegistryClient(deps: {
         headers.authorization = `Bearer ${token}`;
         // Exactly one retry. A registry that rejects its own token will keep doing so,
         // and a loop here would hammer it once per service per app.
-        response = await deps.fetch(url, { method: "HEAD", headers });
+        response = await deps.fetch(url, {
+          method: "HEAD",
+          headers,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
       }
 
       if (!response.ok) return fail(`manifest request returned ${response.status}`);

@@ -99,6 +99,84 @@ describe("ImageUpdateChecker", () => {
     expect(web?.updateAvailable).toBe(false);
   });
 
+  it("compares the digest for the repository actually being checked", async () => {
+    // An image tagged into two repositories carries one RepoDigests entry per
+    // repository. Taking index 0 compares a Docker Hub digest against one fetched from a
+    // private registry — they never match, so the app shows an update that pulling can
+    // never clear. A badge that never clears teaches the user to ignore every badge.
+    const { db, host, app } = await seed();
+    host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        name: "jellyfin",
+        services: { web: { image: "myregistry.example.com/nginx:alpine" } },
+      }),
+      stderr: "",
+    });
+    host.images.set("myregistry.example.com/nginx:alpine", {
+      id: "x",
+      repoDigests: ["nginx@sha256:hub", "myregistry.example.com/nginx@sha256:private"],
+    });
+    const checker = new ImageUpdateChecker({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => "sha256:private" },
+    });
+    await checker.check(app);
+    const [web] = await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id));
+    expect(web?.currentDigest).toBe("sha256:private");
+    expect(web?.updateAvailable).toBe(false);
+  });
+
+  it("records a service whose local inspect throws, rather than omitting it", async () => {
+    // A wedged Docker socket throws from inspectImage. Skipping the row leaves the
+    // service silently absent from the panel, which reads as "not checked" rather than
+    // "checked, could not tell".
+    const { db, host, app } = await seed();
+    host.inspectImageErrors.set("postgres:16", new Error("connect ENOENT"));
+    const checker = new ImageUpdateChecker({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => "sha256:new" },
+    });
+    await expect(checker.check(app)).resolves.toBeUndefined();
+    const rows = await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id));
+    const db16 = rows.find((r) => r.serviceName === "db");
+    expect(db16).toBeDefined();
+    expect(db16?.currentDigest).toBeNull();
+    expect(db16?.updateAvailable).toBe(false);
+    expect(db16?.checkedAt).toBeGreaterThan(0);
+  });
+
+  it("forgets a service the compose file no longer declares", async () => {
+    const { db, host, app } = await seed();
+    host.images.set("nginx:alpine", { id: "x", repoDigests: ["nginx@sha256:old"] });
+    const checker = new ImageUpdateChecker({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => "sha256:new" },
+    });
+    await checker.check(app);
+    expect(await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id))).toHaveLength(
+      2,
+    );
+
+    // `db` is dropped from the file.
+    host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx:alpine" } } }),
+      stderr: "",
+    });
+    host.files.set("jellyfin/compose.yaml", "services: {}\n# changed\n");
+    await checker.check(app);
+    const rows = await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id));
+    // Otherwise the removed service keeps advertising an update for something gone.
+    expect(rows.map((r) => r.serviceName)).toEqual(["web"]);
+  });
+
   it("re-running replaces rather than duplicating", async () => {
     const { db, host, app } = await seed();
     host.images.set("nginx:alpine", { id: "x", repoDigests: ["nginx@sha256:old"] });

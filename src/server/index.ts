@@ -32,7 +32,14 @@ await host.init();
 const auth = createAuth(config, db);
 const composeConfig = new ComposeConfigCache(host);
 const jobs = new JobRunner({ db, host, composeConfig });
-const registry = createRegistryClient({ fetch });
+const registry = createRegistryClient({
+  fetch,
+  onError: (image, reason) => {
+    // Not fatal: `latestDigest` returns null and the sweep continues. But a registry
+    // failing every day for a month should leave a trail.
+    console.warn(`[image-check] ${image}: ${reason}`);
+  },
+});
 const images = new ImageUpdateChecker({ db, host, composeConfig, registry });
 
 const app = await buildApp({

@@ -65,6 +65,7 @@ export class FakeHost implements Host {
   inspected = new Map<string, ContainerInspect>();
   inspectCalls: string[] = [];
   images = new Map<string, ImageInspect>();
+  inspectImageErrors = new Map<string, Error>();
   /** Scripted per `args.join(" ")`, as before. */
   composeResults = new Map<string, ComposeResult>();
   composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
@@ -163,6 +164,8 @@ export class FakeHost implements Host {
   }
 
   async inspectImage(ref: string): Promise<ImageInspect | null> {
+    const error = this.inspectImageErrors.get(ref);
+    if (error) throw error;
     return this.images.get(ref) ?? null;
   }
 
