@@ -18,7 +18,20 @@ export const ROLLUP_RETENTION_DAYS = 90;
  *
  * Never throws: this runs on a timer whose rejection would vanish.
  */
-export async function runRetention(db: Db, now: number): Promise<{ hoursRolled: number }> {
+export async function runRetention(
+  db: Db,
+  now: number,
+  /**
+   * Called if anything here fails.
+   *
+   * Without it the catch below is indistinguishable from success, and that is not
+   * hypothetical: the idempotence test passed with `HAVING NOT EXISTS` REMOVED, because
+   * the composite primary key rejected the duplicate and this catch swallowed it. The
+   * observable state was identical, so the test verified idempotence-by-accident rather
+   * than the clause it named.
+   */
+  onError?: (error: unknown) => void,
+): Promise<{ hoursRolled: number }> {
   let hoursRolled = 0;
   try {
     const currentHourStart = now - (now % HOUR);
@@ -52,9 +65,14 @@ export async function runRetention(db: Db, now: number): Promise<{ hoursRolled: 
     await db
       .delete(checkRollups)
       .where(lt(checkRollups.hourStart, now - ROLLUP_RETENTION_DAYS * 24 * HOUR));
-  } catch {
+  } catch (error) {
     // A retention failure is a disk-space problem for tomorrow, not a reason to take the
-    // timer down today.
+    // timer down today — but it must not be silent.
+    try {
+      onError?.(error);
+    } catch {
+      // The channel for reporting this is the one that just failed.
+    }
   }
   return { hoursRolled };
 }

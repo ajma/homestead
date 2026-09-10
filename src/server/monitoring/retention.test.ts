@@ -87,14 +87,39 @@ describe("runRetention", () => {
     expect(await db.select().from(checkRollups)).toHaveLength(3);
   });
 
-  it("is idempotent — running twice does not double-count", async () => {
+  it("is idempotent by skipping rolled hours, not by failing on them", async () => {
+    // Row counts alone cannot tell the two apart. With `HAVING NOT EXISTS` removed the
+    // composite primary key rejects the duplicate and the catch swallows it, leaving
+    // exactly the same rows — so this asserts the second run reported NO error, which
+    // only holds if the clause did the skipping.
     const { db, probeId } = await seed();
     await db.insert(checkResults).values([sample(probeId, T0 + 10, "up")]);
-    await runRetention(db, T0 + HOUR + 60);
-    await runRetention(db, T0 + HOUR + 60);
+
+    const errors: unknown[] = [];
+    await runRetention(db, T0 + HOUR + 60, (error) => errors.push(error));
+    await runRetention(db, T0 + HOUR + 60, (error) => errors.push(error));
+
+    expect(errors).toEqual([]);
     const rows = await db.select().from(checkRollups);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.upCount).toBe(1);
+  });
+
+  it("reports a failure rather than swallowing it", async () => {
+    const { db } = await seed();
+    const errors: unknown[] = [];
+    const original = db.run.bind(db);
+    // biome-ignore lint/suspicious/noExplicitAny: narrow double over one method
+    (db as any).run = () => {
+      throw new Error("SQLITE_IOERR");
+    };
+    try {
+      await expect(runRetention(db, T0 + HOUR + 60, (e) => errors.push(e))).resolves.toBeDefined();
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).run = original;
+    }
+    expect(String(errors[0])).toContain("SQLITE_IOERR");
   });
 
   it("prunes raw samples older than 48 hours but keeps newer ones", async () => {
