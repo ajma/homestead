@@ -12,11 +12,15 @@ import { COMPOSE_FILENAMES, hashContent } from "./host/local-host.js";
 import type {
   ComposeResult,
   ComposeTarget,
+  ContainerInspect,
   ContainerSummary,
   DiscoveredDir,
   FileRead,
   Host,
+  ImageInspect,
   JobHandle,
+  LogLine,
+  LogOptions,
 } from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
 
@@ -50,7 +54,13 @@ export class FakeHost implements Host {
   readonly id = "test";
   files = new Map<string, string>();
   containers: ContainerSummary[] = [];
-  inspected: string[] = [];
+  logLines = new Map<string, LogLine[]>();
+  logCalls: LogOptions[] = [];
+  /** Scripted inspect data. NOTE the existing `inspected` field was a `string[]` call log —
+   *  renamed to `inspectCalls` rather than replaced, so nothing loses the log. */
+  inspected = new Map<string, ContainerInspect>();
+  inspectCalls: string[] = [];
+  images = new Map<string, ImageInspect>();
   /** Scripted per `args.join(" ")`, as before. */
   composeResults = new Map<string, ComposeResult>();
   composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
@@ -136,9 +146,20 @@ export class FakeHost implements Host {
     return this.containers.filter((c) => c.project === filters.project);
   }
 
-  async inspectContainer(id: string): Promise<unknown> {
-    this.inspected.push(id);
-    return {};
+  async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
+    this.logCalls.push(opts);
+    for (const line of this.logLines.get(opts.containerId) ?? []) yield line;
+  }
+
+  async inspectContainer(id: string): Promise<ContainerInspect> {
+    this.inspectCalls.push(id);
+    const found = this.inspected.get(id);
+    if (!found) throw new Error(`no such container: ${id}`);
+    return found;
+  }
+
+  async inspectImage(ref: string): Promise<ImageInspect | null> {
+    return this.images.get(ref) ?? null;
   }
 
   runCompose(target: ComposeTarget, args: string[]): JobHandle {

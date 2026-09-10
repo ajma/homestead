@@ -19,6 +19,35 @@ export type ComposeResult = { exitCode: number; stdout: string; stderr: string }
 
 export type JobChunk = { text: string; stream: "stdout" | "stderr" };
 
+export type LogOptions = { containerId: string; tail?: number; follow?: boolean; since?: number };
+export type LogLine = { text: string; stream: "stdout" | "stderr" };
+
+export type ContainerInspect = {
+  id: string;
+  name: string;
+  image: string;
+  imageDigest: string | null;
+  state: string;
+  exitCode: number | null;
+  oomKilled: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  restartPolicy: string;
+  restartCount: number;
+  tty: boolean;
+  env: Array<{ key: string; masked: string }>;
+  mounts: Array<{ source: string; destination: string; mode: string; type: string }>;
+  ports: Array<{ container: number; host: number | null; protocol: string }>;
+  networks: string[];
+  health: {
+    status: string;
+    failingStreak: number;
+    log: Array<{ exitCode: number; output: string; end: string }>;
+  } | null;
+};
+
+export type ImageInspect = { id: string; repoDigests: string[] };
+
 export type ComposeOptions = {
   /**
    * Defaults to 60s, which suits `config`. Lifecycle callers pass a much larger value:
@@ -47,7 +76,9 @@ export interface Host {
   deleteFile(rel: string): Promise<void>;
   fileExists(rel: string): Promise<boolean>;
   listContainers(filters?: { project?: string }): Promise<ContainerSummary[]>;
-  inspectContainer(id: string): Promise<unknown>;
+  streamLogs(opts: LogOptions): AsyncIterable<LogLine>;
+  inspectContainer(id: string): Promise<ContainerInspect>;
+  inspectImage(ref: string): Promise<ImageInspect | null>;
   runCompose(target: ComposeTarget, args: string[], opts?: ComposeOptions): JobHandle;
 }
 

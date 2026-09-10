@@ -2,18 +2,24 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import Docker from "dockerode";
 import { ChunkQueue } from "./chunk-queue.js";
+import { LogDemultiplexer } from "./log-demux.js";
 import { PathGuard } from "./paths.js";
 import type {
   ComposeOptions,
   ComposeResult,
   ComposeTarget,
+  ContainerInspect,
   ContainerSummary,
   DiscoveredDir,
   FileRead,
   Host,
+  ImageInspect,
   JobHandle,
+  LogLine,
+  LogOptions,
 } from "./types.js";
 import { HashMismatchError } from "./types.js";
 
@@ -27,6 +33,9 @@ export const COMPOSE_FILENAMES = [
 export function hashContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
+
+/** Fixed width, so the mask reveals nothing about a secret's length. Matches env-file.ts. */
+const MASK = "••••••••";
 
 export class LocalHost implements Host {
   private readonly guard: PathGuard;
@@ -156,8 +165,149 @@ export class LocalHost implements Host {
     }));
   }
 
-  async inspectContainer(id: string): Promise<unknown> {
-    return this.docker.getContainer(id).inspect();
+  /**
+   * Follows a container's logs.
+   *
+   * `Config.Tty` decides the framing. With a TTY, Docker sends raw bytes on one stream.
+   * Without one — the normal case for a compose service — it interleaves stdout and stderr
+   * with an 8-byte header per chunk, so the bytes must be demultiplexed or the log fills
+   * with control characters.
+   */
+  async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
+    const container = this.docker.getContainer(opts.containerId);
+    const details = await container.inspect();
+    const tty = details.Config?.Tty === true;
+
+    // dockerode types `logs` as Buffer | ReadableStream depending on `follow`; at runtime
+    // with follow:true it is a stream, and with follow:false a Buffer. The overload requires
+    // literal boolean types; work around by widening to the union result type.
+    const stream = (await container.logs({
+      follow: opts.follow ?? false,
+      stdout: true,
+      stderr: true,
+      tail: opts.tail ?? 200,
+      ...(opts.since === undefined ? {} : { since: opts.since }),
+    } as Parameters<typeof container.logs>[0])) as Buffer | NodeJS.ReadableStream;
+
+    const queue = new ChunkQueue();
+    const demux = tty ? null : new LogDemultiplexer();
+    const ttyDecoder = tty ? new StringDecoder("utf8") : null;
+
+    if (Buffer.isBuffer(stream)) {
+      try {
+        for (const chunk of demux
+          ? demux.push(stream)
+          : [{ text: stream.toString("utf8"), stream: "stdout" as const }]) {
+          queue.push(chunk);
+        }
+        if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+      } catch (error) {
+        queue.push({
+          text: `\n[log stream ended: ${error instanceof Error ? error.message : "framing error"}]\n`,
+          stream: "stderr",
+        });
+      }
+      queue.close();
+    } else {
+      // At this point, stream is a NodeJS.ReadableStream.
+      const readable = stream as NodeJS.ReadableStream & { destroy?: () => void };
+      readable.on("data", (buffer: Buffer) => {
+        if (demux) {
+          try {
+            for (const chunk of demux.push(buffer)) queue.push(chunk);
+          } catch (error) {
+            // `LogFramingError`: the bytes are not framed after all — most likely the
+            // container was recreated with a TTY between our inspect and this stream.
+            // End cleanly rather than throwing from a 'data' handler, which would be an
+            // unhandled rejection rather than a closed log pane.
+            queue.push({
+              text: `\n[log stream ended: ${error instanceof Error ? error.message : "framing error"}]\n`,
+              stream: "stderr",
+            });
+            queue.close();
+            readable.destroy?.();
+          }
+        } else if (ttyDecoder) {
+          const text = ttyDecoder.write(buffer);
+          if (text !== "") queue.push({ text, stream: "stdout" });
+        }
+      });
+      readable.on("end", () => {
+        if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+        queue.close();
+      });
+      readable.on("error", () => queue.close());
+    }
+
+    yield* queue;
+  }
+
+  async inspectContainer(id: string): Promise<ContainerInspect> {
+    const raw = await this.docker.getContainer(id).inspect();
+    return {
+      id: raw.Id,
+      name: raw.Name?.replace(/^\//, "") ?? id,
+      image: raw.Config?.Image ?? "",
+      imageDigest: raw.Image ?? null,
+      state: raw.State?.Status ?? "unknown",
+      exitCode: raw.State?.ExitCode ?? null,
+      oomKilled: raw.State?.OOMKilled === true,
+      startedAt: raw.State?.StartedAt ?? null,
+      finishedAt: raw.State?.FinishedAt ?? null,
+      restartPolicy: raw.HostConfig?.RestartPolicy?.Name ?? "no",
+      restartCount: raw.RestartCount ?? 0,
+      tty: raw.Config?.Tty === true,
+      // Masked here, at the boundary, not at the route. Config.Env is where a container's
+      // secrets are, and a projection carrying raw values is one JSON.stringify away from
+      // an error body or a log line.
+      env: (raw.Config?.Env ?? []).map((entry) => {
+        const eq = entry.indexOf("=");
+        const key = eq === -1 ? entry : entry.slice(0, eq);
+        const value = eq === -1 ? "" : entry.slice(eq + 1);
+        return { key, masked: value === "" ? "" : MASK };
+      }),
+      mounts: (raw.Mounts ?? []).map((mount) => ({
+        source: mount.Source ?? "",
+        destination: mount.Destination ?? "",
+        mode: mount.RW === false ? "ro" : "rw",
+        type: mount.Type ?? "bind",
+      })),
+      ports: Object.entries(raw.NetworkSettings?.Ports ?? {}).flatMap(([spec, bindings]) => {
+        const [portText, protocol] = spec.split("/");
+        const container = Number(portText);
+        if (!Number.isFinite(container)) return [];
+        const host = bindings?.[0]?.HostPort;
+        return [
+          {
+            container,
+            host: host === undefined ? null : Number.isFinite(Number(host)) ? Number(host) : null,
+            protocol: protocol ?? "tcp",
+          },
+        ];
+      }),
+      networks: Object.keys(raw.NetworkSettings?.Networks ?? {}),
+      health: raw.State?.Health
+        ? {
+            status: raw.State.Health.Status ?? "unknown",
+            failingStreak: raw.State.Health.FailingStreak ?? 0,
+            log: (raw.State.Health.Log ?? []).slice(-5).map((entry) => ({
+              exitCode: entry.ExitCode ?? 0,
+              output: entry.Output ?? "",
+              end: entry.End ?? "",
+            })),
+          }
+        : null,
+    };
+  }
+
+  /** `null` rather than a throw when the image has never been pulled — a normal state. */
+  async inspectImage(ref: string): Promise<ImageInspect | null> {
+    try {
+      const raw = await this.docker.getImage(ref).inspect();
+      return { id: raw.Id, repoDigests: raw.RepoDigests ?? [] };
+    } catch {
+      return null;
+    }
   }
 
   /** Output kept for the `result` tail, per stream. Beyond this the head is discarded. */
