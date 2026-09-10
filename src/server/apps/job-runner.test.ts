@@ -93,6 +93,54 @@ describe("JobRunner", () => {
     await (await runner.start(row, "down", userId)).done;
   });
 
+  it("holds the mutex against two starts in the SAME TICK", async () => {
+    // The form the serialised test cannot catch. Measured with the row insert placed
+    // before the reservation: both calls returned a job and both spawned
+    // `docker compose up` on one stack, because each passed the busy check while the
+    // other was still awaiting its insert. A double-click on Deploy is enough.
+    const { host, row, userId, runner } = await seed();
+    host.composeResults.set("up -d", { exitCode: 0, stdout: "ok\n", stderr: "" });
+    host.gateCompose();
+
+    const settled = await Promise.allSettled([
+      runner.start(row, "up", userId),
+      runner.start(row, "up", userId),
+    ]);
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(settled.filter((r) => r.status === "rejected")).toHaveLength(1);
+    const rejected = settled.find((r) => r.status === "rejected");
+    expect(rejected?.status === "rejected" && rejected.reason).toBeInstanceOf(JobBusyError);
+
+    host.releaseCompose();
+  });
+
+  it("frees the slot when the job row cannot be written", async () => {
+    // The process is spawned before the insert, so a failed insert must not leave an
+    // untracked `up` running against an app that now looks idle.
+    const { db, host, row, userId, runner } = await seed();
+    host.composeResults.set("up -d", { exitCode: 0, stdout: "", stderr: "" });
+    // A second row with the same primary key is the simplest way to make the insert fail.
+    const clash = ulid();
+    const original = db.insert.bind(db);
+    let first = true;
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+    (db as any).insert = (table: unknown) => {
+      if (first) {
+        first = false;
+        throw new Error("disk I/O error");
+      }
+      return original(table as never);
+    };
+    await expect(runner.start(row, "up", userId)).rejects.toThrow("disk I/O error");
+    // biome-ignore lint/suspicious/noExplicitAny: restore
+    (db as any).insert = original;
+    void clash;
+
+    // The app is usable again immediately.
+    host.composeResults.set("down", { exitCode: 0, stdout: "", stderr: "" });
+    await (await runner.start(row, "down", userId)).done;
+  });
+
   it("releases the mutex even when the job throws", async () => {
     const { host, row, userId, runner } = await seed();
     host.composeResults.set("up -d", { exitCode: 1, stdout: "", stderr: "boom" });

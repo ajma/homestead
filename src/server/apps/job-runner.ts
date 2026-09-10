@@ -69,25 +69,20 @@ export class JobRunner {
     const inFlight = this.running.get(app.id);
     if (inFlight) throw new JobBusyError(inFlight.id);
 
+    // EVERYTHING from here to `this.running.set` must be synchronous.
+    //
+    // Measured with the insert placed first: two `start` calls in the same tick both
+    // returned a job and both spawned `docker compose up` on the same stack, because
+    // each passed the check above while the other was still awaiting its insert. A
+    // double-click on Deploy is enough. `ulid()` and `runCompose` are both synchronous —
+    // `runCompose` returns a handle, not a promise — so the slot can be taken before any
+    // await exists to yield at.
     const id = ulid();
-    const startedAt = Math.floor(Date.now() / 1000);
-    await this.deps.db.insert(jobs).values({
-      id,
-      appId: app.id,
-      kind,
-      status: "running",
-      startedAt,
-      userId,
-    });
-
     const handle = this.deps.host.runCompose(
       { directory: app.directory, composeFile: app.composeFile },
       ARGS[kind],
       { timeoutMs: JOB_TIMEOUT_MS },
     );
-
-    // Reserve the slot before any await, so two starts in the same tick cannot both pass
-    // the check above.
     const job: RunningJob & { handle: JobHandle } = {
       id,
       appId: app.id,
@@ -97,6 +92,23 @@ export class JobRunner {
       done: Promise.resolve(),
     };
     this.running.set(app.id, job);
+
+    try {
+      await this.deps.db.insert(jobs).values({
+        id,
+        appId: app.id,
+        kind,
+        status: "running",
+        startedAt: Math.floor(Date.now() / 1000),
+        userId,
+      });
+    } catch (error) {
+      // The process is already running but has no row to record it against. Kill it and
+      // free the slot, rather than leaving an untracked `up` on the user's stack.
+      handle.cancel();
+      this.running.delete(app.id);
+      throw error;
+    }
 
     job.done = this.finish(app, job, handle);
     return job;
