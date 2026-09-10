@@ -86,6 +86,36 @@ describe("values", () => {
     const puid = parseEnv(sample).find((e) => e.kind === "pair" && e.key === "PUID");
     expect(puid?.kind === "pair" && puid.comment).toBe("   # the media user");
   });
+
+  it("expands escapes in double quotes and leaves single quotes literal", () => {
+    const value = (content: string) => {
+      const entry = parseEnv(content).find((e) => e.kind === "pair");
+      return entry?.kind === "pair" ? entry.value : undefined;
+    };
+    // These are passwords. Stripping the backslash from a single-quoted one is a
+    // silent corruption that surfaces as an app failing to authenticate.
+    expect(value("PASS='hunter\\2'")).toBe("hunter\\2");
+    expect(value('DESC="line1\\nline2"')).toBe("line1\nline2");
+    expect(value('P="C:\\dir"')).toBe("C:\\dir"); // unknown escape stays verbatim
+  });
+
+  it("finds the comment after an escaped quote", () => {
+    const entry = parseEnv('A="has \\" quote" # note').find((e) => e.kind === "pair");
+    expect(entry?.kind === "pair" && entry.value).toBe('has " quote');
+    expect(entry?.kind === "pair" && entry.comment).toBe(" # note");
+  });
+
+  it("reads a file saved with CRLF line endings", () => {
+    // Measured against the first implementation: every line matched `other`, so a
+    // CRLF `.env` appeared to contain no variables at all.
+    const entries = parseEnv("A=1\r\nB=2\r\n");
+    const pairs = entries.filter((e) => e.kind === "pair");
+    expect(pairs.map((p) => p.kind === "pair" && [p.key, p.value])).toEqual([
+      ["A", "1"],
+      ["B", "2"],
+    ]);
+    expect(serialiseEnv(entries)).toBe("A=1\r\nB=2\r\n");
+  });
 });
 
 describe("upsertEnv", () => {
@@ -112,6 +142,25 @@ describe("upsertEnv", () => {
     const written = serialiseEnv(upsertEnv(parseEnv("A=1"), "A", 'say "hi"'));
     const back = parseEnv(written).find((e) => e.kind === "pair");
     expect(back?.kind === "pair" && back.value).toBe('say "hi"');
+  });
+
+  it("rewrites the last occurrence of a duplicated key, which is the one compose reads", () => {
+    // Rewriting the first was measured to be a silent no-op: the UI reports success
+    // and the container still starts with the old value.
+    expect(serialiseEnv(upsertEnv(parseEnv("A=1\nA=2"), "A", "9"))).toBe("A=1\nA=9");
+  });
+
+  it("keeps a CRLF line CRLF when it rewrites it", () => {
+    expect(serialiseEnv(upsertEnv(parseEnv("A=1\r\nB=2\r\n"), "A", "9"))).toBe("A=9\r\nB=2\r\n");
+  });
+
+  it("never lets a written value restructure the file", () => {
+    // An API caller can supply anything. A literal newline written raw would split the
+    // line and silently invent a variable.
+    const text = serialiseEnv(upsertEnv(parseEnv("A=1"), "A", "one\ntwo"));
+    expect(text.split("\n")).toHaveLength(1);
+    const back = parseEnv(text).find((e) => e.kind === "pair");
+    expect(back?.kind === "pair" && back.value).toBe("one\ntwo");
   });
 
   it("appends a new key at the end", () => {
