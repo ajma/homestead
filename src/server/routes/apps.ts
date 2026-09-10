@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { scanForApps } from "../apps/adoption.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
@@ -16,12 +16,32 @@ import { HashMismatchError } from "../host/types.js";
 
 const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) });
 
+const launchUrlSchema = z.union([
+  z.null(),
+  z.literal(""),
+  z.string().refine(
+    (val) => {
+      // Only http: and https: schemes are safe for href attributes. javascript:, data:,
+      // and scheme-relative URLs (//) are all stored XSS vectors.
+      if (!val.startsWith("http://") && !val.startsWith("https://")) return false;
+      // Verify it's a valid URL after the scheme check.
+      try {
+        new URL(val);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: "URL must use http: or https: scheme" },
+  ),
+]).optional();
+
 const patchBody = z.object({
   displayName: z.string().min(1).optional(),
   description: z.string().nullable().optional(),
   iconRef: z.string().nullable().optional(),
   category: z.string().nullable().optional(),
-  launchInternalUrl: z.string().nullable().optional(),
+  launchInternalUrl: launchUrlSchema,
   showOnLauncher: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
 });
@@ -327,6 +347,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.patch("/api/apps/:id", async (request, reply) => {
     const ctx = requireCapability(request, "app:config");
     const { id } = z.object({ id: z.string() }).parse(request.params);
+
     const body = patchBody.parse(request.body);
 
     // Every field is optional, so `{}` parses cleanly — and Drizzle throws on an empty
