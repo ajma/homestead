@@ -528,15 +528,26 @@ describe.skipIf(!hasDocker)('runCompose', () => {
     // caller saw success while the process died. Phase 1B-ii passes an SSE writer
     // here, and a disconnected client is ordinary, not exceptional.
     const seen: string[] = []
-    process.once('uncaughtException', (error) => seen.push(String(error.message)))
+    const onUncaught = (error: Error) => seen.push(String(error.message))
+    // Removed in `finally`. Vitest runs many files in one worker, so a listener left
+    // registered would intercept the FIRST genuine uncaughtException anywhere later in
+    // the run and quietly prevent the crash that should have failed the suite — an
+    // uncaughtException handler is the worst kind to leak, since its whole job is
+    // swallowing the signal that something went badly wrong.
+    process.on('uncaughtException', onUncaught)
 
-    const result = await host.runCompose(
-      { directory: 'good', composeFile: 'compose.yaml' },
-      ['config', '--format', 'json'],
-      { onOutput: () => { throw new Error('SSE client disconnected') } },
-    )
+    let result: Awaited<ReturnType<typeof host.runCompose>>
+    try {
+      result = await host.runCompose(
+        { directory: 'good', composeFile: 'compose.yaml' },
+        ['config', '--format', 'json'],
+        { onOutput: () => { throw new Error('SSE client disconnected') } },
+      )
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    } finally {
+      process.removeListener('uncaughtException', onUncaught)
+    }
 
-    await new Promise((resolve) => setTimeout(resolve, 100))
     expect(seen).toEqual([])
     // Capture must continue despite the failing consumer.
     expect(result.exitCode).toBe(0)
