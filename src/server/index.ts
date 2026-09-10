@@ -13,6 +13,7 @@ import { PreflightError, runMountPreflight } from "./host/preflight.js";
 import { dockerRunner } from "./monitoring/docker-runner.js";
 import { createHttpRunners } from "./monitoring/http-runner.js";
 import { Scheduler } from "./monitoring/scheduler.js";
+import { EventBus } from "./routes/events.js";
 
 const config = loadConfig(process.env);
 
@@ -45,6 +46,7 @@ const registry = createRegistryClient({
 });
 const images = new ImageUpdateChecker({ db, host, composeConfig, registry });
 const httpRunners = createHttpRunners({ fetch });
+const events = new EventBus();
 const scheduler = new Scheduler({
   db,
   host,
@@ -61,6 +63,7 @@ const scheduler = new Scheduler({
     console.error(`[monitoring] probe ${probeId}:`, error);
   },
 });
+scheduler.onTransition((transition) => events.publish(transition));
 
 const app = await buildApp({
   config,
@@ -72,6 +75,7 @@ const app = await buildApp({
   jobs,
   images,
   scheduler,
+  events,
 });
 
 scheduler.start();

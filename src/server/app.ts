@@ -15,6 +15,8 @@ import type { Host } from "./host/types.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
 import { containerRoutes } from "./routes/containers.js";
+import type { EventBus } from "./routes/events.js";
+import { eventRoutes } from "./routes/events.js";
 import { healthRoutes } from "./routes/health.js";
 import { imageRoutes } from "./routes/images.js";
 import { jobRoutes } from "./routes/jobs.js";
@@ -66,6 +68,7 @@ export type AppDeps = {
   jobs: JobRunner;
   images: ImageUpdateChecker;
   scheduler: Scheduler;
+  events: EventBus;
 };
 
 declare module "fastify" {
@@ -176,6 +179,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(containerRoutes);
   await app.register(imageRoutes);
   await app.register(probeRoutes);
+  await app.register(eventRoutes);
   await app.register(spaRoutes);
 
   return app;

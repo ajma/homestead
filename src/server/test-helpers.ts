@@ -28,6 +28,7 @@ import { HashMismatchError } from "./host/types.js";
 import { dockerRunner } from "./monitoring/docker-runner.js";
 import { createHttpRunners } from "./monitoring/http-runner.js";
 import { Scheduler } from "./monitoring/scheduler.js";
+import { EventBus } from "./routes/events.js";
 
 export type TestApp = FastifyInstance & {
   deps: AppDeps & { host: FakeHost; registryDigests: Map<string, string> };
@@ -243,6 +244,7 @@ export async function buildTestApp(): Promise<TestApp> {
       throw new Error("scheduler fetch should not be called in tests");
     },
   });
+  const events = new EventBus();
   const scheduler = new Scheduler({
     db,
     host,
@@ -253,6 +255,7 @@ export async function buildTestApp(): Promise<TestApp> {
       http_external: httpRunners.external,
     },
   });
+  scheduler.onTransition((transition) => events.publish(transition));
   const app = await buildApp({
     config,
     db,
@@ -263,6 +266,7 @@ export async function buildTestApp(): Promise<TestApp> {
     jobs,
     images,
     scheduler,
+    events,
   });
 
   // Assign each app instance its own source address to avoid rate-limit bucket
