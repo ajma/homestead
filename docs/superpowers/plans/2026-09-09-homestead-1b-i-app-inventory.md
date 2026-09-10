@@ -3116,15 +3116,19 @@ In `local-host.ts`:
   /**
    * Whether a path exists, independent of whether its contents can be read.
    *
-   * `readTextFile` cannot answer this: `PathGuard.resolveExisting` throws the same
-   * `PathEscapeError` for a missing file and for one that escapes the root, and a read
-   * can also fail on permissions. `stat` needs only search permission on the parent,
-   * so it separates "no such file" from "cannot read that file".
+   * `resolveExisting` resolves through `realpath`, which needs only search permission on
+   * the parent directories — not read permission on the file. So a `.env` the user has
+   * chmod'ed to 600 under another uid resolves fine here while `readTextFile` fails,
+   * which is exactly the distinction the `.env` routes need.
+   *
+   * A `.env` symlinked outside the compose root reports `false`, because the guard
+   * rejects it. That reads as "absent", and a subsequent write then fails closed inside
+   * `resolveForWrite` rather than following the link — the right outcome, though the
+   * user sees a generic error rather than a description of the problem.
    */
   async fileExists(rel: string): Promise<boolean> {
     try {
-      const abs = await this.guard.resolveForWrite(rel)
-      await stat(abs)
+      await this.guard.resolveExisting(rel)
       return true
     } catch {
       return false
