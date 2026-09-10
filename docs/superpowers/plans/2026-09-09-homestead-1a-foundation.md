@@ -259,6 +259,11 @@ HOMESTEAD_DOCKER_SOCKET=/var/run/docker.sock
 HOMESTEAD_BASE_URL=http://localhost:3000
 HOMESTEAD_TRUSTED_ORIGINS=http://localhost:3000
 
+# Peers whose X-Forwarded-For / CF-Connecting-IP headers are believed. Loopback only by
+# default, because cloudflared runs with network_mode: host and reaches Homestead over
+# localhost. Widening this to a LAN range lets anyone on that range forge their client IP.
+HOMESTEAD_TRUSTED_PROXIES=127.0.0.1,::1
+
 # Cloudflare Access. Both must be set for the Access sign-in path to activate.
 HOMESTEAD_ACCESS_TEAM_DOMAIN=
 HOMESTEAD_ACCESS_AUD=
@@ -378,6 +383,10 @@ const schema = z.object({
   // z.url(), not z.string().url() — the latter carries a @deprecated marker in zod 4.
   HOMESTEAD_BASE_URL: z.url(),
   HOMESTEAD_TRUSTED_ORIGINS: z.string().default(''),
+  // Peers whose X-Forwarded-For / CF-Connecting-IP headers may be believed.
+  // Defaults to loopback: cloudflared runs with network_mode: host and reaches
+  // Homestead over localhost, while LAN clients connect from a LAN address.
+  HOMESTEAD_TRUSTED_PROXIES: z.string().default('127.0.0.1,::1'),
   HOMESTEAD_ACCESS_TEAM_DOMAIN: optionalString,
   HOMESTEAD_ACCESS_AUD: optionalString,
   HOMESTEAD_SKIP_MOUNT_PREFLIGHT: z
@@ -395,6 +404,7 @@ export type Config = {
   dockerSocket: string
   baseUrl: string
   trustedOrigins: string[]
+  trustedProxies: string[]
   accessTeamDomain: string | null
   accessAud: string | null
   accessEnabled: boolean
@@ -418,6 +428,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 
   const trustedOrigins = [...new Set([parsed.HOMESTEAD_BASE_URL, ...extraOrigins])]
 
+  const trustedProxies = parsed.HOMESTEAD_TRUSTED_PROXIES.split(',')
+    .map((p) => p.trim())
+    .filter((p) => p !== '')
+
   const accessTeamDomain = parsed.HOMESTEAD_ACCESS_TEAM_DOMAIN
   const accessAud = parsed.HOMESTEAD_ACCESS_AUD
 
@@ -430,6 +444,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     dockerSocket: parsed.HOMESTEAD_DOCKER_SOCKET,
     baseUrl: parsed.HOMESTEAD_BASE_URL,
     trustedOrigins,
+    trustedProxies,
     accessTeamDomain,
     accessAud,
     accessEnabled: accessTeamDomain !== null && accessAud !== null,
@@ -2063,14 +2078,25 @@ declare module 'fastify' {
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: deps.config.nodeEnv !== 'test',
-    // Real client IPs: the tunnel forwards CF-Connecting-IP; LAN requests carry none.
-    trustProxy: true,
+    // NEVER `trustProxy: true`. That believes X-Forwarded-For from any peer, and
+    // Homestead is reachable on the LAN by design — so any LAN client could forge
+    // `request.ip`, poisoning audit records and defeating IP-keyed rate limiting by
+    // rotating the header. Trust only the tunnel's own origin: cloudflared runs with
+    // network_mode: host and reaches Homestead over loopback, while LAN clients
+    // connect from a LAN address and are therefore not believed.
+    trustProxy: deps.config.trustedProxies,
   })
 
   app.decorate('deps', deps)
 
   await app.register(cookie)
-  await app.register(rateLimit, { max: 300, timeWindow: '1 minute' })
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: '1 minute',
+    // Explicit so the trust boundary is visible at the point it matters. `request.ip`
+    // is only meaningful because trustProxy is narrowed above.
+    keyGenerator: (request) => request.ip,
+  })
 
   await app.register(healthRoutes)
 
@@ -2267,7 +2293,15 @@ export function createAuth(config: Config, db: Db) {
     advanced: {
       // Do NOT force useSecureCookies. Homestead is reachable over plain HTTP on
       // the LAN by design, and browsers withhold Secure cookies from such origins.
-      ipAddress: { ipAddressHeaders: ['cf-connecting-ip', 'x-forwarded-for'] },
+      ipAddress: {
+        ipAddressHeaders: ['cf-connecting-ip', 'x-forwarded-for'],
+        // Better-Auth reads these headers itself, independently of Fastify's
+        // trustProxy. Without a trusted-proxy list it would believe them from any
+        // peer, re-opening inside auth exactly the forgery that narrowing Fastify's
+        // trustProxy closes — and auth is where a forged IP does the most damage,
+        // since it keys rate limiting on login.
+        trustedProxies: config.trustedProxies,
+      },
     },
   })
 }
