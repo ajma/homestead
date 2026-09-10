@@ -1,5 +1,5 @@
-import type { AdminApp, ViewerApp } from "@shared/dto.js";
-import type { AppStatus } from "@shared/types.js";
+import type { AdminApp, ViewerApp } from "@shared/dto";
+import type { AppStatus } from "@shared/types";
 
 /** Just enough of an `apps` row to serialise. Structural, so tests need no database. */
 export type AppRowLike = {
