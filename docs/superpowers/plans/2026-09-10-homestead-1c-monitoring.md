@@ -1848,6 +1848,36 @@ describe('Scheduler.tick', () => {
     expect(failures).toEqual([[ids[0], 'runner exploded']])
   })
 
+  it('survives an onProbeError callback that throws', async () => {
+    // Third time in this project that a reporting channel took down the thing it
+    // reports on. Measured before the guard: six due probes with a throwing hook left
+    // `tick()` resolving at 0 after one runner call, with the other five still running
+    // and rescheduling after `ticking` had reset — re-opening the concurrent-tick race.
+    const { db, host, ids } = await seed(6)
+    const runner: ProbeRunner = {
+      kind: 'docker',
+      async run() {
+        throw new Error('runner exploded')
+      },
+    }
+    const scheduler = new Scheduler({
+      db, host, composeConfig: new ComposeConfigCache(host),
+      runners: { docker: runner, http_internal: runner, http_external: runner },
+      onProbeError: () => {
+        throw new Error('logger is misconfigured')
+      },
+      now: () => NOW, random: () => 0.5,
+    })
+
+    expect(await scheduler.tick()).toBe(6)
+    // Every probe was reached and rescheduled before `tick()` returned — nothing is
+    // still running in the background.
+    const rows = await db.select().from(probes)
+    expect(rows).toHaveLength(6)
+    expect(rows.every((probe) => probe.nextRunAt > NOW)).toBe(true)
+    expect(ids).toHaveLength(6)
+  })
+
   it('reschedules a probe whose runner throws, and keeps going', async () => {
     // One broken probe must not stop the tick or wedge itself into running every 5s
     // forever.
@@ -2113,7 +2143,19 @@ export class Scheduler {
       // One probe's failure ends that probe's turn, not the tick — but it must not be
       // invisible. A silent catch here hid every probe result being dropped: the tick
       // reported success while one write in eight survived.
-      this.deps.onProbeError?.(probe.id, error)
+      //
+      // The report itself is wrapped, exactly like the transition listeners above. An
+      // uncaught throw from this callback does not merely lose one message: it rejects
+      // the worker, so `tick()` returns a wrong count while the remaining probes carry
+      // on in the background AFTER `ticking` has already reset — which re-opens the
+      // concurrent-tick race the guard exists to prevent. Measured with six probes and
+      // a throwing hook: `tick()` resolved at 0 with one runner called, and the other
+      // five were still rescheduling 50ms later.
+      try {
+        this.deps.onProbeError?.(probe.id, error)
+      } catch {
+        // The channel for reporting this is the one that just failed.
+      }
     }
   }
 
