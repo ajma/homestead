@@ -181,17 +181,17 @@ describe("log streaming", () => {
     // socket every 25s for the life of the process.
     const { app, cookie, id } = await withApp();
     app.deps.host.logLines.set("container-1", [{ text: "x\n", stream: "stdout" }]);
-    const baseline = (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
-      .length;
+    const baselineTimers = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
     await app.inject({
       method: "GET",
       url: `/api/apps/${id}/containers/container-1/logs`,
       headers: { cookie },
     });
+    // Give the stream cleanup time to complete.
+    await new Promise((resolve) => setImmediate(resolve));
     // The interval is cleared when the stream ends. Without it, this would be baseline + 1.
-    expect(
-      (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles().length,
-    ).toBe(baseline);
+    const afterTimers = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    expect(afterTimers).toBe(baselineTimers);
     await app.close();
   });
 
