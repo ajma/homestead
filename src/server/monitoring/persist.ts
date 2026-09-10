@@ -40,10 +40,22 @@ export async function persistResult(
   });
 
   await db.transaction(async (tx) => {
+    // The SAMPLE records what was OBSERVED, not the debounced status.
+    //
+    // Spec §3 calls `check_results` "every sample", and that is what makes 48 hours of
+    // raw data worth keeping: a probe flapping fail/recover/fail/recover never confirms
+    // a transition, so storing the held status would record it as uninterrupted `up` and
+    // uptime would read 100% for an app failing every other minute. The debounced view
+    // — the one the launcher shows — lives on the probe row below.
+    //
+    // A consequence worth knowing: a deploy's grace window shows `starting` on the probe
+    // row while the samples record the `down` that was actually observed, so a restart
+    // does count against uptime. That is honest — the app was unreachable — and the
+    // rollup has only up/degraded/down buckets, so there is nowhere to put `starting`.
     await tx.insert(checkResults).values({
       id: ulid(),
       probeId: probe.id,
-      status: transition.status,
+      status: result.status,
       faultClass: result.faultClass ?? null,
       latencyMs: result.latencyMs ?? null,
       detail: result.detail ?? null,

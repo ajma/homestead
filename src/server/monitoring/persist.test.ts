@@ -69,6 +69,24 @@ describe("persistResult", () => {
     expect(second).toMatchObject({ status: "down", changed: true });
   });
 
+  it("records what was observed in the sample and the debounced status on the probe", async () => {
+    // These deliberately differ. A probe flapping below the threshold never confirms a
+    // transition, so samples holding the debounced status would record uninterrupted
+    // `up` and uptime would read 100% for an app failing every other minute.
+    const { db, probe } = await seed();
+    await persistResult(db, probe, { status: "up" }, opts);
+    const [up] = await db.select().from(probes).where(eq(probes.id, probe.id));
+
+    const transition = await persistResult(db, up as never, { status: "down" }, opts);
+    expect(transition.status).toBe("up"); // held: one failure is not a confirmed outage
+
+    const samples = await db.select().from(checkResults).orderBy(checkResults.checkedAt);
+    expect(samples.map((s) => s.status)).toEqual(["up", "down"]);
+
+    const [after] = await db.select().from(probes).where(eq(probes.id, probe.id));
+    expect(after?.lastStatus).toBe("up");
+  });
+
   it("stores the fault class and detail on both rows", async () => {
     const { db, probe } = await seed();
     await persistResult(
