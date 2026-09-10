@@ -87,7 +87,7 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
       // stream rather than throwing, which at this point would produce a torn response
       // the error handler cannot turn into JSON.
       request.log.error({ err: error, containerId }, "log stream failed");
-      sse.send("error", { message: error instanceof Error ? error.message : "log stream ended" });
+      sse.send("error", { code: "stream_failed", message: "The stream ended unexpectedly." });
     } finally {
       sse.send("done", {});
       sse.close();

@@ -181,8 +181,7 @@ describe("log streaming", () => {
     // socket every 25s for the life of the process.
     const { app, cookie, id } = await withApp();
     app.deps.host.logLines.set("container-1", [{ text: "x\n", stream: "stdout" }]);
-    const baseline = (process as unknown as { _getActiveHandles(): unknown[] })
-      ._getActiveHandles()
+    const baseline = (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
       .length;
     await app.inject({
       method: "GET",
@@ -193,6 +192,27 @@ describe("log streaming", () => {
     expect(
       (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles().length,
     ).toBe(baseline);
+    await app.close();
+  });
+
+  it("does not leak error details when the stream fails", async () => {
+    // Phase 1A already ruled that database error text (bound SQL parameters) must not
+    // reach clients. The same applies here: error.message on this path can be a dockerode
+    // failure carrying filesystem paths, or LogFramingError revealing internal state.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.streamLogs = async function* () {
+      yield { text: "started\n", stream: "stdout" };
+      throw new Error('SQLITE_BUSY: near "password"');
+    };
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}/containers/container-1/logs`,
+      headers: { cookie },
+    });
+    expect(res.body).toContain("event: error");
+    // The raw error message must not appear.
+    expect(res.body).not.toContain("SQLITE_BUSY");
+    expect(res.body).not.toContain("password");
     await app.close();
   });
 });

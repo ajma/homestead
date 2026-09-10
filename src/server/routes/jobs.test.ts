@@ -282,4 +282,41 @@ describe("lifecycle routes", () => {
     expect(res.statusCode).toBe(404);
     await app.close();
   });
+
+  it("does not leak error details when the stream fails", async () => {
+    // Phase 1A already ruled that database error text (bound SQL parameters) must not
+    // reach clients. The job stream's catch covers db.select, whose error text can carry
+    // bound parameters. Send a generic message, not error.message.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.composeResults.set("up -d", { exitCode: 0, stdout: "x", stderr: "" });
+    app.deps.host.gateCompose();
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/up`,
+      headers: { cookie },
+    });
+    const jobId = started.json().jobId;
+    const live = app.deps.jobs.live(jobId);
+    if (live) {
+      Object.defineProperty(live, "output", {
+        value: {
+          async *[Symbol.asyncIterator]() {
+            yield { text: "partial", stream: "stdout" as const };
+            throw new Error('SQLITE_BUSY: near "password"');
+          },
+        },
+      });
+    }
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}/stream`,
+      headers: { cookie },
+    });
+    expect(res.body).toContain("event: error");
+    // The raw error message must not appear.
+    expect(res.body).not.toContain("SQLITE_BUSY");
+    expect(res.body).not.toContain("password");
+    app.deps.host.releaseCompose();
+    await app.close();
+  });
 });
