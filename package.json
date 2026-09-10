@@ -1,8 +1,8 @@
 {
   "name": "homestead",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Manage self-hosted Docker Compose applications",
+  "private": true,
   "engines": { "node": ">=24" },
   "scripts": {
     "dev": "concurrently -n server,web -c blue,green \"pnpm dev:server\" \"pnpm dev:web\"",
@@ -47,7 +47,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@types/dockerode": "^4.0.1",
-    "@types/node": "^22.20.1",
+    "@types/node": "^24",
     "drizzle-kit": "^0.31.10",
     "tsup": "^8.5.1",
     "tsx": "^4.23.13",

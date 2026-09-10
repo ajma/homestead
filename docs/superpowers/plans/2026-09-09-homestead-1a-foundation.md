@@ -14,7 +14,8 @@
 
 Every task's requirements implicitly include this section.
 
-- **Node 24, pnpm 11.** Use the newest stable major of every dependency; no RCs or betas.
+- **Node 24, pnpm 12.** Use the newest stable major of every dependency; no RCs or betas.
+  This includes `@types/node`, which must track the Node major in use (`^24`), not an older one.
 - **TypeScript:** ESM only, `strict: true`, `moduleResolution: "bundler"`, `target: "ES2022"`. No CommonJS, no `require`.
 - **Installed toolchain, verified during Task 1:** TypeScript 7.0.2, Vitest 5.0.0, Biome 2.5.12, Fastify 5.12.3.
 - **TypeScript 7 removed `baseUrl`.** Never add it. Every `paths` target must be relative with a leading `./`, or compilation fails with `TS5102` / `TS5090`.
