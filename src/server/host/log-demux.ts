@@ -5,6 +5,25 @@ export type DemuxedChunk = { text: string; stream: "stdout" | "stderr" };
 const HEADER_BYTES = 8;
 
 /**
+ * Largest payload a single frame may declare.
+ *
+ * Docker's own log lines are capped far below this, so a larger figure means the bytes
+ * are not framed at all — the likeliest cause being a stream we decided was non-TTY that
+ * is actually raw, in which case arbitrary log text is being read as a length field. A
+ * four-byte length can claim 4 GB; without this the parser waits forever for a payload
+ * that never comes while `pending` grows for the life of the process.
+ */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+/** Thrown when the byte stream cannot be framed. The caller should end the stream. */
+export class LogFramingError extends Error {
+  constructor(readonly declaredLength: number) {
+    super(`Log frame declares ${declaredLength} bytes; the stream is not multiplexed`);
+    this.name = "LogFramingError";
+  }
+}
+
+/**
  * Reassembles Docker's multiplexed log framing.
  *
  * A container without a TTY gets stdout and stderr interleaved on one connection, each
@@ -30,6 +49,13 @@ export class LogDemultiplexer {
 
     while (this.pending.length >= HEADER_BYTES) {
       const length = this.pending.readUInt32BE(4);
+      // Fail loudly rather than buffering forever. Misframing does not resynchronise on
+      // its own — every subsequent header is read at the wrong offset — so continuing
+      // would emit garbage indefinitely while memory climbed.
+      if (length > MAX_FRAME_BYTES) {
+        this.pending = Buffer.alloc(0);
+        throw new LogFramingError(length);
+      }
       if (this.pending.length < HEADER_BYTES + length) break; // payload still arriving
 
       // Anything other than 2 is stdout. Docker uses 0 for stdin on some endpoints, and
@@ -45,6 +71,10 @@ export class LogDemultiplexer {
     return out;
   }
 
+  /**
+   * Ends both decoders. A partial frame still in `pending` is discarded: its payload
+   * never arrived, so there is nothing to decode. Safe to call twice.
+   */
   flush(): DemuxedChunk[] {
     const out: DemuxedChunk[] = [];
     for (const stream of ["stdout", "stderr"] as const) {

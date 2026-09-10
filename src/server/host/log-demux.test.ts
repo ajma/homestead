@@ -1,4 +1,4 @@
-import { LogDemultiplexer } from "@server/host/log-demux";
+import { LogDemultiplexer, LogFramingError } from "@server/host/log-demux";
 import { describe, expect, it } from "vitest";
 
 /** Builds one Docker log frame: 1 byte stream, 3 padding, 4-byte big-endian length. */
@@ -98,6 +98,39 @@ describe("LogDemultiplexer", () => {
 
   it("emits nothing for a zero-length frame", () => {
     expect(new LogDemultiplexer().push(frame(1, ""))).toEqual([]);
+  });
+
+  it("throws rather than buffering forever on an impossible frame length", () => {
+    // A four-byte length can claim 4 GB. The payload never arrives, so a parser that just
+    // waits grows `pending` for the life of the process — and misframing never
+    // resynchronises, because every later header is read at the wrong offset. The
+    // realistic cause is a raw TTY stream being fed through the frame parser, where
+    // ordinary log text is read as a length.
+    const header = Buffer.alloc(8);
+    header.writeUInt8(1, 0);
+    header.writeUInt32BE(0xffffffff, 4);
+    const demux = new LogDemultiplexer();
+    expect(() => demux.push(header)).toThrow(LogFramingError);
+    // And it does not keep the bytes it could not parse.
+    expect(() => demux.push(Buffer.from("more"))).not.toThrow();
+  });
+
+  it("accepts a frame right at the size limit", () => {
+    const header = Buffer.alloc(8);
+    header.writeUInt8(1, 0);
+    header.writeUInt32BE(16 * 1024 * 1024, 4);
+    // Declared but not yet delivered: it waits, rather than rejecting a legal frame.
+    expect(new LogDemultiplexer().push(header)).toEqual([]);
+  });
+
+  it("discards a partial frame on flush rather than emitting half a payload", () => {
+    const demux = new LogDemultiplexer();
+    const header = Buffer.alloc(8);
+    header.writeUInt8(1, 0);
+    header.writeUInt32BE(4, 4);
+    demux.push(Buffer.concat([header, Buffer.from("ab")])); // 2 of 4 bytes
+    expect(demux.flush()).toEqual([]);
+    expect(demux.flush()).toEqual([]);
   });
 
   it("treats an unknown stream byte as stdout rather than dropping the payload", () => {
