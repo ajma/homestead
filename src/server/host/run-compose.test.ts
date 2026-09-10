@@ -65,6 +65,31 @@ describe.skipIf(!hasDocker)("runCompose", () => {
     expect(chunks.join("")).toContain("nginx:alpine");
   });
 
+  it("survives an onOutput callback that throws, without killing the process", async () => {
+    // Measured before this guard existed: the throw escaped as an uncaughtException
+    // while the promise still resolved with exitCode 0 and the full output — so a
+    // caller saw success while the process died. Phase 1B-ii passes an SSE writer
+    // here, and a disconnected client is ordinary, not exceptional.
+    const seen: string[] = [];
+    process.once("uncaughtException", (error) => seen.push(String(error.message)));
+
+    const result = await host.runCompose(
+      { directory: "good", composeFile: "compose.yaml" },
+      ["config", "--format", "json"],
+      {
+        onOutput: () => {
+          throw new Error("SSE client disconnected");
+        },
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(seen).toEqual([]);
+    // Capture must continue despite the failing consumer.
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).services.web.image).toBe("nginx:alpine");
+  });
+
   it("refuses a directory outside the compose root", async () => {
     await expect(
       host.runCompose({ directory: "../escape", composeFile: "compose.yaml" }, ["config"]),

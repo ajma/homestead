@@ -79,8 +79,17 @@ export class FakeHost implements Host {
     this.composeCalls.push({ target, args });
     const result = this.composeResults.get(args.join(" "));
     if (!result) throw new Error(`FakeHost: no scripted compose result for: ${args.join(" ")}`);
-    if (result.stdout) opts.onOutput?.(result.stdout, "stdout");
-    if (result.stderr) opts.onOutput?.(result.stderr, "stderr");
+    // Same swallow as LocalHost: a fake that propagates a callback throw would make
+    // tests pass or fail differently from production.
+    const emit = (text: string, stream: "stdout" | "stderr") => {
+      try {
+        opts.onOutput?.(text, stream);
+      } catch {
+        /* consumer's problem */
+      }
+    };
+    if (result.stdout) emit(result.stdout, "stdout");
+    if (result.stderr) emit(result.stderr, "stderr");
     return result;
   }
 }

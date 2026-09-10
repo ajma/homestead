@@ -162,15 +162,33 @@ export class LocalHost implements Host {
 
     let stdout = "";
     let stderr = "";
+
+    /**
+     * A throw from `onOutput` must not escape.
+     *
+     * These run inside stream 'data' handlers, so a synchronous throw propagates out of
+     * `emit()` and becomes an `uncaughtException` — measured: the promise still resolved
+     * with `exitCode: 0` and the full output, while the process died. A caller would see
+     * success. Phase 1B-ii passes an SSE writer here, and a disconnected client is an
+     * ordinary event, not an exceptional one.
+     */
+    const emit = (text: string, stream: "stdout" | "stderr") => {
+      try {
+        opts.onOutput?.(text, stream);
+      } catch {
+        // The consumer's problem, not the subprocess's. Capture continues either way.
+      }
+    };
+
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stdout += text;
-      opts.onOutput?.(text, "stdout");
+      emit(text, "stdout");
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stderr += text;
-      opts.onOutput?.(text, "stderr");
+      emit(text, "stderr");
     });
 
     const exitCode = await new Promise<number>((resolve) => {
