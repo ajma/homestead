@@ -124,19 +124,30 @@ export class Scheduler {
   /**
    * Runs database work one at a time, however many probes are in flight.
    *
-   * libSQL holds a SINGLE connection, so a second `db.transaction()` opened while the
-   * first is still active fails outright:
+   * A second `db.transaction()` opened while the first is active fails in BOTH
+   * environments, with different errors — measured:
    *
-   *   LibsqlError: TRANSACTION_ACTIVE: This client has a single connection, which an
-   *   open transaction is holding.
+   *   | during an open transaction | `:memory:` (tests) | file-backed (production) |
+   *   |---|---|---|
+   *   | another transaction        | TRANSACTION_ACTIVE | SQLITE_BUSY              |
+   *   | a plain read               | rejected           | fine                     |
    *
-   * Measured before this existed: with the concurrency limit at 8, three probes ran,
-   * the runner was called three times, and exactly ONE sample was written — the other
-   * two rejected and were swallowed by the per-probe catch, so the tick reported
-   * success while monitoring recorded almost nothing.
+   * So serialising is required in production too, not merely to satisfy the tests. The
+   * difference is scope: in memory the whole client is one connection, so every
+   * statement must queue, while a file-backed database serves concurrent reads happily
+   * and only rejects an overlapping transaction. That is why the reschedule UPDATE and
+   * the app SELECT are queued as well — they have to be for `:memory:`, and the cost on
+   * a file is negligible.
+   *
+   * Do not "optimise" the reads back out on the grounds that production allows them:
+   * the test suite runs entirely in memory and would start failing intermittently.
+   *
+   * Measured before this existed: with the concurrency limit at 8, twelve probes ran,
+   * the runner was called twelve times, and ZERO samples survived — every result was
+   * swallowed by the per-probe catch while the tick reported success.
    *
    * The concurrency limit exists for the slow part — Docker and HTTP — and that stays
-   * parallel. Only the write is serialised, and it is milliseconds.
+   * parallel. Only the database work is serialised, and it is milliseconds.
    */
   private serialise<T>(work: () => Promise<T>): Promise<T> {
     const next = this.writes.then(work, work);
@@ -158,9 +169,8 @@ export class Scheduler {
     await this.reschedule(probe, now);
 
     try {
-      // Through the queue too: a plain `SELECT` on this single connection fails exactly
-      // like the `UPDATE` above when it lands while another probe's write transaction is
-      // open — it is not only concurrent transactions that libSQL rejects.
+      // Through the queue too. See `serialise` for why: required for `:memory:`, free on
+      // a file.
       const [app] = await this.serialise(() =>
         this.deps.db.select().from(apps).where(eq(apps.id, probe.appId)),
       );
@@ -194,7 +204,7 @@ export class Scheduler {
     } catch (error) {
       // One probe's failure ends that probe's turn, not the tick — but it must not be
       // invisible. A silent catch here hid every probe result being dropped: the tick
-      // reported success while one write in eight survived.
+      // reported success while zero samples survived. See `serialise`.
       this.deps.onProbeError?.(probe.id, error);
     }
   }
@@ -205,10 +215,8 @@ export class Scheduler {
     const spread = probe.intervalSeconds * JITTER_FRACTION;
     const offset = (this.random() * 2 - 1) * spread;
     const nextRunAt = Math.round(now + probe.intervalSeconds + offset);
-    // Through the same queue as `persistResult`. libSQL's single connection rejects ANY
-    // statement issued while another probe's write transaction is open, not just a second
-    // transaction — a bare `UPDATE` racing a concurrent probe's commit hit the identical
-    // TRANSACTION_ACTIVE error `serialise` exists to prevent.
+    // Through the same queue as `persistResult`. See `serialise` for why: required for
+    // `:memory:`, free on a file.
     await this.serialise(() =>
       this.deps.db.update(probes).set({ nextRunAt }).where(eq(probes.id, probe.id)),
     );
