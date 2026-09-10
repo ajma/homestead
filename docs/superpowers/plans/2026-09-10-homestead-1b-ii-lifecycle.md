@@ -3436,6 +3436,30 @@ describe('ImageUpdateChecker', () => {
     expect(await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id))).toHaveLength(2)
   })
 
+  it('does not throw when the database write fails', async () => {
+    // `check()` is documented as never throwing, and 1C calls it in a loop over every
+    // app — so a locked database or a full disk on one app must not end the sweep for
+    // everything after it. The upsert lives inside the per-service guard for this
+    // reason; a comment promising the contract is not the same as providing it.
+    const { db, host, app } = await seed()
+    host.images.set('nginx:alpine', { id: 'x', repoDigests: ['nginx@sha256:old'] })
+    const original = db.insert.bind(db)
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+    ;(db as any).insert = () => {
+      throw new Error('SQLITE_BUSY: database is locked')
+    }
+    try {
+      const checker = new ImageUpdateChecker({
+        db, host, composeConfig: new ComposeConfigCache(host),
+        registry: { latestDigest: async () => 'sha256:new' },
+      })
+      await expect(checker.check(app)).resolves.toBeUndefined()
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      ;(db as any).insert = original
+    }
+  })
+
   it('does nothing and does not throw when the compose file will not resolve', async () => {
     const { db, host, app } = await seed()
     host.composeResults.set('config --format json', { exitCode: 1, stdout: '', stderr: 'bad' })
@@ -3520,47 +3544,55 @@ export class ImageUpdateChecker {
         const local = await this.deps.host.inspectImage(service.image)
         currentDigest = local ? digestForRepository(local.repoDigests, service.image) : null
         latestDigest = await this.deps.registry.latestDigest(service.image)
+
+        // Both must be known. A null latest means the registry could not be reached, and
+        // reporting unknown as "update available" trains the user to ignore the badge.
+        const updateAvailable =
+          currentDigest !== null && latestDigest !== null && currentDigest !== latestDigest
+
+        const row = {
+          appId: app.id,
+          serviceName: service.name,
+          currentDigest,
+          latestDigest,
+          updateAvailable,
+          checkedAt,
+        }
+
+        // The write is INSIDE the guard. A locked database, a full disk, or the app being
+        // deleted mid-sweep would otherwise throw straight out of `check()` — which is
+        // documented as never throwing, and which 1C calls in a loop over every app, so
+        // one bad write would end the sweep for everything after it.
+        await this.deps.db
+          .insert(imageStatus)
+          .values(row)
+          .onConflictDoUpdate({
+            target: [imageStatus.appId, imageStatus.serviceName],
+            set: row,
+          })
       } catch {
-        // A wedged Docker socket throws from `inspectImage`. Record the attempt anyway:
-        // skipping the row leaves the service silently absent from the panel, which
-        // reads as "not checked" rather than "checked, could not tell". Everywhere else
-        // in this project an unknown is shown as unknown.
+        // A wedged Docker socket throws from `inspectImage`; the database can throw from
+        // the upsert. Either way this service is skipped and the rest continue. Note the
+        // row written above already records an unreachable Docker as null digests with a
+        // `checkedAt`, so "checked, could not tell" is still visible where it can be.
       }
-
-      // Both must be known. A null latest means the registry could not be reached, and
-      // reporting unknown as "update available" trains the user to ignore the badge.
-      const updateAvailable =
-        currentDigest !== null && latestDigest !== null && currentDigest !== latestDigest
-
-      const row = {
-        appId: app.id,
-        serviceName: service.name,
-        currentDigest,
-        latestDigest,
-        updateAvailable,
-        checkedAt,
-      }
-
-      await this.deps.db
-        .insert(imageStatus)
-        .values(row)
-        .onConflictDoUpdate({
-          target: [imageStatus.appId, imageStatus.serviceName],
-          set: row,
-        })
     }
 
     // Forget services the compose file no longer declares. Without this a service that
     // was removed keeps its row forever, and its stale badge advertises an update for
     // something that no longer exists.
-    const live = resolved.resolved.services.map((service) => service.name)
-    await this.deps.db
-      .delete(imageStatus)
-      .where(
-        live.length === 0
-          ? eq(imageStatus.appId, app.id)
-          : and(eq(imageStatus.appId, app.id), notInArray(imageStatus.serviceName, live)),
-      )
+    try {
+      const live = resolved.resolved.services.map((service) => service.name)
+      await this.deps.db
+        .delete(imageStatus)
+        .where(
+          live.length === 0
+            ? eq(imageStatus.appId, app.id)
+            : and(eq(imageStatus.appId, app.id), notInArray(imageStatus.serviceName, live)),
+        )
+    } catch {
+      // Same contract. A stale row is a cosmetic problem; ending the sweep is not.
+    }
   }
 }
 ```
