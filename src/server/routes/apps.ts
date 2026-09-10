@@ -119,19 +119,29 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
    */
   async function statusFor(row: typeof apps.$inferSelect, containers?: ContainerSummary[]) {
     const target = { directory: row.directory, composeFile: row.composeFile };
-    const resolved = await composeConfig.resolve(target);
-    if (!resolved.valid) {
-      // `resolved.message` is raw `docker compose config` stderr. It routinely carries
-      // absolute paths and interpolated `.env` values, so it goes in `adminDetail` and
-      // the viewer gets a description instead.
+    try {
+      const resolved = await composeConfig.resolve(target);
+      if (!resolved.valid) {
+        // `resolved.message` is raw `docker compose config` stderr. It routinely carries
+        // absolute paths and interpolated `.env` values, so it goes in `adminDetail` and
+        // the viewer gets a description instead.
+        return {
+          status: "unknown" as const,
+          detail: "compose configuration is invalid",
+          adminDetail: resolved.message,
+        };
+      }
+      const found = containers ?? (await host.listContainers({ project: row.projectName ?? "" }));
+      return rollUpStatus(resolved.resolved.services, found);
+    } catch (error) {
+      // A missing or unresolvable compose file. The compose root is an SMB share the user
+      // edits over SSH, so a renamed or moved file is ordinary operation.
       return {
         status: "unknown" as const,
-        detail: "compose configuration is invalid",
-        adminDetail: resolved.message,
+        detail: "compose file could not be read",
+        adminDetail: error instanceof Error ? error.message : String(error),
       };
     }
-    const found = containers ?? (await host.listContainers({ project: row.projectName ?? "" }));
-    return rollUpStatus(resolved.resolved.services, found);
   }
 
   /**
@@ -253,14 +263,26 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
     // One Docker call for the whole page, partitioned by project. The per-row
     // alternative was a round trip per app on the screen that lists them all.
+    let dockerReachable = true;
     const byProject = new Map<string, ContainerSummary[]>();
-    for (const container of await host.listContainers()) {
-      if (!container.project) continue;
-      byProject.set(container.project, [...(byProject.get(container.project) ?? []), container]);
+    try {
+      for (const container of await host.listContainers()) {
+        if (!container.project) continue;
+        byProject.set(container.project, [...(byProject.get(container.project) ?? []), container]);
+      }
+    } catch {
+      // Docker is unreachable. Do NOT fall back to an empty container list — that would
+      // make `rollUpStatus` report `down` with "N missing", painting every app red and
+      // telling the user their whole NAS is broken. `unknown` is the truth: we do not know.
+      dockerReachable = false;
     }
 
     return Promise.all(
       rows.map(async (row) => {
+        if (!dockerReachable) {
+          const status = { status: "unknown" as const, detail: "Docker is unreachable" };
+          return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
+        }
         const status = await statusFor(row, byProject.get(row.projectName ?? "") ?? []);
         return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
       }),

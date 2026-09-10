@@ -346,4 +346,123 @@ describe("app inventory API", () => {
     expect(asAdmin[0].statusDetail).toBe(secret);
     await app.close();
   });
+
+  it("survives one app's compose file going missing and does not 500 the list", async () => {
+    // The compose root is an SMB share the user edits over SSH, so a renamed file is
+    // ordinary operation. Without a guard, `composeConfig.resolve` rejects and
+    // `Promise.all` propagates it, so the whole list 500s and the admin sees no apps.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.files.set("sonarr/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "p", services: { web: { image: "nginx" } } }),
+      stderr: "",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin", "sonarr"] },
+    });
+
+    // One compose file disappears.
+    app.deps.host.files.delete("jellyfin/compose.yaml");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const apps = res.json();
+    expect(apps).toHaveLength(2);
+
+    const broken = apps.find((a: { directory: string }) => a.directory === "jellyfin");
+    const healthy = apps.find((a: { directory: string }) => a.directory === "sonarr");
+
+    expect(broken.status).toBe("unknown");
+    // Admin sees the full error (adminDetail takes precedence in toAdminApp)
+    expect(broken.statusDetail).toContain("jellyfin/compose.yaml");
+    expect(healthy.status).not.toBe("unknown");
+    await app.close();
+  });
+
+  it("survives Docker being unreachable and marks all apps unknown, not down", async () => {
+    // A wedged Docker socket must not paint every app red. `unknown` is the truth: we do
+    // not know. Falling back to an empty container list would make `rollUpStatus` report
+    // `down` with "N missing", which tells the user their whole NAS is broken.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jf", services: { web: { image: "nginx" } } }),
+      stderr: "",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin"] },
+    });
+
+    // Simulate Docker being unreachable.
+    const originalListContainers = app.deps.host.listContainers.bind(app.deps.host);
+    app.deps.host.listContainers = async () => {
+      throw new Error("Cannot connect to the Docker daemon");
+    };
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const apps = res.json();
+    expect(apps).toHaveLength(1);
+    expect(apps[0].status).toBe("unknown");
+    // The whole point: it must NOT be `down`.
+    expect(apps[0].status).not.toBe("down");
+    expect(apps[0].statusDetail).toContain("Docker is unreachable");
+
+    app.deps.host.listContainers = originalListContainers;
+    await app.close();
+  });
+
+  it("does not leak filesystem paths to viewers when Docker is unreachable", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jf", services: {} }),
+      stderr: "",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin"] },
+    });
+    const viewer = await createViewer(app, cookie);
+
+    // One app's compose file goes missing.
+    app.deps.host.files.delete("jellyfin/compose.yaml");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie: viewer.cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    const apps = res.json();
+    expect(apps).toHaveLength(1);
+    expect(apps[0].status).toBe("unknown");
+    // No filesystem path leaks to the viewer.
+    expect(apps[0].statusDetail).not.toContain("/");
+    expect(apps[0].statusDetail).toBe("compose file could not be read");
+    await app.close();
+  });
 });
