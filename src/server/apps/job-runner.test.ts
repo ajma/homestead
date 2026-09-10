@@ -222,4 +222,44 @@ describe("JobRunner", () => {
     // resolve is a cache hit and this is `afterFirstResolve + 1`.
     expect(host.composeCalls.length).toBe(afterFirstResolve + 2);
   });
+
+  it("does not emit unhandled rejection when job bookkeeping fails and done is never awaited", async () => {
+    // The terminal case for a single-process appliance: click Deploy, do not open the log
+    // pane, and let the status update hit SQLITE_BUSY or a full disk. Without a catch,
+    // the rejection is unhandled and Node's default is to terminate the process.
+    const { db, host, row, userId, runner } = await seed();
+    host.composeResults.set("up -d", { exitCode: 0, stdout: "ok\n", stderr: "" });
+
+    let rejection: unknown = null;
+    const onRejection = (reason: unknown) => {
+      rejection = reason;
+    };
+    process.on("unhandledRejection", onRejection);
+
+    try {
+      const original = db.update.bind(db);
+      let callCount = 0;
+      // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+      (db as any).update = (table: unknown) => {
+        callCount++;
+        // Fail the second update (the graceUntil write on the apps table).
+        if (callCount === 2) {
+          throw new Error("SQLITE_BUSY");
+        }
+        return original(table as never);
+      };
+
+      const job = await runner.start(row, "up", userId);
+      // Do not await job.done — simulates user closing the log pane before the job finishes.
+      // Wait long enough for the job to complete internally.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).update = original;
+
+      expect(rejection).toBeNull();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
 });

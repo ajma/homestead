@@ -53,4 +53,16 @@ const app = await buildApp({
   images,
 });
 
+// A single-process appliance on a NAS should log and keep serving rather than vanish.
+// The JobRunner.finish catch is the real fix for item 1; these are defence in depth so
+// that the next unhandled rejection someone introduces produces a log line rather than
+// a mystery restart.
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[process] Unhandled rejection at:", promise, "reason:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[process] Uncaught exception:", error);
+});
+
 await app.listen({ port: config.port, host: "0.0.0.0" });

@@ -146,6 +146,10 @@ export class JobRunner {
         .update(apps)
         .set({ graceUntil: Math.floor(Date.now() / 1000) + GRACE_SECONDS })
         .where(eq(apps.id, app.id));
+    } catch (error) {
+      // A job whose bookkeeping failed is a job with a stale row — a much smaller problem
+      // than letting the rejection go unhandled and terminate the process. Log and swallow.
+      console.error(`[job-runner] Failed to update job ${job.id}:`, error);
     } finally {
       // Always, or a failed job wedges the app until restart.
       this.running.delete(app.id);
