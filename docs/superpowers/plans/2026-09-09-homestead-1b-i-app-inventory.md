@@ -16,7 +16,7 @@
 Every task's requirements implicitly include this section.
 
 - **Node 24, pnpm 12.** Newest stable major of every dependency; no RCs or betas.
-- **TypeScript:** ESM only, `strict: true`, `noUncheckedIndexedAccess: true`, `moduleResolution: "bundler"`, `target: "ES2022"`. No CommonJS, no `require`. Local imports use `.js` extensions.
+- **TypeScript:** ESM only, `strict: true`, `noUncheckedIndexedAccess: true`, `moduleResolution: "bundler"`, `target: "ES2022"`, `lib` includes `ES2023`. No CommonJS, no `require`. Local imports use `.js` extensions. `lib` and `target` differ deliberately: `target` governs which syntax is downlevelled, `lib` declares which runtime methods exist, and every runtime this ships on has the ES2023 array methods.
 - **TypeScript 7 removed `baseUrl`.** Never add it; `paths` targets stay relative with `./`.
 - **Installed toolchain:** TypeScript 7.0.2, Vitest 5.0.0, Biome 2.5.12, Fastify 5.12.3, Better-Auth 1.7.3, Drizzle 0.45.2, dockerode 5.0.1, zod 4.5.4, Docker 29.8.0 with Compose v5.5.1.
 - **Biome's `noNonNullAssertion` is enforced.** No `!`, no rule suppressions.
@@ -1372,7 +1372,13 @@ function splitValue(rest: string): { value: string; comment: string } {
     }
     // Whitespace before the '#' is what makes it a comment rather than a literal.
     if (ch === '#' && (i === 0 || /\s/.test(rest[i - 1] ?? ''))) {
-      return { value: unquote(rest.slice(0, i).trim()), comment: rest.slice(i) }
+      // The comment starts at the whitespace, not at the '#'. Slicing from the '#'
+      // would make `upsertEnv` rebuild the line as `PUID=1001# the media user`, which
+      // compose does not read as a comment at all — the value would become the whole
+      // rest of the line on the next parse.
+      let start = i
+      while (start > 0 && /\s/.test(rest[start - 1] ?? '')) start--
+      return { value: unquote(rest.slice(0, start).trim()), comment: rest.slice(start) }
     }
   }
   return { value: unquote(rest.trim()), comment: '' }
