@@ -1,0 +1,223 @@
+import { and, eq } from "drizzle-orm";
+import type { FastifyInstance } from "fastify";
+import { ulid } from "ulid";
+import { z } from "zod";
+import { scanForApps } from "../apps/adoption.js";
+import { toAdminApp, toViewerApp } from "../apps/serialize.js";
+import { rollUpStatus } from "../apps/status.js";
+import { audit } from "../audit.js";
+import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
+import { LOCAL_HOST_ID } from "../bootstrap.js";
+import { apps } from "../db/schema.js";
+import type { ContainerSummary } from "../host/types.js";
+
+const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) });
+
+const patchBody = z.object({
+  displayName: z.string().min(1).optional(),
+  description: z.string().nullable().optional(),
+  iconRef: z.string().nullable().optional(),
+  category: z.string().nullable().optional(),
+  launchInternalUrl: z.string().nullable().optional(),
+  showOnLauncher: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
+});
+
+/** A URL-safe slug: lowercase, anything outside `[a-z0-9-]` dropped. */
+function normaliseSlug(directory: string): string {
+  return directory.toLowerCase().replace(/[^a-z0-9-]/g, "") || "app";
+}
+
+export async function appRoutes(app: FastifyInstance): Promise<void> {
+  const { db, host, composeConfig } = app.deps;
+
+  /**
+   * Current status for one app.
+   *
+   * `containers` is passed in by the list route, which fetches once for every app.
+   * Letting each row call `listContainers` itself meant one Docker API round trip per
+   * app on a screen that shows all of them — thirty on this NAS, every page load.
+   */
+  async function statusFor(row: typeof apps.$inferSelect, containers?: ContainerSummary[]) {
+    const target = { directory: row.directory, composeFile: row.composeFile };
+    const resolved = await composeConfig.resolve(target);
+    if (!resolved.valid) return { status: "unknown" as const, detail: resolved.message };
+    const found = containers ?? (await host.listContainers({ project: row.projectName ?? "" }));
+    return rollUpStatus(resolved.resolved.services, found);
+  }
+
+  /**
+   * A slug no other app on this host holds.
+   *
+   * `apps_host_slug` is unique, and `normaliseSlug` is lossy — `My Media` and
+   * `my-media` both become `mymedia`, as does any directory of pure punctuation via
+   * the `'app'` fallback. Without this, adopting the second one raises a constraint
+   * violation that surfaces as a 500 in the middle of a multi-directory adopt, losing
+   * the successes alongside it.
+   */
+  async function uniqueSlug(directory: string): Promise<string> {
+    const base = normaliseSlug(directory);
+    const rows = await db
+      .select({ slug: apps.slug })
+      .from(apps)
+      .where(eq(apps.hostId, LOCAL_HOST_ID));
+    const taken = new Set(rows.map((r) => r.slug));
+    if (!taken.has(base)) return base;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${base}-${n}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    // A thousand collisions on one base is not a real filesystem; fall back to
+    // something certainly unique rather than looping forever.
+    return `${base}-${ulid().toLowerCase()}`;
+  }
+
+  app.get("/api/apps/scan", async (request) => {
+    requireCapability(request, "app:config");
+    return scanForApps({ db, host, hostId: LOCAL_HOST_ID });
+  });
+
+  app.post("/api/apps/adopt", async (request, reply) => {
+    const ctx = requireCapability(request, "app:config");
+    const body = adoptBody.parse(request.body);
+
+    const adopted: unknown[] = [];
+    const failed: Array<{ directory: string; message: string }> = [];
+    let anyConflict = false;
+
+    for (const directory of body.directories) {
+      const existing = await db
+        .select()
+        .from(apps)
+        .where(and(eq(apps.hostId, LOCAL_HOST_ID), eq(apps.directory, directory)));
+      if (existing.length > 0) {
+        anyConflict = true;
+        failed.push({ directory, message: "already adopted" });
+        continue;
+      }
+
+      const discovered = (await host.listAppDirectories()).find((d) => d.directory === directory);
+      if (!discovered) {
+        failed.push({ directory, message: "no compose file found" });
+        continue;
+      }
+
+      const target = { directory, composeFile: discovered.composeFile };
+      const resolved = await composeConfig.resolve(target);
+      if (!resolved.valid) {
+        failed.push({ directory, message: resolved.message });
+        continue;
+      }
+
+      const { hash } = await host.readTextFile(`${directory}/${discovered.composeFile}`);
+      const id = ulid();
+      await db.insert(apps).values({
+        id,
+        hostId: LOCAL_HOST_ID,
+        slug: await uniqueSlug(directory),
+        displayName: directory,
+        directory,
+        composeFile: discovered.composeFile,
+        // From `docker compose config`, which already honours COMPOSE_PROJECT_NAME in
+        // the sibling .env. Deriving it from the directory name would be wrong.
+        projectName: resolved.resolved.projectName,
+        lastComposeHash: hash,
+      });
+
+      const [row] = await db.select().from(apps).where(eq(apps.id, id));
+      if (row) adopted.push(toAdminApp(row, await statusFor(row)));
+      await audit(db, ctx, {
+        action: "app.adopted",
+        targetType: "app",
+        targetId: id,
+        ip: request.ip,
+      });
+    }
+
+    if (adopted.length === 0) {
+      return reply.code(anyConflict ? 409 : 422).send({ adopted, failed });
+    }
+    return reply.code(201).send({ adopted, failed });
+  });
+
+  app.get("/api/apps", async (request) => {
+    const ctx = requireCapability(request, "app:read");
+    const rows = await db.select().from(apps).where(visibleAppsWhere(ctx));
+    const detailed = can(ctx, "app:config");
+
+    // One Docker call for the whole page, partitioned by project. The per-row
+    // alternative was a round trip per app on the screen that lists them all.
+    const byProject = new Map<string, ContainerSummary[]>();
+    for (const container of await host.listContainers()) {
+      if (!container.project) continue;
+      byProject.set(container.project, [...(byProject.get(container.project) ?? []), container]);
+    }
+
+    return Promise.all(
+      rows.map(async (row) => {
+        const status = await statusFor(row, byProject.get(row.projectName ?? "") ?? []);
+        return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
+      }),
+    );
+  });
+
+  app.get("/api/apps/:id", async (request, reply) => {
+    const ctx = requireCapability(request, "app:read");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const [row] = await db
+      .select()
+      .from(apps)
+      .where(and(eq(apps.id, id), visibleAppsWhere(ctx)));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+    const status = await statusFor(row);
+    return can(ctx, "app:config") ? toAdminApp(row, status) : toViewerApp(row, status);
+  });
+
+  app.patch("/api/apps/:id", async (request, reply) => {
+    const ctx = requireCapability(request, "app:config");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = patchBody.parse(request.body);
+
+    // Every field is optional, so `{}` parses cleanly — and Drizzle throws on an empty
+    // `set()`, which would surface as a 500 for what is really a no-op request.
+    if (Object.keys(body).length === 0) return reply.code(400).send({ error: "no_fields" });
+
+    const updated = await db
+      .update(apps)
+      .set(body)
+      .where(eq(apps.id, id))
+      .returning({ id: apps.id });
+    if (updated.length === 0) return reply.code(404).send({ error: "not_found" });
+
+    await audit(db, ctx, {
+      action: "app.updated",
+      targetType: "app",
+      targetId: id,
+      detail: body,
+      ip: request.ip,
+    });
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+    return toAdminApp(row, await statusFor(row));
+  });
+
+  app.delete("/api/apps/:id", async (request, reply) => {
+    const ctx = requireCapability(request, "app:config");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+    // `isSystem` marks the managed cloudflared stack, which Phase 2 owns.
+    if (row.isSystem) return reply.code(409).send({ error: "system_app" });
+
+    // Forgetting an app never touches its files or containers.
+    await db.delete(apps).where(eq(apps.id, id));
+    await audit(db, ctx, {
+      action: "app.forgotten",
+      targetType: "app",
+      targetId: id,
+      ip: request.ip,
+    });
+    return reply.code(204).send();
+  });
+}

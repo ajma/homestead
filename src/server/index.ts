@@ -1,4 +1,5 @@
 import { buildApp } from "./app.js";
+import { ComposeConfigCache } from "./apps/compose-config.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost, LOCAL_HOST_ID } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -26,6 +27,7 @@ const host = new LocalHost(LOCAL_HOST_ID, config.composeRoot, config.dockerSocke
 await host.init();
 
 const auth = createAuth(config, db);
+const composeConfig = new ComposeConfigCache(host);
 
 const app = await buildApp({
   config,
@@ -33,6 +35,7 @@ const app = await buildApp({
   host,
   secrets: new SecretStore(db, config.secretKey),
   auth,
+  composeConfig,
 });
 
 await app.listen({ port: config.port, host: "0.0.0.0" });

@@ -1,5 +1,8 @@
+import type { FastifyInstance } from "fastify";
 import { buildApp } from "./app.js";
+import { ComposeConfigCache } from "./apps/compose-config.js";
 import { createAuth } from "./auth/auth.js";
+import { ensureLocalHost } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -35,6 +38,7 @@ export class FakeHost implements Host {
   composeResults = new Map<string, ComposeResult>();
   composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
   readTextFileErrors = new Map<string, Error>();
+  listContainersCalls = 0;
 
   async listAppDirectories(): Promise<DiscoveredDir[]> {
     const directories = new Set<string>();
@@ -79,6 +83,7 @@ export class FakeHost implements Host {
   }
 
   async listContainers(filters?: { project?: string }): Promise<ContainerSummary[]> {
+    this.listContainersCalls++;
     if (!filters?.project) return this.containers;
     return this.containers.filter((c) => c.project === filters.project);
   }
@@ -119,8 +124,53 @@ export async function buildTestApp() {
   });
   const { db } = await createDb(":memory:");
   await runMigrations(db);
+  await ensureLocalHost(db, config);
   const secrets = new SecretStore(db, config.secretKey);
   const host = new FakeHost();
   const auth = createAuth(config, db);
-  return buildApp({ config, db, host, secrets, auth });
+  const composeConfig = new ComposeConfigCache(host);
+  return buildApp({ config, db, host, secrets, auth, composeConfig });
+}
+
+const TEST_PASSWORD = "correct-horse-battery";
+
+export async function signUpAdmin(app: FastifyInstance) {
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/setup/admin",
+    payload: { email: "admin@example.com", password: TEST_PASSWORD, name: "Admin" },
+  });
+  const cookie = String(res.headers["set-cookie"] ?? "").split(";")[0] ?? "";
+  const me = await app.inject({ method: "GET", url: "/api/me", headers: { cookie } });
+  return { cookie, id: me.json().id as string };
+}
+
+export async function createViewer(
+  app: FastifyInstance,
+  adminCookie: string,
+  scope: { scopeAllApps: boolean; appIds?: string[] } = { scopeAllApps: true },
+) {
+  const email = `viewer-${Math.random().toString(36).slice(2)}@example.com`;
+  const created = await app.inject({
+    method: "POST",
+    url: "/api/users",
+    headers: { cookie: adminCookie },
+    payload: {
+      email,
+      password: TEST_PASSWORD,
+      name: "Viewer",
+      role: "viewer",
+      scopeAllApps: scope.scopeAllApps,
+      appIds: scope.appIds ?? [],
+    },
+  });
+  const signIn = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-in/email",
+    payload: { email, password: TEST_PASSWORD },
+  });
+  return {
+    id: created.json().id as string,
+    cookie: String(signIn.headers["set-cookie"] ?? "").split(";")[0] ?? "",
+  };
 }
