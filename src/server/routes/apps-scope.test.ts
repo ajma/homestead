@@ -1,0 +1,94 @@
+import { buildTestApp, signUpAdmin } from "@server/test-helpers";
+import { describe, expect, it } from "vitest";
+
+describe("app scope enforcement", () => {
+  // Every route that loads an app by id must respect the scope predicate. A scoped
+  // principal with an empty allowlist should get 404 from all of them, not 403 (which
+  // would confirm that an app they may not see exists), and never a body carrying secrets.
+
+  const ROUTES = [
+    { method: "GET", path: "/api/apps/:id", desc: "detail" },
+    { method: "PATCH", path: "/api/apps/:id", desc: "update", payload: { displayName: "New" } },
+    { method: "DELETE", path: "/api/apps/:id", desc: "delete" },
+    { method: "GET", path: "/api/apps/:id/compose", desc: "read compose" },
+    {
+      method: "PUT",
+      path: "/api/apps/:id/compose",
+      desc: "write compose",
+      payload: { content: "services: {}\n", expectedHash: null },
+    },
+    {
+      method: "POST",
+      path: "/api/apps/:id/compose/validate",
+      desc: "validate compose",
+      payload: { content: "services: {}\n" },
+    },
+    { method: "GET", path: "/api/apps/:id/env", desc: "read env" },
+    { method: "POST", path: "/api/apps/:id/env/reveal", desc: "reveal env" },
+    {
+      method: "PUT",
+      path: "/api/apps/:id/env",
+      desc: "write env",
+      payload: { content: "FOO=bar\n", expectedHash: null },
+    },
+  ];
+
+  for (const route of ROUTES) {
+    it(`${route.method} ${route.path} (${route.desc}) returns 404 for out-of-scope app`, async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+
+      // Adopt an app as the admin.
+      app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "jellyfin", services: {} }),
+        stderr: "",
+      });
+      const adopted = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["jellyfin"] },
+      });
+      const appId = adopted.json().adopted[0].id;
+
+      // Create a scoped admin with an empty allowlist.
+      const scopedEmail = `scoped-${Math.random().toString(36).slice(2)}@example.com`;
+      await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: scopedEmail,
+          password: "correct-horse-battery",
+          name: "Scoped Admin",
+          role: "admin",
+          scopeAllApps: false,
+          appIds: [],
+        },
+      });
+      const signIn = await app.inject({
+        method: "POST",
+        url: "/api/auth/sign-in/email",
+        payload: { email: scopedEmail, password: "correct-horse-battery" },
+      });
+      const scopedCookie = String(signIn.headers["set-cookie"] ?? "").split(";")[0] ?? "";
+
+      const res = await app.inject({
+        method: route.method,
+        url: route.path.replace(":id", appId),
+        headers: { cookie: scopedCookie },
+        payload: route.payload,
+      });
+
+      // Out of scope is 404, not 403, so the response does not confirm an app exists.
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: "not_found" });
+      // Never leak secrets in the body.
+      expect(JSON.stringify(res.json())).not.toContain("hunter2");
+
+      await app.close();
+    });
+  }
+});

@@ -7,6 +7,7 @@ import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { rollUpStatus } from "../apps/status.js";
 import { audit } from "../audit.js";
+import type { AuthContext } from "../auth/context.js";
 import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
 import { LOCAL_HOST_ID } from "../bootstrap.js";
 import { apps } from "../db/schema.js";
@@ -37,6 +38,18 @@ function normaliseSlug(directory: string): string {
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   const { db, host, composeConfig } = app.deps;
+
+  /**
+   * The single way a route loads an app. Composing `visibleAppsWhere` here rather than at
+   * ten call sites is the point: a route that forgets it cannot be spotted by reading the
+   * route, only by reading all ten and noticing one is different. Out of scope is 404, not
+   * 403 — the same answer as a genuinely absent id, so the response does not confirm that
+   * an app the caller may not see exists.
+   */
+  async function loadApp(ctx: AuthContext, id: string) {
+    const [row] = await db.select().from(apps).where(and(eq(apps.id, id), visibleAppsWhere(ctx)));
+    return row;
+  }
 
   /**
    * Resolves candidate compose content without touching the app's real file.
@@ -292,10 +305,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/apps/:id", async (request, reply) => {
     const ctx = requireCapability(request, "app:read");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const [row] = await db
-      .select()
-      .from(apps)
-      .where(and(eq(apps.id, id), visibleAppsWhere(ctx)));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     const status = await statusFor(row);
     return can(ctx, "app:config") ? toAdminApp(row, status) : toViewerApp(row, status);
@@ -309,6 +319,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // Every field is optional, so `{}` parses cleanly — and Drizzle throws on an empty
     // `set()`, which would surface as a 500 for what is really a no-op request.
     if (Object.keys(body).length === 0) return reply.code(400).send({ error: "no_fields" });
+
+    // Check scope before the update.
+    if (!(await loadApp(ctx, id))) return reply.code(404).send({ error: "not_found" });
 
     const updated = await db
       .update(apps)
@@ -324,7 +337,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       detail: body,
       ip: request.ip,
     });
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     return toAdminApp(row, await statusFor(row));
   });
@@ -333,7 +346,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const ctx = requireCapability(request, "app:config");
     const { id } = z.object({ id: z.string() }).parse(request.params);
 
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     // `isSystem` marks the managed cloudflared stack, which Phase 2 owns.
     if (row.isSystem) return reply.code(409).send({ error: "system_app" });
@@ -350,9 +363,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/apps/:id/compose", async (request, reply) => {
-    requireCapability(request, "app:config");
+    const ctx = requireCapability(request, "app:config");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     return host.readTextFile(`${row.directory}/${row.composeFile}`);
   });
@@ -362,7 +375,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = composeWriteBody.parse(request.body);
 
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     const relative = `${row.directory}/${row.composeFile}`;
@@ -397,11 +410,11 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/api/apps/:id/compose/validate", async (request, reply) => {
-    requireCapability(request, "app:config");
+    const ctx = requireCapability(request, "app:config");
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ content: z.string() }).parse(request.body);
 
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     return validateContent(row.directory, body.content);
@@ -413,9 +426,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   } as const;
 
   app.get("/api/apps/:id/env", async (request, reply) => {
-    requireCapability(request, "app:config");
+    const ctx = requireCapability(request, "app:config");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     const file = await readEnv(row.directory);
@@ -427,7 +440,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/apps/:id/env/reveal", async (request, reply) => {
     const ctx = requireCapability(request, "app:secrets");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     const file = await readEnv(row.directory);
@@ -449,7 +462,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = composeWriteBody.parse(request.body);
 
-    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    const row = await loadApp(ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     // Refuse rather than overwrite. `writeTextFile` cannot tell an unreadable file from
