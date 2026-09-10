@@ -172,6 +172,43 @@ describe("lifecycle routes", () => {
     await app.close();
   });
 
+  it("closes the stream and reports the error when the job output throws", async () => {
+    // After hijack() Fastify cannot report an error — the headers are already out — so
+    // an unguarded throw leaves the stream open and its 25s heartbeat firing for the
+    // life of the process, one timer per abandoned stream.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.composeResults.set("up -d", { exitCode: 0, stdout: "x", stderr: "" });
+    app.deps.host.gateCompose();
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/up`,
+      headers: { cookie },
+    });
+    const jobId = started.json().jobId;
+    const live = app.deps.jobs.live(jobId);
+    if (live) {
+      Object.defineProperty(live, "output", {
+        value: {
+          async *[Symbol.asyncIterator]() {
+            yield { text: "partial", stream: "stdout" as const };
+            throw new Error("stream exploded");
+          },
+        },
+      });
+    }
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}/stream`,
+      headers: { cookie },
+    });
+    // It completed rather than hanging, and said what happened.
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("partial");
+    expect(res.body).toContain("event: error");
+    app.deps.host.releaseCompose();
+    await app.close();
+  });
+
   it("returns 404 streaming a job id that does not exist", async () => {
     const { app, cookie } = await withApp();
     const res = await app.inject({

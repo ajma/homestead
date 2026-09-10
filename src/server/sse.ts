@@ -35,11 +35,18 @@ export function sseResponse(request: FastifyRequest, reply: FastifyReply) {
   };
 
   const closed = new Promise<void>((resolve) => {
-    request.raw.on("close", () => {
+    const finish = () => {
       open = false;
       clearInterval(heartbeat);
       resolve();
-    });
+    };
+    // Both ends, and `error` as well as `close`. A socket that errors without emitting
+    // `close` would otherwise leave the heartbeat firing every 25s for the life of the
+    // process — one leaked timer per abandoned stream, still writing to a dead socket.
+    request.raw.on("close", finish);
+    request.raw.on("error", finish);
+    reply.raw.on("close", finish);
+    reply.raw.on("error", finish);
   });
 
   return {

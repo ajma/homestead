@@ -88,23 +88,38 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
       return;
     }
 
+    // `disconnected` is only consulted when a chunk arrives, so a client leaving during
+    // a silent stretch of a ten-minute `pull` is not noticed until the next chunk or the
+    // job's end. That holds one request object, a few KB, for the remainder — accepted
+    // rather than racing the iteration against `sse.closed`, which needs a second promise
+    // per chunk to save almost nothing.
     let disconnected = false;
     void sse.closed.then(() => {
       disconnected = true;
     });
 
-    for await (const chunk of live.output) {
-      if (disconnected) break;
-      sse.send("output", chunk);
-    }
-    await live.done;
+    // Everything after the hijack goes in a try/finally. Fastify no longer owns the
+    // reply, so a throw here reaches `setErrorHandler`, which calls `reply.send()` on a
+    // socket whose headers have already gone out: it cannot report the error, and the
+    // stream is never closed, leaving the heartbeat running forever.
+    try {
+      for await (const chunk of live.output) {
+        if (disconnected) break;
+        sse.send("output", chunk);
+      }
+      await live.done;
 
-    const [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-    sse.send("done", {
-      status: finished?.status ?? "failed",
-      exitCode: finished?.exitCode ?? null,
-    });
-    sse.close();
+      const [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+      sse.send("done", {
+        status: finished?.status ?? "failed",
+        exitCode: finished?.exitCode ?? null,
+      });
+    } catch (error) {
+      request.log.error({ err: error, jobId }, "job stream failed");
+      sse.send("error", { message: "The job stream ended unexpectedly." });
+    } finally {
+      sse.close();
+    }
     // No `return reply`: the reply is hijacked, so returning it would ask Fastify to
     // send a second response over a socket we have already written to and closed.
   });
