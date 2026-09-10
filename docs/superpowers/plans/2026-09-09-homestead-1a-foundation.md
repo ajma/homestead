@@ -498,6 +498,10 @@ export const users = sqliteTable('users', {
   // Homestead additional fields. `role` and `scopeAllApps` are server-owned.
   role: text('role', { enum: ['admin', 'viewer'] }).notNull().default('viewer'),
   scopeAllApps: integer('scope_all_apps', { mode: 'boolean' }).notNull().default(true),
+  // MILLISECONDS, not seconds. Better-Auth owns this table and writes createdAt /
+  // updatedAt in ms (measured: 1789007946623). Homestead's own tables use unixepoch()
+  // seconds. Writing seconds here would put two units in adjacent columns of one row,
+  // off by 1000x. Every Homestead write to a Better-Auth table uses ms.
   disabledAt: integer('disabled_at'),
   createdAt: integer('created_at').notNull().default(now),
   updatedAt: integer('updated_at').notNull().default(now),
@@ -3166,7 +3170,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         ...(body.role !== undefined ? { role: body.role } : {}),
         ...(body.scopeAllApps !== undefined ? { scopeAllApps: body.scopeAllApps } : {}),
         ...(body.disabled !== undefined
-          ? { disabledAt: body.disabled ? Math.floor(Date.now() / 1000) : null }
+          // Milliseconds: `users` is a Better-Auth table and its other timestamps are ms.
+          ? { disabledAt: body.disabled ? Date.now() : null }
           : {}),
       })
       .where(eq(users.id, id))
