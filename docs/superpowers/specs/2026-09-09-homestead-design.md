@@ -167,8 +167,7 @@ that day was it up".
 
 ### `exposures`
 
-`id, appId, hostname, zoneId, dnsRecordId, tunnelId, originMode('host_port'|'container_name'),
-ingressService, networkAlias, accessAppId, accessAppAud,
+`id, appId, hostname, zoneId, dnsRecordId, tunnelId, ingressService, accessAppId, accessAppAud,
 state('provisioning'|'ready'|'error'|'drifted'), lastError, lastSyncedAt`
 
 Plus three ownership flags — `dnsRecordCreatedByUs`, `ingressRuleCreatedByUs`,
@@ -438,39 +437,31 @@ It then writes `/volume2/docker/cloudflared/` as an ordinary Homestead-managed a
 `cloudflare/cloudflared` with `tunnel --no-autoupdate run`, tunnel token in its `.env`. It
 appears on the dashboard with a docker probe and logs, flagged `isSystem`.
 
-### cloudflared networking and origin modes
+### cloudflared networking
 
-cloudflared is **not** run with `network_mode: host`. Host networking would place it outside
-Docker's embedded DNS — container names would be unresolvable — and the mode is exclusive, so
-the container could not also join a bridge network. Instead:
+cloudflared runs with **`network_mode: host`**, and `ingressService` is
+`http://localhost:<published-port>`.
 
-- cloudflared joins a dedicated external bridge network, **`homestead-edge`**, created and owned
-  by Homestead.
-- It also gets `extra_hosts: ["host.docker.internal:host-gateway"]` (verified on the target
-  machine: resolves to `172.17.0.1`).
+This follows from a requirement that holds independently of Cloudflare: **apps publish their
+ports so other devices on the LAN can reach them directly** — a TV streamer hitting Jellyfin, a
+phone reaching Home Assistant. Given published ports exist anyway, routing the tunnel through
+them costs nothing and keeps the promise that adopting a hand-maintained stack changes nothing
+about it. Container-name origins were considered and rejected: they would require an additive
+compose edit and a container recreate per app, and their main advantage — an app needing no
+published port — is void when ports are published for LAN clients regardless.
 
-This supports two origin modes, recorded per exposure as `originMode`:
+The same published ports serve three consumers: LAN devices, the `http_internal` probe, and the
+launcher's internal URL. One fact about an app rather than three.
 
-| Mode | `ingressService` | Requires |
-|---|---|---|
-| `host_port` (default) | `http://host.docker.internal:<published-port>` | Nothing — works with any adopted stack unchanged |
-| `container_name` | `http://<alias>:<container-port>` | The app's service joins `homestead-edge` |
+Two consequences, accepted:
 
-`host_port` keeps the promise that adopting a hand-maintained stack changes nothing about it.
+- The tunnel container can reach anything on the NAS and its LAN, so **the ingress rule list is
+  the effective boundary** on what is exposed. Homestead owns that list exclusively.
+- Externally exposed apps remain reachable on the LAN without passing through Access. This is
+  intended: Access protects the internet-facing path, not the local network.
 
-`container_name` requires an additive edit to that app's compose file — declaring
-`homestead-edge` as an external network and attaching the target service to it — which Homestead
-performs only with explicit approval, through the same hash-guarded write path as the editor.
-Joining a new network recreates the container, so exposing an app in this mode restarts it once.
-
-**Each service attached to `homestead-edge` is given an explicit network alias derived from the
-app slug.** Compose otherwise makes services resolvable by their service name, and service names
-collide freely across stacks — two projects each containing a `web` service would be
-indistinguishable on a shared network.
-
-`container_name` is the better mode where it is available: the app needs no published host port
-at all, so it becomes reachable *only* through the tunnel. It also narrows what cloudflared can
-reach, which host networking left wide open.
+Host networking also means non-Docker services on the NAS can be exposed through the same tunnel
+if wanted, since cloudflared can address any local port.
 
 ### Exposing an app
 
@@ -878,8 +869,8 @@ editor; resource metrics (likely never — Prometheus does it better).
 | Read-only container detail panel instead | Most of the diagnostic value, no new risk, works on distroless |
 | SSE throughout, no websockets | Nothing needs bidirectional transport once exec is gone; passes Access cleanly |
 | Remotely-managed tunnel | Ingress changes need no restart, defusing the self-lock hazard |
-| cloudflared on a shared `homestead-edge` bridge + `host-gateway`, not `network_mode: host` | Host networking blocks container-name DNS and is exclusive; this supports both origin modes at once |
-| Two origin modes per exposure, `host_port` default | Adopted stacks work untouched; `container_name` available where an additive compose edit is acceptable |
+| Apps publish host ports | LAN devices (e.g. a TV streamer) must reach apps directly, independent of Cloudflare |
+| `network_mode: host` for cloudflared, `localhost:<port>` origins | Published ports exist anyway, so container-name origins buy nothing and would cost a compose edit and recreate per app |
 | Startup preflight round-trips a marker file through the daemon | A wrong mount path is silent — Docker creates an empty dir — and looks like data loss |
 | Cookie `Secure` conditional on HTTPS, not forced | Homestead is reachable over plain HTTP on the LAN by design; forcing it breaks LAN login |
 | One shared monitor service token + reusable policy | Single rotation operation instead of N |
