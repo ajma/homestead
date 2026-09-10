@@ -285,7 +285,13 @@ git commit -m "Resolve the project name per request instead of trusting the stor
 - Create: `src/server/monitoring/status-pattern.ts`, `src/server/monitoring/status-pattern.test.ts`
 
 **Interfaces:**
-- Produces: `export function matchesStatusPattern(pattern: string, status: number): boolean`
+- Produces:
+
+```ts
+export function matchesStatusPattern(pattern: string, status: number): boolean
+/** Whether a pattern has at least one usable term. For validating user input. */
+export function isValidStatusPattern(pattern: string): boolean
+```
 
 The spec calls it "a comma-separated list of literal codes and `Nxx` classes — e.g. `2xx,3xx` or
 `200,204,301`". Pure, and worth its own file because every HTTP probe's verdict routes through
@@ -333,6 +339,18 @@ describe('matchesStatusPattern', () => {
     expect(matchesStatusPattern('banana,2xx', 404)).toBe(false)
   })
 
+  it('validates a pattern independently of any status', () => {
+    // The matcher fails closed, which is right — but a user who types `2x` for `2xx`
+    // then sees their app go red with nothing saying the pattern is the problem. The
+    // probe API rejects it at the point they type it instead.
+    for (const good of ['2xx', '2xx,3xx', '200', '200,204,301', ' 2XX , 301 ']) {
+      expect(isValidStatusPattern(good), good).toBe(true)
+    }
+    for (const bad of ['', '   ', ',,,', 'banana', '2x', '20', '6xx', '1000']) {
+      expect(isValidStatusPattern(bad), bad).toBe(false)
+    }
+  })
+
   it('does not treat a class as a prefix match', () => {
     // `2xx` must not match 2, 20, or 2000.
     for (const status of [2, 20, 2000]) {
@@ -358,24 +376,42 @@ Expected: FAIL — module not found.
  * and the user investigates. The opposite mistake — matching everything — reports a dead
  * app as healthy indefinitely, which nobody ever notices.
  */
+const CLASS_TERM = /^([1-5])xx$/
+const LITERAL_TERM = /^[1-5][0-9]{2}$/
+
+/** The terms a pattern contains, ignoring blanks and anything unparseable. */
+function usableTerms(pattern: string): string[] {
+  return pattern
+    .split(',')
+    .map((raw) => raw.trim().toLowerCase())
+    .filter((term) => CLASS_TERM.test(term) || LITERAL_TERM.test(term))
+}
+
 export function matchesStatusPattern(pattern: string, status: number): boolean {
   if (!Number.isInteger(status) || status < 100 || status > 599) return false
 
-  for (const raw of pattern.split(',')) {
-    const term = raw.trim().toLowerCase()
-    if (term === '') continue
-
-    const asClass = /^([1-5])xx$/.exec(term)
+  for (const term of usableTerms(pattern)) {
+    const asClass = CLASS_TERM.exec(term)
     if (asClass) {
       if (Math.floor(status / 100) === Number(asClass[1])) return true
       continue
     }
-
-    // A literal code, and only a three-digit one: `20` should not match anything.
-    if (/^[1-5][0-9]{2}$/.test(term) && Number(term) === status) return true
+    if (Number(term) === status) return true
   }
 
   return false
+}
+
+/**
+ * Whether a pattern would ever match anything.
+ *
+ * The matcher failing closed is right at runtime, but on its own it means a user who
+ * types `2x` for `2xx` watches their app go red with nothing saying the pattern is at
+ * fault. The probe API calls this when they type it, so the mistake is caught where it
+ * can still be explained.
+ */
+export function isValidStatusPattern(pattern: string): boolean {
+  return usableTerms(pattern).length > 0
 }
 ```
 
@@ -414,7 +450,7 @@ export type TransitionInput = {
 }
 
 export type TransitionOutput = {
-  status: 'up' | 'degraded' | 'down' | 'starting'
+  status: 'up' | 'degraded' | 'down' | 'starting' | 'unknown'
   consecutiveFailures: number
   statusSince: number
   /** True only when `status` differs from `state.lastStatus`. Drives the SSE fan-out. */
@@ -531,6 +567,24 @@ describe('applyTransition', () => {
     const out = run({ observed: 'up', state: state({ lastStatus: 'unknown', statusSince: null }) })
     expect(out).toMatchObject({ status: 'up', changed: true, statusSince: NOW })
   })
+
+  it('holds unknown, not starting, for an unconfirmed first failure', () => {
+    // Nothing is starting — the probe has simply not confirmed a failure yet. Saying
+    // `starting` implies a deploy the user did not do, and the launcher already has a
+    // rendering for unknown.
+    const out = run({ observed: 'down', state: state({ lastStatus: 'unknown', statusSince: null }) })
+    expect(out).toMatchObject({ status: 'unknown', consecutiveFailures: 1, changed: false })
+  })
+
+  it('keeps statusSince moving when a restart begins', () => {
+    // A review called this a false outage record. It is not: the status is `starting`,
+    // not `down`, and "the restart you initiated is never reported as an outage" is
+    // delivered by that value. `statusSince` means "the current status began at", so
+    // freezing it would have a restarting app claim it has been starting since whenever
+    // it was last healthy — wrong in a way the timeline cannot recover from.
+    const out = run({ observed: 'down', graceUntil: NOW + 60, state: state({ statusSince: NOW - 5000 }) })
+    expect(out).toMatchObject({ status: 'starting', statusSince: NOW, changed: true })
+  })
 })
 ```
 
@@ -557,7 +611,7 @@ export type TransitionInput = {
 }
 
 export type TransitionOutput = {
-  status: 'up' | 'degraded' | 'down' | 'starting'
+  status: 'up' | 'degraded' | 'down' | 'starting' | 'unknown'
   consecutiveFailures: number
   statusSince: number
   changed: boolean
@@ -593,9 +647,10 @@ export function applyTransition(input: TransitionInput): TransitionOutput {
   } else if (consecutiveFailures >= failureThreshold) {
     status = observed
   } else {
-    // Not yet confirmed. Hold whatever we were showing, unless we have never shown
-    // anything — an unknown probe should not report `up` on its first failed check.
-    status = state.lastStatus === 'unknown' ? 'starting' : state.lastStatus
+    // Not yet confirmed: hold whatever we were showing. A probe that has never reported
+    // anything holds `unknown` rather than claiming `starting` — nothing is starting, we
+    // simply have not confirmed a failure yet, and the launcher already renders unknown.
+    status = state.lastStatus === 'unknown' ? 'unknown' : state.lastStatus
   }
 
   const changed = status !== state.lastStatus
@@ -2296,6 +2351,7 @@ import { ulid } from 'ulid'
 import { z } from 'zod'
 import { requireCapability } from '../auth/context.js'
 import { probes } from '../db/schema.js'
+import { isValidStatusPattern } from '../monitoring/status-pattern.js'
 import { loadApp } from './apps.js'
 
 /** The server fetches this URL. Anything but http(s) is an SSRF primitive. */
@@ -2313,7 +2369,9 @@ const createBody = z
     kind: z.enum(['docker', 'http_internal', 'http_external']),
     target: targetSchema.optional(),
     label: z.string().min(1).optional(),
-    expectedStatusPattern: z.string().min(1).optional(),
+    // Validated here, not just matched at runtime. The matcher fails closed, so `2x`
+    // silently takes the app red with nothing saying the pattern is the problem.
+    expectedStatusPattern: z.string().refine(isValidStatusPattern, 'not a status pattern').optional(),
     timeoutMs: z.number().int().min(100).max(60_000).optional(),
     intervalSeconds: z.number().int().min(10).max(86_400).optional(),
     insecureTls: z.boolean().optional(),
@@ -2325,7 +2383,7 @@ const createBody = z
 const patchBody = z.object({
   label: z.string().min(1).nullable().optional(),
   target: targetSchema.optional(),
-  expectedStatusPattern: z.string().min(1).optional(),
+  expectedStatusPattern: z.string().refine(isValidStatusPattern, 'not a status pattern').optional(),
   timeoutMs: z.number().int().min(100).max(60_000).optional(),
   intervalSeconds: z.number().int().min(10).max(86_400).optional(),
   insecureTls: z.boolean().optional(),
