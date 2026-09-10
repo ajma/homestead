@@ -4,6 +4,9 @@ import type { Config } from "../config.js";
 import type { Db } from "../db/client.js";
 import { accounts, sessions, users, verifications } from "../db/schema.js";
 
+/** IP headers Better-Auth will read. Must be a subset of CLIENT_IP_HEADERS in app.ts. */
+export const IP_ADDRESS_HEADERS = ["x-forwarded-for"] as const;
+
 export function createAuth(config: Config, db: Db) {
   return betterAuth({
     baseURL: config.baseUrl,
@@ -14,6 +17,12 @@ export function createAuth(config: Config, db: Db) {
       schema: { user: users, session: sessions, account: accounts, verification: verifications },
     }),
     emailAndPassword: { enabled: true, requireEmailVerification: false },
+    rateLimit: {
+      // Explicit `enabled: true` so the guarantee does not depend on NODE_ENV. Without
+      // this, an operator who copies `.env.example` (which ships with NODE_ENV=development)
+      // gets no login rate limit, violating the design spec's Hygiene requirement.
+      enabled: true,
+    },
     user: {
       additionalFields: {
         // Server-owned. `input: false` prevents a request body from setting these.
@@ -29,7 +38,7 @@ export function createAuth(config: Config, db: Db) {
         // Exactly one header, and `app.ts` guarantees the client cannot set it: it
         // strips every client-supplied IP header and substitutes Fastify's
         // `request.ip`, which already honours the narrowed trustProxy allowlist.
-        ipAddressHeaders: ["x-forwarded-for"],
+        ipAddressHeaders: [...IP_ADDRESS_HEADERS],
         // `trustedProxies` is deliberately NOT set. It exists for deployments where
         // Better-Auth parses a real forwarded chain, and here it would do harm twice
         // over. It cannot help: `auth.handler` receives a Web API Request with no

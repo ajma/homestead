@@ -70,11 +70,13 @@ describe("authentication", () => {
       method: "POST",
       url: "/api/auth/sign-up/email",
       remoteAddress: "127.0.0.1",
+      // Simulate cloudflared (trusted proxy) providing the real client IP via x-forwarded-for
+      headers: { "x-forwarded-for": "192.168.1.100" },
       payload: { email: "local@example.com", password: "correct-horse-battery", name: "Local" },
     });
     const [session] = await app.deps.db.select().from(sessions);
     // Must not be null: a null IP drops Better-Auth's rate limiter into one shared bucket.
-    expect(session?.ipAddress).toBe("127.0.0.1");
+    expect(session?.ipAddress).toBe("192.168.1.100");
     await app.close();
   });
 

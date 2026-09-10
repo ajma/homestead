@@ -2,6 +2,7 @@ import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import { eq } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
+import { ZodError } from "zod";
 import type { Auth } from "./auth/auth.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
@@ -13,7 +14,37 @@ import { spaRoutes } from "./routes/spa.js";
 import { userRoutes } from "./routes/users.js";
 
 /** Headers a client must never be able to set on the request Better-Auth sees. */
-const CLIENT_IP_HEADERS = new Set(["x-forwarded-for", "x-real-ip", "cf-connecting-ip"]);
+export const CLIENT_IP_HEADERS = new Set(["x-forwarded-for", "x-real-ip", "cf-connecting-ip"]);
+
+/**
+ * Builds headers for Better-Auth with client-supplied IP headers stripped and replaced
+ * with exactly one authoritative value from Fastify's `request.ip`.
+ *
+ * Client-supplied IP headers are DROPPED, never forwarded. Better-Auth resolves the
+ * client IP from headers alone — `auth.handler` takes a Web API Request, which carries
+ * no connection peer, so its `trustedProxies` option can only walk the forwarded chain
+ * and cannot check who actually connected. Measured: a LAN peer sending
+ *   X-Forwarded-For: 203.0.113.99, 127.0.0.1
+ * had Better-Auth persist 203.0.113.99 as the session IP, because the walk skips the
+ * trusted tail and returns the first untrusted entry.
+ *
+ * Fastify has already computed the real peer in `request.ip`, honouring the narrowed
+ * `trustProxy` allowlist. So we substitute exactly one authoritative value and let
+ * nothing the client sent survive.
+ */
+function buildForwardedHeaders(
+  requestHeaders: Record<string, string | string[] | undefined>,
+  authoritativeIp: string,
+): Headers {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(requestHeaders)) {
+    if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue;
+    if (typeof value === "string") headers.set(key, value);
+    else if (Array.isArray(value)) headers.set(key, value.join(","));
+  }
+  headers.set("x-forwarded-for", authoritativeIp);
+  return headers;
+}
 
 export type AppDeps = { config: Config; db: Db; host: Host; secrets: SecretStore; auth: Auth };
 
@@ -51,27 +82,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     url: "/api/auth/*",
     async handler(request, reply) {
       const url = new URL(request.url, deps.config.baseUrl);
-      const headers = new Headers();
-
-      // Client-supplied IP headers are DROPPED, never forwarded.
-      //
-      // Better-Auth resolves the client IP from headers alone — `auth.handler` takes a
-      // Web API Request, which carries no connection peer, so its `trustedProxies`
-      // option can only walk the forwarded chain and cannot check who actually
-      // connected. Measured: a LAN peer sending
-      //   X-Forwarded-For: 203.0.113.99, 127.0.0.1
-      // had Better-Auth persist 203.0.113.99 as the session IP, because the walk skips
-      // the trusted tail and returns the first untrusted entry.
-      //
-      // Fastify has already computed the real peer in `request.ip`, honouring the
-      // narrowed `trustProxy` allowlist. So we substitute exactly one authoritative
-      // value and let nothing the client sent survive.
-      for (const [key, value] of Object.entries(request.headers)) {
-        if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue;
-        if (typeof value === "string") headers.set(key, value);
-        else if (Array.isArray(value)) headers.set(key, value.join(","));
-      }
-      headers.set("x-forwarded-for", request.ip);
+      const headers = buildForwardedHeaders(request.headers, request.ip);
       const response = await deps.auth.handler(
         new Request(url, {
           method: request.method,
@@ -88,17 +99,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   app.addHook("preHandler", async (request) => {
-    const headers = new Headers();
-    // Same IP-header discipline as the /api/auth/* route. `getSession` validates a cookie
-    // rather than an address today, so this is defence in depth — but Better-Auth resolves
-    // client IPs from headers in several places, and one inconsistent call site is how the
-    // forgery this codebase already fixed would come back.
-    for (const [key, value] of Object.entries(request.headers)) {
-      if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue;
-      if (typeof value === "string") headers.set(key, value);
-    }
-    headers.set("x-forwarded-for", request.ip);
-
+    const headers = buildForwardedHeaders(request.headers, request.ip);
     const session = await deps.auth.api.getSession({ headers });
     if (!session?.user) return;
 
@@ -122,18 +123,34 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     };
   });
 
-  await app.register(healthRoutes);
-  await app.register(userRoutes);
-  await app.register(spaRoutes);
-
+  // Custom error handler MUST be registered BEFORE route plugins. Fastify child contexts
+  // capture the parent's error handler at registration time, so a handler declared after
+  // `app.register(...)` does not apply inside those routes — they keep the default, which
+  // leaks raw error details to clients (including unredacted SQL and Zod schema dumps).
   app.setErrorHandler(async (error, request, reply) => {
     request.log.error({ err: error }, "request failed");
+
+    if (error instanceof ZodError) {
+      return reply.code(400).send({
+        error: "validation_failed",
+        message: "Request validation failed",
+        issues: error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+    }
+
     const status = (error as { statusCode?: number }).statusCode ?? 500;
     return reply.code(status).send({
       error: status === 500 ? "internal_error" : (error as Error).name,
       message: status === 500 ? "Internal server error" : (error as Error).message,
     });
   });
+
+  await app.register(healthRoutes);
+  await app.register(userRoutes);
+  await app.register(spaRoutes);
 
   return app;
 }
