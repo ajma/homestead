@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import type { ComposeConfigCache } from "./apps/compose-config.js";
+import type { JobRunner } from "./apps/job-runner.js";
 import type { Auth } from "./auth/auth.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
@@ -12,6 +13,7 @@ import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
 import { appRoutes } from "./routes/apps.js";
 import { healthRoutes } from "./routes/health.js";
+import { jobRoutes } from "./routes/jobs.js";
 import { spaRoutes } from "./routes/spa.js";
 import { userRoutes } from "./routes/users.js";
 
@@ -55,6 +57,7 @@ export type AppDeps = {
   secrets: SecretStore;
   auth: Auth;
   composeConfig: ComposeConfigCache;
+  jobs: JobRunner;
 };
 
 declare module "fastify" {
@@ -160,6 +163,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(healthRoutes);
   await app.register(userRoutes);
   await app.register(appRoutes);
+  await app.register(jobRoutes);
   await app.register(spaRoutes);
 
   return app;

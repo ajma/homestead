@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "./app.js";
 import { buildApp } from "./app.js";
 import { ComposeConfigCache } from "./apps/compose-config.js";
+import { JobRunner } from "./apps/job-runner.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -180,6 +181,8 @@ export class FakeHost implements Host {
       }
       for (const piece of splitIntoChunks(scripted.stdout, this.composeChunkCount)) {
         queue.push({ text: piece, stream: "stdout" });
+        // Yield to the event loop so streaming tests can attach mid-job.
+        await new Promise((resolve) => setImmediate(resolve));
       }
       if (scripted.stderr !== "") queue.push({ text: scripted.stderr, stream: "stderr" });
       queue.close();
@@ -210,7 +213,8 @@ export async function buildTestApp(): Promise<TestApp> {
   const host = new FakeHost();
   const auth = createAuth(config, db);
   const composeConfig = new ComposeConfigCache(host);
-  const app = await buildApp({ config, db, host, secrets, auth, composeConfig });
+  const jobs = new JobRunner({ db, host, composeConfig });
+  const app = await buildApp({ config, db, host, secrets, auth, composeConfig, jobs });
 
   // Assign each app instance its own source address to avoid rate-limit bucket
   // collisions. Better-Auth's sign-in rate limiter is process-global and keyed by IP.

@@ -1,5 +1,6 @@
 import { buildApp } from "./app.js";
 import { ComposeConfigCache } from "./apps/compose-config.js";
+import { JobRunner } from "./apps/job-runner.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost, LOCAL_HOST_ID } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -28,6 +29,7 @@ await host.init();
 
 const auth = createAuth(config, db);
 const composeConfig = new ComposeConfigCache(host);
+const jobs = new JobRunner({ db, host, composeConfig });
 
 const app = await buildApp({
   config,
@@ -36,6 +38,7 @@ const app = await buildApp({
   secrets: new SecretStore(db, config.secretKey),
   auth,
   composeConfig,
+  jobs,
 });
 
 await app.listen({ port: config.port, host: "0.0.0.0" });
