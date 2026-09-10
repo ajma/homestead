@@ -216,6 +216,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const failed: Array<{ directory: string; message: string }> = [];
     let anyConflict = false;
 
+    // Hoist listAppDirectories outside the loop - calling it once per directory was N round trips.
+    const allDiscovered = await host.listAppDirectories();
+
     for (const directory of body.directories) {
       const existing = await db
         .select()
@@ -227,7 +230,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
         continue;
       }
 
-      const discovered = (await host.listAppDirectories()).find((d) => d.directory === directory);
+      const discovered = allDiscovered.find((d) => d.directory === directory);
       if (!discovered) {
         failed.push({ directory, message: "no compose file found" });
         continue;

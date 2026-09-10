@@ -176,12 +176,7 @@ describe("compose file API", () => {
       stderr: 'service "web" depends on undefined service "db"',
     });
 
-    // Make cleanup fail for all scratch files.
-    app.deps.host.deleteFileErrors.set(
-      "jellyfin/.homestead-validate-PLACEHOLDER",
-      new Error("EACCES: permission denied"),
-    );
-    // Match any scratch file path by overriding the deleteFile method.
+    // Make cleanup fail for all scratch files by overriding deleteFile.
     const originalDelete = app.deps.host.deleteFile.bind(app.deps.host);
     app.deps.host.deleteFile = async (rel: string) => {
       if (rel.includes(".homestead-validate-")) {
