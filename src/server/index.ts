@@ -54,6 +54,12 @@ const scheduler = new Scheduler({
     http_internal: httpRunners.internal,
     http_external: httpRunners.external,
   },
+  onProbeError: (probeId, error) => {
+    // Not fatal: the scheduler moves on to the next probe. But a wedged database or a
+    // bad migration dropping results silently is exactly what this earns its keep by
+    // not doing — same reasoning as the registry client's `onError` above.
+    console.error(`[monitoring] probe ${probeId}:`, error);
+  },
 });
 
 const app = await buildApp({

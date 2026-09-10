@@ -146,6 +146,59 @@ describe("Scheduler.tick", () => {
     expect(peak).toBeLessThanOrEqual(8);
   });
 
+  it("writes one sample per probe when many run at once", async () => {
+    // The assertion the concurrency test does not make, and the one that matters.
+    // libSQL has a single connection, so overlapping `db.transaction()` calls fail with
+    // TRANSACTION_ACTIVE. Measured before persistence was serialised: three probes ran,
+    // the runner was called three times, and exactly ONE sample was written — the rest
+    // rejected into the per-probe catch while the tick reported success.
+    const { db, host } = await seed(12);
+    const failures: string[] = [];
+    const runner: ProbeRunner = {
+      kind: "docker",
+      async run() {
+        return { status: "up" };
+      },
+    };
+    const scheduler = new Scheduler({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      runners: { docker: runner, http_internal: runner, http_external: runner },
+      onProbeError: (probeId) => failures.push(probeId),
+      now: () => NOW,
+      random: () => 0.5,
+    });
+
+    expect(await scheduler.tick()).toBe(12);
+    expect(failures).toEqual([]);
+    expect(await db.select().from(checkResults)).toHaveLength(12);
+    const rows = await db.select().from(probes);
+    expect(rows.every((probe) => probe.lastStatus === "up")).toBe(true);
+  });
+
+  it("reports a probe failure rather than swallowing it", async () => {
+    const { db, host, ids } = await seed(1);
+    const failures: Array<[string, string]> = [];
+    const runner: ProbeRunner = {
+      kind: "docker",
+      async run() {
+        throw new Error("runner exploded");
+      },
+    };
+    await new Scheduler({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      runners: { docker: runner, http_internal: runner, http_external: runner },
+      onProbeError: (probeId, error) =>
+        failures.push([probeId, error instanceof Error ? error.message : String(error)]),
+      now: () => NOW,
+      random: () => 0.5,
+    }).tick();
+    expect(failures).toEqual([[ids[0], "runner exploded"]]);
+  });
+
   it("reschedules a probe whose runner throws, and keeps going", async () => {
     // One broken probe must not stop the tick or wedge itself into running every 5s
     // forever.

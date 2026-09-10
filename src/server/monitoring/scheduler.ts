@@ -15,6 +15,8 @@ export class Scheduler {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   private readonly listeners = new Set<(t: PersistedTransition) => void>();
+  /** Tail of the persistence chain. See `serialise`. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly deps: {
@@ -22,6 +24,12 @@ export class Scheduler {
       host: Host;
       composeConfig: ComposeConfigCache;
       runners: Record<ProbeRow["kind"], ProbeRunner>;
+      /**
+       * Called when one probe's turn fails. The scheduler deliberately continues, so
+       * without this a systemic fault — a wedged database, a bad migration — looks
+       * exactly like everything working.
+       */
+      onProbeError?: (probeId: string, error: unknown) => void;
       now?: () => number;
       random?: () => number;
     },
@@ -113,6 +121,33 @@ export class Scheduler {
     await Promise.all(workers);
   }
 
+  /**
+   * Runs database work one at a time, however many probes are in flight.
+   *
+   * libSQL holds a SINGLE connection, so a second `db.transaction()` opened while the
+   * first is still active fails outright:
+   *
+   *   LibsqlError: TRANSACTION_ACTIVE: This client has a single connection, which an
+   *   open transaction is holding.
+   *
+   * Measured before this existed: with the concurrency limit at 8, three probes ran,
+   * the runner was called three times, and exactly ONE sample was written — the other
+   * two rejected and were swallowed by the per-probe catch, so the tick reported
+   * success while monitoring recorded almost nothing.
+   *
+   * The concurrency limit exists for the slow part — Docker and HTTP — and that stays
+   * parallel. Only the write is serialised, and it is milliseconds.
+   */
+  private serialise<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.writes.then(work, work);
+    // Keep the chain alive after a rejection, without swallowing it for the caller.
+    this.writes = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
   private async runOne(
     probe: ProbeRow,
     containers: ContainerSummary[] | null,
@@ -123,7 +158,12 @@ export class Scheduler {
     await this.reschedule(probe, now);
 
     try {
-      const [app] = await this.deps.db.select().from(apps).where(eq(apps.id, probe.appId));
+      // Through the queue too: a plain `SELECT` on this single connection fails exactly
+      // like the `UPDATE` above when it lands while another probe's write transaction is
+      // open — it is not only concurrent transactions that libSQL rejects.
+      const [app] = await this.serialise(() =>
+        this.deps.db.select().from(apps).where(eq(apps.id, probe.appId)),
+      );
       if (!app) return;
 
       const runner = this.deps.runners[probe.kind];
@@ -133,11 +173,13 @@ export class Scheduler {
         deps: { host: this.deps.host, composeConfig: this.deps.composeConfig },
       });
 
-      const transition = await persistResult(this.deps.db, probe, result, {
-        now,
-        graceUntil: app.graceUntil,
-        failureThreshold: FAILURE_THRESHOLD,
-      });
+      const transition = await this.serialise(() =>
+        persistResult(this.deps.db, probe, result, {
+          now,
+          graceUntil: app.graceUntil,
+          failureThreshold: FAILURE_THRESHOLD,
+        }),
+      );
 
       if (transition.changed) {
         for (const listener of this.listeners) {
@@ -149,8 +191,11 @@ export class Scheduler {
           }
         }
       }
-    } catch {
-      // One probe's failure ends that probe's turn, not the tick.
+    } catch (error) {
+      // One probe's failure ends that probe's turn, not the tick — but it must not be
+      // invisible. A silent catch here hid every probe result being dropped: the tick
+      // reported success while one write in eight survived.
+      this.deps.onProbeError?.(probe.id, error);
     }
   }
 
@@ -160,7 +205,13 @@ export class Scheduler {
     const spread = probe.intervalSeconds * JITTER_FRACTION;
     const offset = (this.random() * 2 - 1) * spread;
     const nextRunAt = Math.round(now + probe.intervalSeconds + offset);
-    await this.deps.db.update(probes).set({ nextRunAt }).where(eq(probes.id, probe.id));
+    // Through the same queue as `persistResult`. libSQL's single connection rejects ANY
+    // statement issued while another probe's write transaction is open, not just a second
+    // transaction — a bare `UPDATE` racing a concurrent probe's commit hit the identical
+    // TRANSACTION_ACTIVE error `serialise` exists to prevent.
+    await this.serialise(() =>
+      this.deps.db.update(probes).set({ nextRunAt }).where(eq(probes.id, probe.id)),
+    );
   }
 
   private now(): number {
