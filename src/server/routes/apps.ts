@@ -10,6 +10,7 @@ import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
 import { LOCAL_HOST_ID } from "../bootstrap.js";
 import { apps } from "../db/schema.js";
 import type { ContainerSummary } from "../host/types.js";
+import { HashMismatchError } from "../host/types.js";
 
 const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) });
 
@@ -23,6 +24,11 @@ const patchBody = z.object({
   sortOrder: z.number().int().optional(),
 });
 
+const composeWriteBody = z.object({
+  content: z.string(),
+  expectedHash: z.string().nullable(),
+});
+
 /** A URL-safe slug: lowercase, anything outside `[a-z0-9-]` dropped. */
 function normaliseSlug(directory: string): string {
   return directory.toLowerCase().replace(/[^a-z0-9-]/g, "") || "app";
@@ -30,6 +36,35 @@ function normaliseSlug(directory: string): string {
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   const { db, host, composeConfig } = app.deps;
+
+  /**
+   * Resolves candidate compose content without touching the app's real file.
+   *
+   * Compose only reads from a path, so the content goes to a scratch file beside the
+   * real one — the same directory, so `.env` interpolation and the derived project name
+   * resolve exactly as they will after the save.
+   *
+   * The name carries a ULID for two reasons. A fixed name races: the editor validates on
+   * a debounce, so two calls for one app overlap routinely, and the first one's `finally`
+   * deletes the file the second is mid-resolve on. And the cache is keyed by path, so a
+   * fixed name would serve one keystroke's verdict for the next; a unique name plus the
+   * `invalidate` below keeps the cache from growing by one permanent entry per keystroke.
+   */
+  async function validateContent(
+    directory: string,
+    content: string,
+  ): Promise<{ valid: true } | { valid: false; message: string }> {
+    const composeFile = `.homestead-validate-${ulid()}.yaml`;
+    const target = { directory, composeFile };
+    await host.writeTextFile(`${directory}/${composeFile}`, content, null);
+    try {
+      const check = await composeConfig.resolve(target);
+      return check.valid ? { valid: true } : { valid: false, message: check.message };
+    } finally {
+      composeConfig.invalidate(target);
+      await host.deleteFile(`${directory}/${composeFile}`);
+    }
+  }
 
   /**
    * Current status for one app.
@@ -246,5 +281,63 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       ip: request.ip,
     });
     return reply.code(204).send();
+  });
+
+  app.get("/api/apps/:id/compose", async (request, reply) => {
+    requireCapability(request, "app:config");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+    return host.readTextFile(`${row.directory}/${row.composeFile}`);
+  });
+
+  app.put("/api/apps/:id/compose", async (request, reply) => {
+    const ctx = requireCapability(request, "app:config");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = composeWriteBody.parse(request.body);
+
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+
+    const relative = `${row.directory}/${row.composeFile}`;
+    const target = { directory: row.directory, composeFile: row.composeFile };
+
+    // Validate BEFORE writing. An invalid compose file makes the app unmanageable, and
+    // the editor is where the user should learn about it — not the next deploy.
+    const check = await validateContent(row.directory, body.content);
+    if (!check.valid) {
+      return reply.code(422).send({ error: "invalid_compose", message: check.message });
+    }
+
+    try {
+      const { hash } = await host.writeTextFile(relative, body.content, body.expectedHash);
+      composeConfig.invalidate(target);
+      await db.update(apps).set({ lastComposeHash: hash }).where(eq(apps.id, id));
+      await audit(db, ctx, {
+        action: "app.compose_written",
+        targetType: "app",
+        targetId: id,
+        ip: request.ip,
+      });
+      return { hash };
+    } catch (error) {
+      if (error instanceof HashMismatchError) {
+        return reply
+          .code(409)
+          .send({ error: "stale_hash", message: "The file changed on disk since it was loaded." });
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/apps/:id/compose/validate", async (request, reply) => {
+    requireCapability(request, "app:config");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({ content: z.string() }).parse(request.body);
+
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(404).send({ error: "not_found" });
+
+    return validateContent(row.directory, body.content);
   });
 }

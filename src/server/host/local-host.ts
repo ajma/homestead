@@ -120,6 +120,13 @@ export class LocalHost implements Host {
     }
   }
 
+  async deleteFile(rel: string): Promise<void> {
+    // resolveForWrite, not resolveExisting: the same target-symlink check applies, and
+    // deleting a path that has already gone is not an error.
+    const abs = await this.guard.resolveForWrite(rel);
+    await rm(abs, { force: true });
+  }
+
   async listContainers(filters?: { project?: string }): Promise<ContainerSummary[]> {
     const label = filters?.project ? [`com.docker.compose.project=${filters.project}`] : undefined;
     const raw = await this.docker.listContainers({

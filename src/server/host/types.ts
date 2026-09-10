@@ -33,6 +33,7 @@ export interface Host {
     content: string,
     expectedHash: string | null,
   ): Promise<{ hash: string }>;
+  deleteFile(rel: string): Promise<void>;
   listContainers(filters?: { project?: string }): Promise<ContainerSummary[]>;
   inspectContainer(id: string): Promise<unknown>;
   runCompose(target: ComposeTarget, args: string[], opts?: ComposeOptions): Promise<ComposeResult>;
