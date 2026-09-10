@@ -620,10 +620,17 @@ otherwise discard, at zero cost in height.
 - **Card click launches the app. The status chip is a separate tap target** opening a bottom
   sheet (mobile) or popover (desktop) with the three signals and a 30-day sparkline. Checking
   health never risks launching something.
-- **Which URL a tile opens is decided server-side.** If the request carried a verified Access
-  JWT the user arrived over the tunnel and tiles link externally; otherwise they are on the LAN
-  and the internal URL is faster and survives a Cloudflare outage. The other URL is available
-  from a long-press / context menu.
+- **A tile opens the external URL whenever the app has one**, falling back to
+  `launchInternalUrl` only for apps with no exposure. The link is therefore a property of the
+  app, identical for every user on every network — so a bookmark, a shared link, or a
+  home-screen shortcut behaves the same everywhere, and no server-side branching on how the
+  request arrived is needed. The internal URL stays available from a long-press / context menu.
+- The cost is that during a Cloudflare or internet outage, tiles for exposed apps point at a
+  path that is down while the app itself is reachable on the LAN. The context menu is the manual
+  escape hatch. Automatically swapping the href when the external probe is failing and the
+  internal one is passing is a natural extension, deliberately left out of scope for now — it
+  makes a tile's destination vary with monitoring state, which is a bigger behavioural change
+  than it first appears.
 - **Down apps stay clickable, visibly dimmed.** Greying out a tile because a probe failed is
   maddening when the probe is what is broken.
 - **The launcher must not depend on the monitoring pipeline being healthy.** Tiles come from one
@@ -878,5 +885,6 @@ editor; resource metrics (likely never — Prometheus does it better).
 | Viewers: status and health only | Safe to hand a login to housemates; no config exposure |
 | Separate viewer serializer, not field-stripping | Fails closed when fields are added |
 | Launcher separate from admin inventory | Daily consumption and administration are different jobs |
+| Tiles link externally whenever an exposure exists | One canonical URL per app, so bookmarks and shared links behave identically everywhere; internal URL via context menu |
 | Icons proxied and cached, not hotlinked | 1.15 MB index; avoids disclosing the app inventory to a CDN; works offline |
 | Compose schema vendored at a pinned commit | NAS may be offline; upstream edits shouldn't change behaviour |
