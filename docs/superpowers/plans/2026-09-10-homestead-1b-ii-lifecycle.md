@@ -1965,6 +1965,39 @@ describe('lifecycle routes', () => {
     await app.close()
   })
 
+  it('closes the stream and reports the error when the job output throws', async () => {
+    // After hijack() Fastify cannot report an error — the headers are already out — so
+    // an unguarded throw leaves the stream open and its 25s heartbeat firing for the
+    // life of the process, one timer per abandoned stream.
+    const { app, cookie, id } = await withApp()
+    app.deps.host.composeResults.set('up -d', { exitCode: 0, stdout: 'x', stderr: '' })
+    app.deps.host.gateCompose()
+    const started = await app.inject({
+      method: 'POST', url: `/api/apps/${id}/actions/up`, headers: { cookie },
+    })
+    const jobId = started.json().jobId
+    const live = app.deps.jobs.live(jobId)
+    if (live) {
+      Object.defineProperty(live, 'output', {
+        value: {
+          async *[Symbol.asyncIterator]() {
+            yield { text: 'partial', stream: 'stdout' as const }
+            throw new Error('stream exploded')
+          },
+        },
+      })
+    }
+    const res = await app.inject({
+      method: 'GET', url: `/api/jobs/${jobId}/stream`, headers: { cookie },
+    })
+    // It completed rather than hanging, and said what happened.
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('partial')
+    expect(res.body).toContain('event: error')
+    app.deps.host.releaseCompose()
+    await app.close()
+  })
+
   it('returns 404 streaming a job id that does not exist', async () => {
     const { app, cookie } = await withApp()
     const res = await app.inject({
@@ -2021,11 +2054,18 @@ export function sseResponse(request: FastifyRequest, reply: FastifyReply) {
   }
 
   const closed = new Promise<void>((resolve) => {
-    request.raw.on('close', () => {
+    const finish = () => {
       open = false
       clearInterval(heartbeat)
       resolve()
-    })
+    }
+    // Both ends, and `error` as well as `close`. A socket that errors without emitting
+    // `close` would otherwise leave the heartbeat firing every 25s for the life of the
+    // process — one leaked timer per abandoned stream, still writing to a dead socket.
+    request.raw.on('close', finish)
+    request.raw.on('error', finish)
+    reply.raw.on('close', finish)
+    reply.raw.on('error', finish)
   })
 
   return {
@@ -2150,20 +2190,38 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
       return
     }
 
+    // `disconnected` is only consulted when a chunk arrives, so a client leaving during
+    // a silent stretch of a ten-minute `pull` is not noticed until the next chunk or the
+    // job's end. That holds one request object, a few KB, for the remainder — accepted
+    // rather than racing the iteration against `sse.closed`, which needs a second promise
+    // per chunk to save almost nothing.
     let disconnected = false
     void sse.closed.then(() => {
       disconnected = true
     })
 
-    for await (const chunk of live.output) {
-      if (disconnected) break
-      sse.send('output', chunk)
-    }
-    await live.done
+    // Everything after the hijack goes in a try/finally. Fastify no longer owns the
+    // reply, so a throw here reaches `setErrorHandler`, which calls `reply.send()` on a
+    // socket whose headers have already gone out: it cannot report the error, and the
+    // stream is never closed, leaving the heartbeat running forever.
+    try {
+      for await (const chunk of live.output) {
+        if (disconnected) break
+        sse.send('output', chunk)
+      }
+      await live.done
 
-    const [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId))
-    sse.send('done', { status: finished?.status ?? 'failed', exitCode: finished?.exitCode ?? null })
-    sse.close()
+      const [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId))
+      sse.send('done', {
+        status: finished?.status ?? 'failed',
+        exitCode: finished?.exitCode ?? null,
+      })
+    } catch (error) {
+      request.log.error({ err: error, jobId }, 'job stream failed')
+      sse.send('error', { message: 'The job stream ended unexpectedly.' })
+    } finally {
+      sse.close()
+    }
     // No `return reply`: the reply is hijacked, so returning it would ask Fastify to
     // send a second response over a socket we have already written to and closed.
   })
@@ -2191,7 +2249,7 @@ const jobs = new JobRunner({ db, host, composeConfig })
 - [ ] **Step 7: Run it and confirm it passes**
 
 Run: `pnpm exec vitest run src/server/routes/jobs.test.ts && pnpm test && pnpm exec tsc --noEmit`
-Expected: the focused file passes 8 tests; the full suite stays green.
+Expected: the focused file passes 9 tests; the full suite stays green.
 
 - [ ] **Step 8: Commit**
 
@@ -2377,11 +2435,12 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
       // The stream can die mid-flight when the container is removed. Say so on the
       // stream rather than throwing, which at this point would produce a torn response
       // the error handler cannot turn into JSON.
+      request.log.error({ err: error, containerId }, 'log stream failed')
       sse.send('error', { message: error instanceof Error ? error.message : 'log stream ended' })
+    } finally {
+      sse.send('done', {})
+      sse.close()
     }
-
-    sse.send('done', {})
-    sse.close()
     // Hijacked — nothing to return.
   })
 }
