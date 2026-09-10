@@ -3100,6 +3100,7 @@ In `types.ts`, add to `interface Host`:
 
 ```ts
   deleteFile(rel: string): Promise<void>
+  fileExists(rel: string): Promise<boolean>
 ```
 
 In `local-host.ts`:
@@ -3111,6 +3112,24 @@ In `local-host.ts`:
     const abs = await this.guard.resolveForWrite(rel)
     await rm(abs, { force: true })
   }
+
+  /**
+   * Whether a path exists, independent of whether its contents can be read.
+   *
+   * `readTextFile` cannot answer this: `PathGuard.resolveExisting` throws the same
+   * `PathEscapeError` for a missing file and for one that escapes the root, and a read
+   * can also fail on permissions. `stat` needs only search permission on the parent,
+   * so it separates "no such file" from "cannot read that file".
+   */
+  async fileExists(rel: string): Promise<boolean> {
+    try {
+      const abs = await this.guard.resolveForWrite(rel)
+      await stat(abs)
+      return true
+    } catch {
+      return false
+    }
+  }
 ```
 
 with `rm` added to the `node:fs/promises` import. In `FakeHost`:
@@ -3118,6 +3137,12 @@ with `rm` added to the `node:fs/promises` import. In `FakeHost`:
 ```ts
   async deleteFile(rel: string): Promise<void> {
     this.files.delete(rel)
+  }
+
+  // Deliberately consults `files`, NOT `readTextFileErrors`: a path with a read error
+  // registered against it still exists, which is the whole distinction being tested.
+  async fileExists(rel: string): Promise<boolean> {
+    return this.files.has(rel)
   }
 ```
 
@@ -3208,6 +3233,64 @@ describe('.env API', () => {
     await app.close()
   })
 
+  it('refuses to touch a .env it cannot read, rather than replacing it', async () => {
+    // The worst outcome available here. `.env` files are routinely chmod 600, so a
+    // Homestead running as another uid gets EACCES — and if that read short-circuits to
+    // "no .env", the user writes one with expectedHash null, writeTextFile's own read
+    // fails the same way, currentHash comes out null, the guard matches, and the
+    // original file full of database passwords is gone.
+    const { app, cookie, id } = await withEnv()
+    const denied = new Error('EACCES: permission denied, open')
+    app.deps.host.readTextFileErrors.set('jellyfin/.env', denied)
+
+    const get = await app.inject({ method: 'GET', url: `/api/apps/${id}/env`, headers: { cookie } })
+    expect(get.statusCode).toBe(409)
+    expect(get.json().error).toBe('env_unreadable')
+
+    const reveal = await app.inject({
+      method: 'POST', url: `/api/apps/${id}/env/reveal`, headers: { cookie },
+    })
+    expect(reveal.statusCode).toBe(409)
+
+    const put = await app.inject({
+      method: 'PUT', url: `/api/apps/${id}/env`, headers: { cookie },
+      payload: { content: 'REPLACED=yes\n', expectedHash: null },
+    })
+    expect(put.statusCode).toBe(409)
+    // The point of the whole test: the original content is still there.
+    expect(app.deps.host.files.get('jellyfin/.env')).toBe(ENV)
+    await app.close()
+  })
+
+  it('does not audit a reveal that did not happen', async () => {
+    const { app, cookie, id } = await withEnv()
+    app.deps.host.readTextFileErrors.set('jellyfin/.env', new Error('EACCES'))
+    await app.inject({ method: 'POST', url: `/api/apps/${id}/env/reveal`, headers: { cookie } })
+    const entries = await app.deps.db.select().from(auditLog)
+      .where(eq(auditLog.action, 'app.env_revealed'))
+    // An audit line claiming a secret was revealed when it was not is worse than none.
+    expect(entries).toEqual([])
+    await app.close()
+  })
+
+  it('writes the content byte for byte', async () => {
+    // The route writes verbatim, so this pins that nothing starts reformatting it —
+    // Task 5's parser exists precisely because a round trip through it must be lossless,
+    // and the moment this route parses and re-serialises, that becomes load-bearing.
+    const { app, cookie, id } = await withEnv()
+    const revealed = (await app.inject({
+      method: 'POST', url: `/api/apps/${id}/env/reveal`, headers: { cookie },
+    })).json()
+    const content = '# keep me\r\nA="has spaces"   # note\r\n\r\nB=\r\n'
+    const res = await app.inject({
+      method: 'PUT', url: `/api/apps/${id}/env`, headers: { cookie },
+      payload: { content, expectedHash: revealed.hash },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(app.deps.host.files.get('jellyfin/.env')).toBe(content)
+    await app.close()
+  })
+
   it('preserves comments and ordering on write', async () => {
     const { app, cookie, id } = await withEnv()
     const revealed = (await app.inject({
@@ -3247,14 +3330,39 @@ Expected: FAIL — routes not found.
 ```ts
 import { maskEnv, parseEnv } from '../apps/env-file.js'
 
-/** Reads `.env`, treating absence as empty. Most stacks have one; some do not. */
-async function readEnv(directory: string) {
+/**
+ * Reads `.env`, distinguishing "there isn't one" from "there is one I cannot read".
+ *
+ * Collapsing those two was a data-loss path, and on the file holding the user's
+ * database passwords. `.env` files are routinely `chmod 600`, and if Homestead runs as
+ * a different uid the read fails — so the UI would report no `.env`, the user would
+ * write one with `expectedHash: null`, and `writeTextFile`'s own read would fail the
+ * same way, take `currentHash` as null, match, and replace the original.
+ *
+ * `fileExists` is what separates them: present-but-unreadable becomes an error the
+ * write refuses to act on, rather than an absence it happily fills.
+ */
+type EnvFile =
+  | { state: 'present'; content: string; hash: string }
+  | { state: 'absent'; content: ''; hash: null }
+  | { state: 'unreadable'; content: ''; hash: null }
+
+async function readEnv(directory: string): Promise<EnvFile> {
+  const relative = `${directory}/.env`
   try {
-    return { ...(await host.readTextFile(`${directory}/.env`)), exists: true }
+    const file = await host.readTextFile(relative)
+    return { state: 'present', content: file.content, hash: file.hash }
   } catch {
-    return { content: '', hash: null, exists: false }
+    return (await host.fileExists(relative))
+      ? { state: 'unreadable', content: '', hash: null }
+      : { state: 'absent', content: '', hash: null }
   }
 }
+
+const UNREADABLE = {
+  error: 'env_unreadable',
+  message: 'A .env file exists but Homestead cannot read it. Check its ownership and mode.',
+} as const
 
   app.get('/api/apps/:id/env', async (request, reply) => {
     requireCapability(request, 'app:config')
@@ -3263,8 +3371,9 @@ async function readEnv(directory: string) {
     if (!row) return reply.code(404).send({ error: 'not_found' })
 
     const file = await readEnv(row.directory)
+    if (file.state === 'unreadable') return reply.code(409).send(UNREADABLE)
     // Masked, always. The reveal endpoint is the only way to see values.
-    return { entries: maskEnv(parseEnv(file.content)), exists: file.exists }
+    return { entries: maskEnv(parseEnv(file.content)), exists: file.state === 'present' }
   })
 
   app.post('/api/apps/:id/env/reveal', async (request, reply) => {
@@ -3274,10 +3383,12 @@ async function readEnv(directory: string) {
     if (!row) return reply.code(404).send({ error: 'not_found' })
 
     const file = await readEnv(row.directory)
+    if (file.state === 'unreadable') return reply.code(409).send(UNREADABLE)
     // A separate endpoint rather than a query flag, so revealing is always deliberate
-    // and always leaves a trace.
+    // and always leaves a trace. Audited only once the read succeeded — an audit line
+    // saying a secret was revealed when it was not is worse than none.
     await audit(db, ctx, { action: 'app.env_revealed', targetType: 'app', targetId: id, ip: request.ip })
-    return { content: file.content, hash: file.hash, exists: file.exists }
+    return { content: file.content, hash: file.hash, exists: file.state === 'present' }
   })
 
   app.put('/api/apps/:id/env', async (request, reply) => {
@@ -3287,6 +3398,13 @@ async function readEnv(directory: string) {
 
     const [row] = await db.select().from(apps).where(eq(apps.id, id))
     if (!row) return reply.code(404).send({ error: 'not_found' })
+
+    // Refuse rather than overwrite. `writeTextFile` cannot tell an unreadable file from
+    // an absent one either, so a `null` expectedHash would sail straight through its
+    // guard and replace a `.env` full of passwords.
+    if ((await readEnv(row.directory)).state === 'unreadable') {
+      return reply.code(409).send(UNREADABLE)
+    }
 
     try {
       const { hash } = await host.writeTextFile(`${row.directory}/.env`, body.content, body.expectedHash)
@@ -3307,7 +3425,7 @@ async function readEnv(directory: string) {
 - [ ] **Step 4: Run the tests and confirm they pass**
 
 Run: `pnpm vitest run src/server/routes/apps-env.test.ts && pnpm test`
-Expected: the focused file passes 5 tests; the full suite stays green.
+Expected: the focused file passes 8 tests; the full suite stays green.
 
 - [ ] **Step 5: Manual verification against the real machine**
 
