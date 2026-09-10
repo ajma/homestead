@@ -224,6 +224,7 @@ export class LocalHost implements Host {
               text: `\n[log stream ended: ${error instanceof Error ? error.message : "framing error"}]\n`,
               stream: "stderr",
             });
+            for (const chunk of demux.flush()) queue.push(chunk);
             queue.close();
             readable.destroy?.();
           }
@@ -234,12 +235,27 @@ export class LocalHost implements Host {
       });
       readable.on("end", () => {
         if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+        // The TTY path needs the same courtesy: without `end()` a stream finishing
+        // mid-character drops it, so "café" arrives as "caf".
+        if (ttyDecoder) {
+          const trailing = ttyDecoder.end();
+          if (trailing !== "") queue.push({ text: trailing, stream: "stdout" });
+        }
         queue.close();
       });
       readable.on("error", () => queue.close());
     }
 
-    yield* queue;
+    try {
+      yield* queue;
+    } finally {
+      // The consumer breaking out of its `for await` lands here — which is the NORMAL
+      // exit for the SSE log route, because browsers disconnect constantly. Without the
+      // destroy the handlers keep firing into a queue nobody reads and the Docker socket
+      // stays open, one per abandoned viewer.
+      if (!Buffer.isBuffer(stream))
+        (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+    }
   }
 
   async inspectContainer(id: string): Promise<ContainerInspect> {
@@ -276,11 +292,14 @@ export class LocalHost implements Host {
         const [portText, protocol] = spec.split("/");
         const container = Number(portText);
         if (!Number.isFinite(container)) return [];
+        // `HostPort` is "" for a port that is exposed but not published. `Number("")` is
+        // 0, which is finite, so a naive coercion reports the app as reachable on port 0.
         const host = bindings?.[0]?.HostPort;
+        const hostPort = host === undefined || host === "" ? Number.NaN : Number(host);
         return [
           {
             container,
-            host: host === undefined ? null : Number.isFinite(Number(host)) ? Number(host) : null,
+            host: Number.isFinite(hostPort) && hostPort > 0 ? hostPort : null,
             protocol: protocol ?? "tcp",
           },
         ];
@@ -300,13 +319,22 @@ export class LocalHost implements Host {
     };
   }
 
-  /** `null` rather than a throw when the image has never been pulled — a normal state. */
+  /**
+   * `null` when the image has never been pulled — a normal state — but a **throw** for
+   * anything else.
+   *
+   * Swallowing every error made a wedged Docker socket indistinguishable from a missing
+   * image, and the image-update checker reads `null` as "nothing local to compare", so a
+   * broken socket would have reported every app as up to date rather than as unknown.
+   * Docker answers 404 for a genuinely absent image; everything else is infrastructure.
+   */
   async inspectImage(ref: string): Promise<ImageInspect | null> {
     try {
       const raw = await this.docker.getImage(ref).inspect();
       return { id: raw.Id, repoDigests: raw.RepoDigests ?? [] };
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as { statusCode?: number }).statusCode === 404) return null;
+      throw error;
     }
   }
 

@@ -959,6 +959,25 @@ describe('FakeHost.streamLogs', () => {
   })
 })
 
+describe('inspectContainer port projection', () => {
+  it('reports an exposed-but-unpublished port as null, not port zero', async () => {
+    // Docker gives `HostPort: ""` for a port that is exposed but not published, and
+    // `Number("")` is 0 — finite, so a naive coercion tells the user the app is
+    // reachable on port 0.
+    const host = new FakeHost()
+    host.inspected.set('abc', {
+      id: 'abc', name: 'x', image: 'x', imageDigest: null, state: 'running',
+      exitCode: null, oomKilled: false, startedAt: null, finishedAt: null,
+      restartPolicy: 'no', restartCount: 0, tty: false, env: [], mounts: [],
+      ports: [{ container: 80, host: null, protocol: 'tcp' }],
+      networks: [], health: null,
+    })
+    expect((await host.inspectContainer('abc')).ports).toEqual([
+      { container: 80, host: null, protocol: 'tcp' },
+    ])
+  })
+})
+
 describe('FakeHost.inspectContainer', () => {
   it('masks env values, never returning one', async () => {
     const host = new FakeHost()
@@ -1082,12 +1101,26 @@ const MASK = "••••••••";
       });
       stream.on("end", () => {
         if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+        // The TTY path needs the same courtesy: without `end()` a stream finishing
+        // mid-character drops it, so "café" arrives as "caf".
+        if (ttyDecoder) {
+          const trailing = ttyDecoder.end();
+          if (trailing !== "") queue.push({ text: trailing, stream: "stdout" });
+        }
         queue.close();
       });
       stream.on("error", () => queue.close());
     }
 
-    yield* queue;
+    try {
+      yield* queue;
+    } finally {
+      // The consumer breaking out of its `for await` lands here — which is the NORMAL
+      // exit for the SSE log route, because browsers disconnect constantly. Without the
+      // destroy the handlers keep firing into a queue nobody reads and the Docker socket
+      // stays open, one per abandoned viewer.
+      if (!Buffer.isBuffer(stream)) stream.destroy();
+    }
   }
 
   async inspectContainer(id: string): Promise<ContainerInspect> {
@@ -1124,10 +1157,13 @@ const MASK = "••••••••";
         const [portText, protocol] = spec.split("/");
         const container = Number(portText);
         if (!Number.isFinite(container)) return [];
+        // `HostPort` is "" for a port that is exposed but not published. `Number("")` is
+        // 0, which is finite, so a naive coercion reports the app as reachable on port 0.
         const host = bindings?.[0]?.HostPort;
+        const hostPort = host === undefined || host === "" ? Number.NaN : Number(host);
         return [{
           container,
-          host: host === undefined ? null : (Number.isFinite(Number(host)) ? Number(host) : null),
+          host: Number.isFinite(hostPort) && hostPort > 0 ? hostPort : null,
           protocol: protocol ?? "tcp",
         }];
       }),
@@ -1146,13 +1182,22 @@ const MASK = "••••••••";
     };
   }
 
-  /** `null` rather than a throw when the image has never been pulled — a normal state. */
+  /**
+   * `null` when the image has never been pulled — a normal state — but a **throw** for
+   * anything else.
+   *
+   * Swallowing every error made a wedged Docker socket indistinguishable from a missing
+   * image, and the image-update checker reads `null` as "nothing local to compare", so a
+   * broken socket would have reported every app as up to date rather than as unknown.
+   * Docker answers 404 for a genuinely absent image; everything else is infrastructure.
+   */
   async inspectImage(ref: string): Promise<ImageInspect | null> {
     try {
       const raw = await this.docker.getImage(ref).inspect();
       return { id: raw.Id, repoDigests: raw.RepoDigests ?? [] };
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as { statusCode?: number }).statusCode === 404) return null;
+      throw error;
     }
   }
 ```
@@ -1192,12 +1237,73 @@ at `test-helpers.ts:106`, not a data map. Rename that field to `inspectCalls` an
 `inspected` as the `Map<string, ContainerInspect>` above; replacing it outright would silently
 drop the call log. Nothing outside `test-helpers.ts` reads it today, so the rename is safe.
 
-- [ ] **Step 6: Run everything**
+- [ ] **Step 6: Add an integration test against a real daemon**
+
+Every test so far runs against `FakeHost`, which skips the TTY decision, the framing and
+the masking entirely — so none of them touch the logic most likely to be wrong. This one
+does. Put it in `src/server/host/stream-logs.integration.test.ts`:
+
+```ts
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { afterAll, describe, expect, it } from 'vitest'
+import { LocalHost } from '@server/host/local-host'
+
+const run = promisify(execFile)
+const hasDocker = await run('docker', ['version']).then(() => true).catch(() => false)
+
+describe.skipIf(!hasDocker)('streamLogs against real Docker', () => {
+  const name = `homestead-logtest-${Date.now()}`
+  afterAll(async () => {
+    await run('docker', ['rm', '-f', name]).catch(() => {})
+  })
+
+  it('separates stdout from stderr on a non-TTY container without leaking header bytes', async () => {
+    // The case FakeHost cannot reach: a real multiplexed stream, whose 8-byte headers
+    // become control characters in the log pane if the demultiplexer is wrong. The
+    // accented text is here because a multi-byte character split across two frames comes
+    // back as replacement characters without a persistent decoder.
+    await run('docker', [
+      'run', '--name', name, 'alpine:3',
+      'sh', '-c', "echo 'out: café ✓'; echo 'err: problem' 1>&2; echo 'out: second'",
+    ])
+    const host = new LocalHost('local', '/tmp', '/var/run/docker.sock')
+    await host.init()
+
+    const lines: Array<{ text: string; stream: string }> = []
+    for await (const line of host.streamLogs({ containerId: name, follow: false, tail: 100 })) {
+      lines.push(line)
+    }
+    const textOf = (stream: string) =>
+      lines.filter((l) => l.stream === stream).map((l) => l.text).join('')
+
+    expect(textOf('stdout')).toContain('out: café ✓')
+    expect(textOf('stdout')).toContain('out: second')
+    expect(textOf('stderr')).toContain('err: problem')
+    // No header bytes and no mangled characters.
+    const all = lines.map((l) => l.text).join('')
+    expect(all).not.toMatch(/[\u0000-\u0008]/)
+    expect(all).not.toContain('\uFFFD')
+  })
+
+  it('masks env values from a real inspect', async () => {
+    const host = new LocalHost('local', '/tmp', '/var/run/docker.sock')
+    await host.init()
+    const inspected = await host.inspectContainer(name)
+    expect(inspected.env.length).toBeGreaterThan(0)
+    // PATH always exists and always has a value; none of it may appear.
+    expect(JSON.stringify(inspected.env)).not.toContain('/usr/local/sbin')
+    expect(inspected.env.every((e) => e.masked === '••••••••' || e.masked === '')).toBe(true)
+  })
+})
+```
+
+- [ ] **Step 7: Run everything**
 
 Run: `pnpm exec vitest run src/server/host/stream-logs.test.ts && pnpm test && pnpm exec tsc --noEmit`
-Expected: the focused file passes 4 tests; the full suite stays green.
+Expected: the focused file passes 5 tests; the full suite stays green.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/server/host src/server/test-helpers.ts

@@ -34,6 +34,37 @@ describe("FakeHost.streamLogs", () => {
   });
 });
 
+describe("inspectContainer port projection", () => {
+  it("reports an exposed-but-unpublished port as null, not port zero", async () => {
+    // Docker gives `HostPort: ""` for a port that is exposed but not published, and
+    // `Number("")` is 0 — finite, so a naive coercion tells the user the app is
+    // reachable on port 0.
+    const host = new FakeHost();
+    host.inspected.set("abc", {
+      id: "abc",
+      name: "x",
+      image: "x",
+      imageDigest: null,
+      state: "running",
+      exitCode: null,
+      oomKilled: false,
+      startedAt: null,
+      finishedAt: null,
+      restartPolicy: "no",
+      restartCount: 0,
+      tty: false,
+      env: [],
+      mounts: [],
+      ports: [{ container: 80, host: null, protocol: "tcp" }],
+      networks: [],
+      health: null,
+    });
+    expect((await host.inspectContainer("abc")).ports).toEqual([
+      { container: 80, host: null, protocol: "tcp" },
+    ]);
+  });
+});
+
 describe("FakeHost.inspectContainer", () => {
   it("masks env values, never returning one", async () => {
     const host = new FakeHost();

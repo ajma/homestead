@@ -56,8 +56,8 @@ export class FakeHost implements Host {
   containers: ContainerSummary[] = [];
   logLines = new Map<string, LogLine[]>();
   logCalls: LogOptions[] = [];
-  /** Scripted inspect data. NOTE the existing `inspected` field was a `string[]` call log —
-   *  renamed to `inspectCalls` rather than replaced, so nothing loses the log. */
+  /** Scripted inspect data. NOTE the existing `inspected` field is a `string[]` call log —
+   *  rename that to `inspectCalls` rather than replacing it, so nothing loses the log. */
   inspected = new Map<string, ContainerInspect>();
   inspectCalls: string[] = [];
   images = new Map<string, ImageInspect>();
