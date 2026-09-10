@@ -149,16 +149,27 @@ describe("lifecycle routes", () => {
     const { app, cookie, id } = await withApp();
     app.deps.host.composeChunkCount = 4;
     app.deps.host.composeResults.set("up -d", { exitCode: 0, stdout: "abcdefgh", stderr: "" });
+
+    // Gate the job so it is still LIVE when the stream attaches. Without this the test
+    // is a coin flip: the fake finishes in a microtask, `runner.live()` returns
+    // undefined, and the handler takes the replay branch — which correctly emits the
+    // persisted output as ONE event, failing an assertion about four. Measured: it lost
+    // roughly one run in five.
+    app.deps.host.gateCompose();
     const started = await app.inject({
       method: "POST",
       url: `/api/apps/${id}/actions/up`,
       headers: { cookie },
     });
-    const res = await app.inject({
+    const streaming = app.inject({
       method: "GET",
       url: `/api/jobs/${started.json().jobId}/stream`,
       headers: { cookie },
     });
+    // Let the handler reach its iteration before any chunk exists.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    app.deps.host.releaseCompose();
+    const res = await streaming;
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("text/event-stream");
     // Chunks arrive as separate events — the fake splits into four, and code that
