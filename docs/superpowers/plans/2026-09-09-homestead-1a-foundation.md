@@ -2480,16 +2480,17 @@ async function setup() {
   const jwk = { ...(await exportJWK(publicKey)), kid: 'key-1', alg: 'RS256' }
   const fetchJwks = async () => ({ keys: [jwk] })
 
-  const mint = (over: Record<string, unknown> = {}) =>
-    new SignJWT({ email: 'ada@example.com', ...over })
+  // `aud` accepts an array as well as a string: Cloudflare issues arrays.
+  const mint = (over: { iss?: string; aud?: string | string[]; exp?: number } = {}) =>
+    new SignJWT({ email: 'ada@example.com' })
       .setProtectedHeader({ alg: 'RS256', kid: 'key-1' })
-      .setIssuer(String(over.iss ?? ISSUER))
-      .setAudience((over.aud as string) ?? AUD)
+      .setIssuer(over.iss ?? ISSUER)
+      .setAudience(over.aud ?? AUD)
       .setIssuedAt()
-      .setExpirationTime(over.exp ? Number(over.exp) : '1h')
+      .setExpirationTime(over.exp ?? '1h')
       .sign(privateKey)
 
-  return { fetchJwks, mint, privateKey }
+  return { fetchJwks, mint, privateKey, jwk }
 }
 
 describe('verifyAccessJwt', () => {
@@ -2546,6 +2547,72 @@ describe('verifyAccessJwt', () => {
       verifyAccessJwt({ token: 'not.a.jwt', teamDomain: TEAM, aud: AUD, fetchJwks }),
     ).rejects.toThrow()
   })
+
+  // Cloudflare issues `aud` as an ARRAY of audience tags, so these two cases are the
+  // realistic shape of both the happy path and the cross-application attack.
+  it('accepts an audience array that contains this application', async () => {
+    const { fetchJwks, mint } = await setup()
+    const token = await mint({ aud: ['jellyfin-aud', AUD] })
+    await expect(
+      verifyAccessJwt({ token, teamDomain: TEAM, aud: AUD, fetchJwks }),
+    ).resolves.toMatchObject({ email: 'ada@example.com' })
+  })
+
+  it('rejects an audience array listing only other applications', async () => {
+    const { fetchJwks, mint } = await setup()
+    const token = await mint({ aud: ['jellyfin-aud', 'immich-aud'] })
+    await expect(
+      verifyAccessJwt({ token, teamDomain: TEAM, aud: AUD, fetchJwks }),
+    ).rejects.toThrow()
+  })
+})
+
+describe('JWKS refetch is not an amplification vector', () => {
+  it('fetches once for many failures naming a key we already hold', async () => {
+    const { mint, jwk } = await setup()
+    let fetches = 0
+    const countingFetch = async () => {
+      fetches += 1
+      return { keys: [jwk] }
+    }
+    // A unique domain so this test starts from a cold cache regardless of test order.
+    const domain = `refetch-known-${Math.random().toString(36).slice(2)}`
+
+    for (let i = 0; i < 10; i++) {
+      const forged = await mint({ aud: 'wrong-aud' }) // valid signature, known kid
+      await verifyAccessJwt({
+        token: forged, teamDomain: domain, aud: AUD, fetchJwks: countingFetch,
+      }).catch(() => {})
+    }
+
+    // One cold-cache fetch. Ten failures whose kid is known must add none: the failure
+    // is a wrong audience, not a rotation, so refetching would be pure amplification.
+    expect(fetches).toBe(1)
+  })
+
+  it('fetches at most twice for many failures naming an unknown key', async () => {
+    const { jwk, privateKey } = await setup()
+    let fetches = 0
+    const countingFetch = async () => {
+      fetches += 1
+      return { keys: [jwk] }
+    }
+    const domain = `refetch-unknown-${Math.random().toString(36).slice(2)}`
+
+    for (let i = 0; i < 10; i++) {
+      const forged = await new SignJWT({ email: 'mallory@example.com' })
+        .setProtectedHeader({ alg: 'RS256', kid: `unknown-${i}` })
+        .setIssuer(ISSUER).setAudience(AUD).setIssuedAt().setExpirationTime('1h')
+        .sign(privateKey)
+      await verifyAccessJwt({
+        token: forged, teamDomain: domain, aud: AUD, fetchJwks: countingFetch,
+      }).catch(() => {})
+    }
+
+    // One cold-cache fetch, plus at most one rotation probe. The cooldown absorbs the
+    // rest — otherwise ten unauthenticated requests would mean ten outbound fetches.
+    expect(fetches).toBeLessThanOrEqual(2)
+  })
 })
 ```
 
@@ -2557,7 +2624,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Write `src/server/auth/access-plugin.ts`**
 
 ```ts
-import { type JWK, createLocalJWKSet, jwtVerify } from 'jose'
+import { type JWK, createLocalJWKSet, decodeProtectedHeader, jwtVerify } from 'jose'
 import type { Config } from '../config.js'
 
 export type JwksFetcher = () => Promise<{ keys: JWK[] }>
@@ -2574,6 +2641,18 @@ function defaultFetcher(teamDomain: string): JwksFetcher {
 
 const jwksCache = new Map<string, { keys: JWK[]; fetchedAt: number }>()
 const JWKS_TTL_MS = 60 * 60 * 1000
+/** Floor on refetch frequency, so failed verifications cannot drive outbound requests. */
+const MIN_JWKS_REFETCH_MS = 5 * 60 * 1000
+
+/** The `kid` a token claims, read WITHOUT verification. Used only to route the refetch
+ *  decision — never to decide whether the token is trustworthy. */
+function decodeKid(token: string): string | undefined {
+  try {
+    return decodeProtectedHeader(token).kid
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Verifies a Cloudflare Access JWT.
@@ -2604,8 +2683,27 @@ export async function verifyAccessJwt(opts: {
   let payload: Awaited<ReturnType<typeof jwtVerify>>['payload']
   try {
     payload = (await verify(fresh.keys)).payload
-  } catch {
-    // An unknown `kid` may mean Cloudflare rotated keys. Refetch once.
+  } catch (firstError) {
+    // Refetching on failure supports Cloudflare's key rotation, but "verification
+    // failed" and "my keys are stale" are indistinguishable from in here — so a naive
+    // refetch lets unauthenticated callers drive our outbound request rate. Two gates
+    // narrow it to the case that actually indicates rotation.
+    //
+    // Gate 1: the token's `kid` must be absent from the keys we already hold. A forged
+    // or expired token naming a key we know is not a rotation, so it never refetches.
+    // Reading the header unverified is safe here because it only routes this decision;
+    // nothing is trusted from it.
+    //
+    // Gate 2: a cooldown, because an attacker can still mint tokens with random `kid`s.
+    // Cloudflare rotates on the order of days, so refusing to refetch more than once
+    // every few minutes costs nothing real.
+    const presentedKid = decodeKid(opts.token)
+    const kidIsKnown =
+      presentedKid !== undefined && fresh.keys.some((key) => key.kid === presentedKid)
+    const sinceLastFetch = Date.now() - fresh.fetchedAt
+
+    if (kidIsKnown || sinceLastFetch < MIN_JWKS_REFETCH_MS) throw firstError
+
     const refreshed = { keys: (await fetcher()).keys, fetchedAt: Date.now() }
     jwksCache.set(opts.teamDomain, refreshed)
     payload = (await verify(refreshed.keys)).payload
