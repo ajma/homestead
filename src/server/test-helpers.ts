@@ -37,9 +37,13 @@ export class FakeHost implements Host {
   readTextFileErrors = new Map<string, Error>();
 
   async listAppDirectories(): Promise<DiscoveredDir[]> {
-    return [...this.files.keys()]
-      .filter((p) => p.includes("/"))
-      .map((p) => ({ directory: p.split("/")[0] ?? "", composeFile: "compose.yaml" }));
+    const directories = new Set<string>();
+    for (const path of this.files.keys()) {
+      if (path.includes("/")) {
+        directories.add(path.split("/")[0] ?? "");
+      }
+    }
+    return [...directories].map((directory) => ({ directory, composeFile: "compose.yaml" }));
   }
 
   async readTextFile(rel: string): Promise<FileRead> {
