@@ -177,13 +177,14 @@ describe("app inventory API", () => {
   });
 
   it("gives colliding directory names distinct slugs", async () => {
-    // `My Media` and `my-media` both normalise to `mymedia`, and `apps_host_slug` is
-    // unique — so the second insert raised a constraint violation that surfaced as a
-    // 500 mid-adopt, losing the successful adoptions alongside it.
+    // `My Media` and `My_Media` both normalise to `mymedia` — the underscore is
+    // stripped, the hyphen in `my-media` is not, so THESE two are the colliding pair.
+    // `apps_host_slug` is unique, so without disambiguation the second insert raised a
+    // constraint violation that surfaced as a 500 mid-adopt, discarding the successes.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     (app.deps.host as FakeHost).files.set("My Media/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).files.set("my-media/compose.yaml", "services: {}\n");
+    (app.deps.host as FakeHost).files.set("My_Media/compose.yaml", "services: {}\n");
     (app.deps.host as FakeHost).composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "p", services: {} }),
@@ -193,13 +194,37 @@ describe("app inventory API", () => {
       method: "POST",
       url: "/api/apps/adopt",
       headers: { cookie },
-      payload: { directories: ["My Media", "my-media"] },
+      payload: { directories: ["My Media", "My_Media"] },
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().failed).toEqual([]);
-    const slugs = res.json().adopted.map((a: { slug: string }) => a.slug);
-    expect(new Set(slugs).size).toBe(2);
-    expect(slugs).toContain("mymedia");
+    const slugs = res
+      .json()
+      .adopted.map((a: { slug: string }) => a.slug)
+      .sort();
+    expect(slugs).toEqual(["mymedia", "mymedia-2"]);
+    await app.close();
+  });
+
+  it("refuses to adopt a stack compose gives no project name", async () => {
+    // An empty project name matches no container for the life of the app, so it would
+    // read as permanently down. Refusing and saying why beats creating a broken row.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    (app.deps.host as FakeHost).files.set("nameless/compose.yaml", "services: {}\n");
+    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ services: {} }),
+      stderr: "",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["nameless"] },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().failed[0].message).toContain("no project name");
     await app.close();
   });
 
@@ -254,6 +279,58 @@ describe("app inventory API", () => {
     const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
     expect(res.json()).toHaveLength(3);
     expect((app.deps.host as FakeHost).listContainersCalls).toBe(1);
+    await app.close();
+  });
+
+  it("never shows a viewer the raw output of docker compose config", async () => {
+    // Measured before the split: a viewer's statusDetail read
+    // `validating /volume2/docker/jellyfin/compose.yaml: ... invalid value
+    // "sk-live-9f3c8" from /volume2/docker/jellyfin/.env` — an absolute path and an
+    // interpolated secret, shown to the housemate this role exists to be safe for.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n");
+    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jf", services: {} }),
+      stderr: "",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin"] },
+    });
+    const viewer = await createViewer(app, cookie);
+
+    const secret = 'invalid value "sk-live-9f3c8" from /volume2/docker/jellyfin/.env';
+    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+      exitCode: 1,
+      stdout: "",
+      stderr: secret,
+    });
+    (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n# edited\n");
+
+    const asViewer = (
+      await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      })
+    ).json();
+    expect(JSON.stringify(asViewer)).not.toContain("sk-live");
+    expect(JSON.stringify(asViewer)).not.toContain("/volume2");
+    expect(asViewer[0].statusDetail).toBe("compose configuration is invalid");
+
+    // The admin still needs the real message to fix the file.
+    const asAdmin = (
+      await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie },
+      })
+    ).json();
+    expect(asAdmin[0].statusDetail).toBe(secret);
     await app.close();
   });
 });

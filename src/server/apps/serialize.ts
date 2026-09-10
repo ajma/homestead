@@ -23,7 +23,22 @@ export type AppRowLike = {
   archivedAt: number | null;
 };
 
-export type AppStatusSummary = { status: AppStatus; detail: string | null };
+/**
+ * `detail` is safe for any role. `adminDetail` carries raw tool output and reaches only
+ * `toAdminApp`.
+ *
+ * Measured before this split existed: a viewer's `statusDetail` read
+ * `validating /volume2/docker/jellyfin/compose.yaml: services.web.environment.API_KEY:
+ * invalid value "sk-live-9f3c8" from /volume2/docker/jellyfin/.env` — a filesystem path
+ * and an interpolated secret, shown to the housemate the viewer role exists to be safe
+ * for. Two fields make the leak structurally impossible instead of something a future
+ * caller has to remember; a single field that callers must sanitise fails open.
+ */
+export type AppStatusSummary = {
+  status: AppStatus;
+  detail: string | null;
+  adminDetail?: string | null;
+};
 
 /**
  * Every property is listed explicitly. Do not rewrite this as a spread-and-delete —
@@ -47,6 +62,8 @@ export function toViewerApp(row: AppRowLike, status: AppStatusSummary): ViewerAp
 export function toAdminApp(row: AppRowLike, status: AppStatusSummary): AdminApp {
   return {
     ...toViewerApp(row, status),
+    // Raw tool output, which `toViewerApp` deliberately never sees.
+    statusDetail: status.adminDetail ?? status.detail,
     hostId: row.hostId,
     directory: row.directory,
     composeFile: row.composeFile,

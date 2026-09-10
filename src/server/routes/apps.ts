@@ -41,7 +41,16 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   async function statusFor(row: typeof apps.$inferSelect, containers?: ContainerSummary[]) {
     const target = { directory: row.directory, composeFile: row.composeFile };
     const resolved = await composeConfig.resolve(target);
-    if (!resolved.valid) return { status: "unknown" as const, detail: resolved.message };
+    if (!resolved.valid) {
+      // `resolved.message` is raw `docker compose config` stderr. It routinely carries
+      // absolute paths and interpolated `.env` values, so it goes in `adminDetail` and
+      // the viewer gets a description instead.
+      return {
+        status: "unknown" as const,
+        detail: "compose configuration is invalid",
+        adminDetail: resolved.message,
+      };
+    }
     const found = containers ?? (await host.listContainers({ project: row.projectName ?? "" }));
     return rollUpStatus(resolved.resolved.services, found);
   }
@@ -109,20 +118,38 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
         continue;
       }
 
+      // An empty project name would match no container for the life of the app, so it
+      // would read as permanently down. Better to refuse the adoption and say why.
+      if (resolved.resolved.projectName === "") {
+        failed.push({ directory, message: "compose reported no project name" });
+        continue;
+      }
+
       const { hash } = await host.readTextFile(`${directory}/${discovered.composeFile}`);
       const id = ulid();
-      await db.insert(apps).values({
-        id,
-        hostId: LOCAL_HOST_ID,
-        slug: await uniqueSlug(directory),
-        displayName: directory,
-        directory,
-        composeFile: discovered.composeFile,
-        // From `docker compose config`, which already honours COMPOSE_PROJECT_NAME in
-        // the sibling .env. Deriving it from the directory name would be wrong.
-        projectName: resolved.resolved.projectName,
-        lastComposeHash: hash,
-      });
+      try {
+        await db.insert(apps).values({
+          id,
+          hostId: LOCAL_HOST_ID,
+          slug: await uniqueSlug(directory),
+          displayName: directory,
+          directory,
+          composeFile: discovered.composeFile,
+          // From `docker compose config`, which already honours COMPOSE_PROJECT_NAME in
+          // the sibling .env. Deriving it from the directory name would be wrong.
+          projectName: resolved.resolved.projectName,
+          lastComposeHash: hash,
+        });
+      } catch (error) {
+        // `apps_host_slug` and `apps_host_directory` are unique. A concurrent adopt can
+        // still lose the race that `uniqueSlug` narrows, and an uncaught violation here
+        // would 500 the whole request, discarding the directories that did succeed.
+        failed.push({
+          directory,
+          message: error instanceof Error ? error.message : "insert failed",
+        });
+        continue;
+      }
 
       const [row] = await db.select().from(apps).where(eq(apps.id, id));
       if (row) adopted.push(toAdminApp(row, await statusFor(row)));
