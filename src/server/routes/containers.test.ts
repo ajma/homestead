@@ -174,4 +174,24 @@ describe("container detail", () => {
     expect(res.json()).toEqual([]);
     await app.close();
   });
+
+  it("answers 503 when inspect fails for a non-404 reason", async () => {
+    // The socket could wedge between listContainers and inspectContainer. A genuine 404
+    // stays 404 (container removed); anything else is 503. Without this discrimination,
+    // a wedged socket reports "container not found" for a container that exists.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.inspectContainer = async () => {
+      const error = new Error("connect ENOENT /var/run/docker.sock");
+      (error as { statusCode?: number }).statusCode = 500;
+      throw error;
+    };
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}/containers/container-1`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe("docker_unreachable");
+    await app.close();
+  });
 });

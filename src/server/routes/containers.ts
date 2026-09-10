@@ -64,11 +64,16 @@ export async function containerRoutes(app: FastifyInstance): Promise<void> {
     try {
       return await host.inspectContainer(containerId);
     } catch (error) {
-      // Removed between the list and the inspect. 404 is the honest answer.
-      return reply.code(404).send({
-        error: "not_found",
-        message: error instanceof Error ? error.message : "container is gone",
-      });
+      // Discriminate: a genuine 404 stays 404 (container removed between list and inspect),
+      // but anything else is 503. A socket that wedges between the two calls would otherwise
+      // report "container not found" for a container that exists.
+      if ((error as { statusCode?: number }).statusCode === 404) {
+        return reply.code(404).send({
+          error: "not_found",
+          message: error instanceof Error ? error.message : "container is gone",
+        });
+      }
+      return reply.code(503).send(DOCKER_UNREACHABLE);
     }
   });
 }
