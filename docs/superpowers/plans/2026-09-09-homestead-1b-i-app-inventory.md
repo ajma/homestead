@@ -1120,7 +1120,7 @@ git commit -m "feat: resolve and cache docker compose config by file hash"
 
 ```ts
 export type EnvEntry =
-  | { kind: 'pair'; key: string; value: string; raw: string }
+  | { kind: 'pair'; key: string; value: string; comment: string; raw: string }
   | { kind: 'other'; raw: string }        // comments and blank lines
 export function parseEnv(content: string): EnvEntry[]
 export function serialiseEnv(entries: EnvEntry[]): string
@@ -1129,6 +1129,10 @@ export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvE
 ```
 
 Round-tripping must be lossless. These files are hand-maintained over SSH and full of comments explaining why a variable is set; an editor that silently drops them is worse than no editor. `.env` also holds database passwords and API keys, so values are masked in every response by default.
+
+**Losslessness has to survive an edit, not just a read.** Reassembling from `raw` makes an untouched round trip free, but `upsertEnv` necessarily rebuilds the line it changes — and `PUID=1000   # the media user` is exactly the line a user edits. Rebuilding it as `PUID=1001` silently destroys the comment, which is the failure this task exists to prevent. So a pair carries its inline `comment` separately and `upsertEnv` reattaches it.
+
+**`value` means what compose means by it.** Compose strips an inline `#` comment when whitespace precedes the `#`, and strips one layer of matching surrounding quotes. `PUID=1000   # the media user` therefore has the value `1000`, not `1000   # the media user`, and `QUOTED="has spaces"` has the value `has spaces`. Getting this wrong is invisible while `maskEnv` only asks whether a value is empty, and becomes a wrong answer the moment anything displays or compares one. A `#` with no preceding whitespace is part of the value (`PASS=hunter#2`), which is why the rule is not simply "split on `#`".
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1197,6 +1201,31 @@ describe('maskEnv', () => {
   })
 })
 
+describe('values', () => {
+  it('reads the value compose would read, not the whole right-hand side', () => {
+    const byKey = (content: string, key: string) => {
+      const entry = parseEnv(content).find((e) => e.kind === 'pair' && e.key === key)
+      return entry?.kind === 'pair' ? entry.value : undefined
+    }
+    // An inline comment is not part of the value...
+    expect(byKey(sample, 'PUID')).toBe('1000')
+    // ...but a '#' with no whitespace before it is.
+    expect(byKey('PASS=hunter#2', 'PASS')).toBe('hunter#2')
+    // ...and one inside quotes is literal.
+    expect(byKey('PASS="a # b"', 'PASS')).toBe('a # b')
+    // One layer of matching quotes is removed.
+    expect(byKey(sample, 'QUOTED')).toBe('has spaces')
+    expect(byKey("S='single'", 'S')).toBe('single')
+    // Mismatched quotes are not a pair of quotes.
+    expect(byKey('M="oops\'', 'M')).toBe('"oops\'')
+  })
+
+  it('captures the inline comment with its leading whitespace', () => {
+    const puid = parseEnv(sample).find((e) => e.kind === 'pair' && e.key === 'PUID')
+    expect(puid?.kind === 'pair' && puid.comment).toBe('   # the media user')
+  })
+})
+
 describe('upsertEnv', () => {
   it('updates in place, preserving position and surrounding lines', () => {
     const updated = upsertEnv(parseEnv(sample), 'PUID', '1001')
@@ -1204,6 +1233,23 @@ describe('upsertEnv', () => {
     expect(text).toContain('PUID=1001')
     expect(text).toContain('# Database credentials')
     expect(text.indexOf('PUID')).toBeLessThan(text.indexOf('EMPTY'))
+  })
+
+  it('keeps the inline comment when the value it annotates changes', () => {
+    // The whole point of the module: editing one variable must not silently delete
+    // the note explaining why it is set. Without this, `PUID=1001` is all that is left.
+    const text = serialiseEnv(upsertEnv(parseEnv(sample), 'PUID', '1001'))
+    expect(text).toContain('PUID=1001   # the media user')
+  })
+
+  it('quotes a written value only when it would not survive unquoted', () => {
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1'), 'A', 'plain'))).toBe('A=plain')
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1'), 'A', 'has spaces'))).toBe('A="has spaces"')
+    expect(serialiseEnv(upsertEnv(parseEnv('A=1'), 'A', 'a#b'))).toBe('A="a#b"')
+    // A quote in the value is escaped, so re-parsing yields what was written.
+    const written = serialiseEnv(upsertEnv(parseEnv('A=1'), 'A', 'say "hi"'))
+    const back = parseEnv(written).find((e) => e.kind === 'pair')
+    expect(back?.kind === 'pair' && back.value).toBe('say "hi"')
   })
 
   it('appends a new key at the end', () => {
@@ -1222,13 +1268,58 @@ Expected: FAIL — module not found.
 
 ```ts
 export type EnvEntry =
-  | { kind: 'pair'; key: string; value: string; raw: string }
+  | { kind: 'pair'; key: string; value: string; comment: string; raw: string }
   | { kind: 'other'; raw: string }
 
 /** Fixed width, so the mask reveals nothing about the secret's length. */
 const MASK = '••••••••'
 
 const PAIR = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/
+
+/**
+ * Splits a `.env` right-hand side into its value and its trailing comment.
+ *
+ * Follows compose's rules rather than inventing simpler ones:
+ *  - a `#` starts a comment only when whitespace precedes it, so `PASS=hunter#2`
+ *    keeps the `#` in the value
+ *  - a `#` inside quotes is literal
+ *  - one layer of matching surrounding quotes is removed from the value
+ *
+ * The comment is returned with its leading whitespace intact so `upsertEnv` can
+ * reattach it exactly as the user wrote it.
+ */
+function splitValue(rest: string): { value: string; comment: string } {
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i]
+    if (quote) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    // Whitespace before the '#' is what makes it a comment rather than a literal.
+    if (ch === '#' && (i === 0 || /\s/.test(rest[i - 1] ?? ''))) {
+      return { value: unquote(rest.slice(0, i).trim()), comment: rest.slice(i) }
+    }
+  }
+  return { value: unquote(rest.trim()), comment: '' }
+}
+
+function unquote(value: string): string {
+  const first = value[0]
+  if ((first === '"' || first === "'") && value.length >= 2 && value.endsWith(first)) {
+    return value.slice(1, -1)
+  }
+  return value
+}
+
+/** Re-quotes on the way out only when the value would not survive unquoted. */
+function quoteIfNeeded(value: string): string {
+  return /[\s#'"]/.test(value) ? `"${value.replace(/(["\\])/g, '\\$1')}"` : value
+}
 
 /**
  * Parses `.env` while retaining every original line in `raw`.
@@ -1246,7 +1337,8 @@ export function parseEnv(content: string): EnvEntry[] {
     if (!match) return { kind: 'other', raw: line }
     const [, key, rest] = match
     if (key === undefined) return { kind: 'other', raw: line }
-    return { kind: 'pair', key, value: (rest ?? '').trim(), raw: line }
+    const { value, comment } = splitValue(rest ?? '')
+    return { kind: 'pair', key, value, comment, raw: line }
   })
 }
 
@@ -1260,17 +1352,38 @@ export function maskEnv(entries: EnvEntry[]): Array<{ key: string; masked: strin
     .map((e) => ({ key: e.key, masked: e.value === '' ? '' : MASK }))
 }
 
-/** Replaces a key's value in place, or appends it before any trailing blank line. */
+/**
+ * Replaces a key's value in place, or appends it before any trailing blank line.
+ *
+ * The existing entry's inline comment is carried onto the rebuilt line. Dropping it
+ * would make editing one variable destroy the note explaining why it is set — the
+ * precise loss this module exists to prevent, and one the user would only notice
+ * later, over SSH.
+ */
 export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvEntry[] {
   const index = entries.findIndex((e) => e.kind === 'pair' && e.key === key)
   if (index >= 0) {
+    const existing = entries[index]
+    const comment = existing?.kind === 'pair' ? existing.comment : ''
     const next = [...entries]
-    next[index] = { kind: 'pair', key, value, raw: `${key}=${value}` }
+    next[index] = {
+      kind: 'pair',
+      key,
+      value,
+      comment,
+      raw: `${key}=${quoteIfNeeded(value)}${comment}`,
+    }
     return next
   }
 
   const trailingBlank = entries.length > 0 && entries[entries.length - 1]?.raw === ''
-  const newEntry: EnvEntry = { kind: 'pair', key, value, raw: `${key}=${value}` }
+  const newEntry: EnvEntry = {
+    kind: 'pair',
+    key,
+    value,
+    comment: '',
+    raw: `${key}=${quoteIfNeeded(value)}`,
+  }
   return trailingBlank
     ? [...entries.slice(0, -1), newEntry, { kind: 'other', raw: '' }]
     : [...entries, newEntry]
@@ -1280,7 +1393,7 @@ export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvE
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/env-file.test.ts`
-Expected: PASS, 10 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Commit**
 
