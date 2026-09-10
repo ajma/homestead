@@ -3728,6 +3728,16 @@ git commit -m "Detect available image updates from registry digests"
 
 ---
 
+## Superseded by the final fix wave
+
+The whole-branch review returned NOT READY. Where this plan's code blocks disagree with
+`docs/superpowers/plans/2026-09-10-homestead-1b-ii-final-fixes.md`, that document wins. It
+covers the unhandled rejection from a failed job write that terminates the process, the
+`check()` "never throws" contract that its own compose-file read breaks, the abandoned log
+stream that holds a Docker socket open for the life of the process, the 503/404
+disagreement three lines apart in the container routes, and three assertions that survive
+their subject being deleted.
+
 ## Self-Review
 
 **Spec coverage for 1B-ii's slice:**
