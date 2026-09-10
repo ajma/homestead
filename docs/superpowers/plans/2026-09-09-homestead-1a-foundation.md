@@ -2229,7 +2229,7 @@ Read `node_modules/better-auth/dist/index.d.ts` for `betterAuth`, and the `drizz
 ```ts
 import { describe, expect, it } from 'vitest'
 import { buildTestApp } from '@server/test-helpers'
-import { users } from '@server/db/schema'
+import { sessions, users } from '@server/db/schema'
 
 describe('authentication', () => {
   it('signs a user up and issues a session cookie', async () => {
