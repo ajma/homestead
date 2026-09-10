@@ -1653,6 +1653,7 @@ export class Scheduler {
     host: Host
     composeConfig: ComposeConfigCache
     runners: Record<ProbeRow['kind'], ProbeRunner>
+    onProbeError?: (probeId: string, error: unknown) => void
     now?: () => number
     random?: () => number
   })
@@ -1805,6 +1806,48 @@ describe('Scheduler.tick', () => {
     expect(peak).toBeLessThanOrEqual(8)
   })
 
+  it('writes one sample per probe when many run at once', async () => {
+    // The assertion the concurrency test does not make, and the one that matters.
+    // libSQL has a single connection, so overlapping `db.transaction()` calls fail with
+    // TRANSACTION_ACTIVE. Measured before persistence was serialised: three probes ran,
+    // the runner was called three times, and exactly ONE sample was written — the rest
+    // rejected into the per-probe catch while the tick reported success.
+    const { db, host } = await seed(12)
+    const failures: string[] = []
+    const runner: ProbeRunner = { kind: 'docker', async run() { return { status: 'up' } } }
+    const scheduler = new Scheduler({
+      db, host, composeConfig: new ComposeConfigCache(host),
+      runners: { docker: runner, http_internal: runner, http_external: runner },
+      onProbeError: (probeId) => failures.push(probeId),
+      now: () => NOW, random: () => 0.5,
+    })
+
+    expect(await scheduler.tick()).toBe(12)
+    expect(failures).toEqual([])
+    expect(await db.select().from(checkResults)).toHaveLength(12)
+    const rows = await db.select().from(probes)
+    expect(rows.every((probe) => probe.lastStatus === 'up')).toBe(true)
+  })
+
+  it('reports a probe failure rather than swallowing it', async () => {
+    const { db, host, ids } = await seed(1)
+    const failures: Array<[string, string]> = []
+    const runner: ProbeRunner = {
+      kind: 'docker',
+      async run() {
+        throw new Error('runner exploded')
+      },
+    }
+    await new Scheduler({
+      db, host, composeConfig: new ComposeConfigCache(host),
+      runners: { docker: runner, http_internal: runner, http_external: runner },
+      onProbeError: (probeId, error) =>
+        failures.push([probeId, error instanceof Error ? error.message : String(error)]),
+      now: () => NOW, random: () => 0.5,
+    }).tick()
+    expect(failures).toEqual([[ids[0], 'runner exploded']])
+  })
+
   it('reschedules a probe whose runner throws, and keeps going', async () => {
     // One broken probe must not stop the tick or wedge itself into running every 5s
     // forever.
@@ -1887,6 +1930,8 @@ export class Scheduler {
   private timer: NodeJS.Timeout | null = null
   private ticking = false
   private readonly listeners = new Set<(t: PersistedTransition) => void>()
+  /** Tail of the persistence chain. See `serialise`. */
+  private writes: Promise<unknown> = Promise.resolve()
 
   constructor(
     private readonly deps: {
@@ -1894,6 +1939,12 @@ export class Scheduler {
       host: Host
       composeConfig: ComposeConfigCache
       runners: Record<ProbeRow['kind'], ProbeRunner>
+      /**
+       * Called when one probe's turn fails. The scheduler deliberately continues, so
+       * without this a systemic fault — a wedged database, a bad migration — looks
+       * exactly like everything working.
+       */
+      onProbeError?: (probeId: string, error: unknown) => void
       now?: () => number
       random?: () => number
     },
@@ -1982,6 +2033,33 @@ export class Scheduler {
     await Promise.all(workers)
   }
 
+  /**
+   * Runs database work one at a time, however many probes are in flight.
+   *
+   * libSQL holds a SINGLE connection, so a second `db.transaction()` opened while the
+   * first is still active fails outright:
+   *
+   *   LibsqlError: TRANSACTION_ACTIVE: This client has a single connection, which an
+   *   open transaction is holding.
+   *
+   * Measured before this existed: with the concurrency limit at 8, three probes ran,
+   * the runner was called three times, and exactly ONE sample was written — the other
+   * two rejected and were swallowed by the per-probe catch, so the tick reported
+   * success while monitoring recorded almost nothing.
+   *
+   * The concurrency limit exists for the slow part — Docker and HTTP — and that stays
+   * parallel. Only the write is serialised, and it is milliseconds.
+   */
+  private serialise<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.writes.then(work, work)
+    // Keep the chain alive after a rejection, without swallowing it for the caller.
+    this.writes = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    return next
+  }
+
   private async runOne(
     probe: ProbeRow,
     containers: ContainerSummary[] | null,
@@ -2002,11 +2080,13 @@ export class Scheduler {
         deps: { host: this.deps.host, composeConfig: this.deps.composeConfig },
       })
 
-      const transition = await persistResult(this.deps.db, probe, result, {
-        now,
-        graceUntil: app.graceUntil,
-        failureThreshold: FAILURE_THRESHOLD,
-      })
+      const transition = await this.serialise(() =>
+        persistResult(this.deps.db, probe, result, {
+          now,
+          graceUntil: app.graceUntil,
+          failureThreshold: FAILURE_THRESHOLD,
+        }),
+      )
 
       if (transition.changed) {
         for (const listener of this.listeners) {
@@ -2018,8 +2098,11 @@ export class Scheduler {
           }
         }
       }
-    } catch {
-      // One probe's failure ends that probe's turn, not the tick.
+    } catch (error) {
+      // One probe's failure ends that probe's turn, not the tick — but it must not be
+      // invisible. A silent catch here hid every probe result being dropped: the tick
+      // reported success while one write in eight survived.
+      this.deps.onProbeError?.(probe.id, error)
     }
   }
 
