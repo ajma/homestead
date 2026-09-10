@@ -2099,6 +2099,9 @@ import type { Db } from './db/client.js'
 import type { Host } from './host/types.js'
 import { healthRoutes } from './routes/health.js'
 
+/** Headers a client must never be able to set on the request Better-Auth sees. */
+const CLIENT_IP_HEADERS = new Set(['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip'])
+
 export type AppDeps = { config: Config; db: Db; host: Host; secrets: SecretStore }
 
 declare module 'fastify' {
@@ -2274,6 +2277,36 @@ describe('authentication', () => {
     await app.close()
   })
 
+  it('records the real peer, not a forged forwarded chain, as the session IP', async () => {
+    const app = await buildTestApp()
+    await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up/email',
+      // An untrusted LAN peer appends a trusted proxy to the chain. Before the header
+      // strip in app.ts, Better-Auth persisted 203.0.113.99 here.
+      remoteAddress: '192.168.1.50',
+      headers: { 'x-forwarded-for': '203.0.113.99, 127.0.0.1', 'cf-connecting-ip': '198.51.100.7' },
+      payload: { email: 'lan@example.com', password: 'correct-horse-battery', name: 'Lan' },
+    })
+    const [session] = await app.deps.db.select().from(sessions)
+    expect(session?.ipAddress).toBe('192.168.1.50')
+    await app.close()
+  })
+
+  it('still resolves an IP for a loopback client', async () => {
+    const app = await buildTestApp()
+    await app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up/email',
+      remoteAddress: '127.0.0.1',
+      payload: { email: 'local@example.com', password: 'correct-horse-battery', name: 'Local' },
+    })
+    const [session] = await app.deps.db.select().from(sessions)
+    // Must not be null: a null IP drops Better-Auth's rate limiter into one shared bucket.
+    expect(session?.ipAddress).toBe('127.0.0.1')
+    await app.close()
+  })
+
   it('does not mark cookies Secure when the base URL is plain HTTP', async () => {
     const app = await buildTestApp()
     const res = await app.inject({
@@ -2326,13 +2359,19 @@ export function createAuth(config: Config, db: Db) {
       // Do NOT force useSecureCookies. Homestead is reachable over plain HTTP on
       // the LAN by design, and browsers withhold Secure cookies from such origins.
       ipAddress: {
-        ipAddressHeaders: ['cf-connecting-ip', 'x-forwarded-for'],
-        // Better-Auth reads these headers itself, independently of Fastify's
-        // trustProxy. Without a trusted-proxy list it would believe them from any
-        // peer, re-opening inside auth exactly the forgery that narrowing Fastify's
-        // trustProxy closes — and auth is where a forged IP does the most damage,
-        // since it keys rate limiting on login.
-        trustedProxies: config.trustedProxies,
+        // Exactly one header, and `app.ts` guarantees the client cannot set it: it
+        // strips every client-supplied IP header and substitutes Fastify's
+        // `request.ip`, which already honours the narrowed trustProxy allowlist.
+        ipAddressHeaders: ['x-forwarded-for'],
+        // `trustedProxies` is deliberately NOT set. It exists for deployments where
+        // Better-Auth parses a real forwarded chain, and here it would do harm twice
+        // over. It cannot help: `auth.handler` receives a Web API Request with no
+        // connection peer, so the option can only walk the header chain — measured, a
+        // LAN client sending "203.0.113.99, 127.0.0.1" had that first entry persisted
+        // as the session IP. And it would hurt: with a single authoritative entry, a
+        // genuine loopback client's "127.0.0.1" would match the trusted list, be
+        // skipped, and resolve to no IP at all — which drops Better-Auth's rate
+        // limiter into one shared bucket for every such request.
       },
     },
   })
@@ -2360,10 +2399,26 @@ app.route({
   async handler(request, reply) {
     const url = new URL(request.url, deps.config.baseUrl)
     const headers = new Headers()
+
+    // Client-supplied IP headers are DROPPED, never forwarded.
+    //
+    // Better-Auth resolves the client IP from headers alone — `auth.handler` takes a
+    // Web API Request, which carries no connection peer, so its `trustedProxies`
+    // option can only walk the forwarded chain and cannot check who actually
+    // connected. Measured: a LAN peer sending
+    //   X-Forwarded-For: 203.0.113.99, 127.0.0.1
+    // had Better-Auth persist 203.0.113.99 as the session IP, because the walk skips
+    // the trusted tail and returns the first untrusted entry.
+    //
+    // Fastify has already computed the real peer in `request.ip`, honouring the
+    // narrowed `trustProxy` allowlist. So we substitute exactly one authoritative
+    // value and let nothing the client sent survive.
     for (const [key, value] of Object.entries(request.headers)) {
+      if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue
       if (typeof value === 'string') headers.set(key, value)
       else if (Array.isArray(value)) headers.set(key, value.join(','))
     }
+    headers.set('x-forwarded-for', request.ip)
     const response = await deps.auth.handler(
       new Request(url, {
         method: request.method,
