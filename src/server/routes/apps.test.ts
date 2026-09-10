@@ -465,4 +465,66 @@ describe("app inventory API", () => {
     expect(apps[0].statusDetail).toBe("compose file could not be read");
     await app.close();
   });
+
+  it("bounds concurrent compose config calls to 4 on a cold cache", async () => {
+    // GET /api/apps calls statusFor per row in a Promise.all, and each cache miss spawns
+    // `docker compose config`. On the first page load after restart, that's one Go binary
+    // per app simultaneously — thirty on the target NAS.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    // Set up files and results before tracking concurrency.
+    const directories: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const dir = `app${i}`;
+      directories.push(dir);
+      app.deps.host.files.set(`${dir}/compose.yaml`, "services: {}\n");
+    }
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "p", services: { web: { image: "nginx" } } }),
+      stderr: "",
+    });
+
+    // Track peak concurrency BEFORE adoption so we measure the cold cache on first list.
+    let inFlight = 0;
+    let peakConcurrency = 0;
+    const originalRunCompose = app.deps.host.runCompose.bind(app.deps.host);
+    app.deps.host.runCompose = async (target, args, opts) => {
+      inFlight++;
+      peakConcurrency = Math.max(peakConcurrency, inFlight);
+      // Small delay to ensure promises actually overlap and concurrency is measurable.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const result = await originalRunCompose(target, args, opts);
+      inFlight--;
+      return result;
+    };
+
+    await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories },
+    });
+
+    // Reset tracking - we want to measure the list call, not adoption.
+    inFlight = 0;
+    peakConcurrency = 0;
+
+    // Clear the cache to force a cold-cache scenario on the list call.
+    for (const dir of directories) {
+      app.deps.composeConfig.invalidate({ directory: dir, composeFile: "compose.yaml" });
+    }
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toHaveLength(20);
+    // Without concurrency limiting, this would be 20 (all at once).
+    expect(peakConcurrency).toBeLessThanOrEqual(4);
+    await app.close();
+  });
 });

@@ -290,16 +290,29 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       dockerReachable = false;
     }
 
-    return Promise.all(
-      rows.map(async (row) => {
-        if (!dockerReachable) {
-          const status = { status: "unknown" as const, detail: "Docker is unreachable" };
+    // Bound concurrency to 4. Each cache miss spawns `docker compose config`, and on a
+    // cold cache that's one Go binary per app simultaneously — thirty on this NAS. The
+    // irony: we collapsed thirty Docker API calls into one above, then fan out thirty
+    // processes beside it.
+    const CONCURRENCY_LIMIT = 4;
+    const results: (typeof rows.$inferSelect & { status: unknown })[] = [];
+
+    for (let i = 0; i < rows.length; i += CONCURRENCY_LIMIT) {
+      const chunk = rows.slice(i, i + CONCURRENCY_LIMIT);
+      const chunkResults = await Promise.all(
+        chunk.map(async (row) => {
+          if (!dockerReachable) {
+            const status = { status: "unknown" as const, detail: "Docker is unreachable" };
+            return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
+          }
+          const status = await statusFor(row, byProject.get(row.projectName ?? "") ?? []);
           return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
-        }
-        const status = await statusFor(row, byProject.get(row.projectName ?? "") ?? []);
-        return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
-      }),
-    );
+        }),
+      );
+      results.push(...chunkResults);
+    }
+
+    return results;
   });
 
   app.get("/api/apps/:id", async (request, reply) => {
