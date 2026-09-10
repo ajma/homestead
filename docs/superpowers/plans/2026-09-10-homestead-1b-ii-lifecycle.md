@@ -1271,7 +1271,12 @@ Add `StringDecoder` from `node:string_decoder`, `ChunkQueue` and `LogDemultiplex
     return found;
   }
 
+  /** Mirrors LocalHost: `null` means never pulled; anything else throws. */
+  inspectImageErrors = new Map<string, Error>();
+
   async inspectImage(ref: string): Promise<ImageInspect | null> {
+    const error = this.inspectImageErrors.get(ref);
+    if (error) throw error;
     return this.images.get(ref) ?? null;
   }
 ```
@@ -3042,6 +3047,9 @@ export type ImageRef = { registry: string; repository: string; reference: string
 
 const DEFAULT_REGISTRY = 'registry-1.docker.io'
 
+/** Per-request bound. Three requests per image worst case, so ~30s for one lookup. */
+const REQUEST_TIMEOUT_MS = 10_000
+
 /**
  * Every media type a manifest endpoint might answer with.
  *
@@ -3174,7 +3182,12 @@ export function createRegistryClient(deps: {
       const url = `https://${ref.registry}/v2/${ref.repository}/manifests/${ref.reference}`
       const headers: Record<string, string> = { accept: ACCEPT }
 
-      let response = await deps.fetch(url, { method: 'HEAD', headers })
+      // Every request is bounded. `POST /images/check` runs this loop inside the request,
+      // and 1C will run it across every app: one registry that accepts a connection and
+      // then says nothing would otherwise stall the whole sweep.
+      const timeout = () => AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+
+      let response = await deps.fetch(url, { method: 'HEAD', headers, signal: timeout() })
 
       if (response.status === 401) {
         const challenge = parseChallenge(response.headers.get('www-authenticate') ?? '')
@@ -3187,7 +3200,10 @@ export function createRegistryClient(deps: {
           challenge.scope ?? `repository:${ref.repository}:pull`,
         )
 
-        const tokenResponse = await deps.fetch(tokenUrl.toString(), { method: 'GET' })
+        const tokenResponse = await deps.fetch(tokenUrl.toString(), {
+          method: 'GET',
+          signal: timeout(),
+        })
         if (!tokenResponse.ok) return fail(`token endpoint returned ${tokenResponse.status}`)
         const body = (await tokenResponse.json()) as { token?: string; access_token?: string }
         const token = body.token ?? body.access_token
@@ -3196,7 +3212,7 @@ export function createRegistryClient(deps: {
         headers.authorization = `Bearer ${token}`
         // Exactly one retry. A registry that rejects its own token will keep doing so,
         // and a loop here would hammer it once per service per app.
-        response = await deps.fetch(url, { method: 'HEAD', headers })
+        response = await deps.fetch(url, { method: 'HEAD', headers, signal: timeout() })
       }
 
       if (!response.ok) return fail(`manifest request returned ${response.status}`)
@@ -3338,6 +3354,76 @@ describe('ImageUpdateChecker', () => {
     expect(web?.updateAvailable).toBe(false)
   })
 
+  it('compares the digest for the repository actually being checked', async () => {
+    // An image tagged into two repositories carries one RepoDigests entry per
+    // repository. Taking index 0 compares a Docker Hub digest against one fetched from a
+    // private registry — they never match, so the app shows an update that pulling can
+    // never clear. A badge that never clears teaches the user to ignore every badge.
+    const { db, host, app } = await seed()
+    host.composeResults.set('config --format json', {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        name: 'jellyfin',
+        services: { web: { image: 'myregistry.example.com/nginx:alpine' } },
+      }),
+      stderr: '',
+    })
+    host.images.set('myregistry.example.com/nginx:alpine', {
+      id: 'x',
+      repoDigests: ['nginx@sha256:hub', 'myregistry.example.com/nginx@sha256:private'],
+    })
+    const checker = new ImageUpdateChecker({
+      db, host, composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => 'sha256:private' },
+    })
+    await checker.check(app)
+    const [web] = await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id))
+    expect(web?.currentDigest).toBe('sha256:private')
+    expect(web?.updateAvailable).toBe(false)
+  })
+
+  it('records a service whose local inspect throws, rather than omitting it', async () => {
+    // A wedged Docker socket throws from inspectImage. Skipping the row leaves the
+    // service silently absent from the panel, which reads as "not checked" rather than
+    // "checked, could not tell".
+    const { db, host, app } = await seed()
+    host.inspectImageErrors.set('postgres:16', new Error('connect ENOENT'))
+    const checker = new ImageUpdateChecker({
+      db, host, composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => 'sha256:new' },
+    })
+    await expect(checker.check(app)).resolves.toBeUndefined()
+    const rows = await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id))
+    const db16 = rows.find((r) => r.serviceName === 'db')
+    expect(db16).toBeDefined()
+    expect(db16?.currentDigest).toBeNull()
+    expect(db16?.updateAvailable).toBe(false)
+    expect(db16?.checkedAt).toBeGreaterThan(0)
+  })
+
+  it('forgets a service the compose file no longer declares', async () => {
+    const { db, host, app } = await seed()
+    host.images.set('nginx:alpine', { id: 'x', repoDigests: ['nginx@sha256:old'] })
+    const checker = new ImageUpdateChecker({
+      db, host, composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => 'sha256:new' },
+    })
+    await checker.check(app)
+    expect(await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id))).toHaveLength(2)
+
+    // `db` is dropped from the file.
+    host.composeResults.set('config --format json', {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: 'jellyfin', services: { web: { image: 'nginx:alpine' } } }),
+      stderr: '',
+    })
+    host.files.set('jellyfin/compose.yaml', 'services: {}\n# changed\n')
+    await checker.check(app)
+    const rows = await db.select().from(imageStatus).where(eq(imageStatus.appId, app.id))
+    // Otherwise the removed service keeps advertising an update for something gone.
+    expect(rows.map((r) => r.serviceName)).toEqual(['web'])
+  })
+
   it('re-running replaces rather than duplicating', async () => {
     const { db, host, app } = await seed()
     host.images.set('nginx:alpine', { id: 'x', repoDigests: ['nginx@sha256:old'] })
@@ -3371,11 +3457,32 @@ Expected: FAIL — cannot find module `@server/apps/image-updates`.
 - [ ] **Step 3: Write `src/server/apps/image-updates.ts`**
 
 ```ts
-import { and, eq } from 'drizzle-orm'
+import { and, eq, notInArray } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
 import { apps, imageStatus } from '../db/schema.js'
 import type { Host } from '../host/types.js'
 import type { ComposeConfigCache } from './compose-config.js'
+import { parseImageRef } from './registry.js'
+
+/**
+ * The digest for the repository we are actually checking.
+ *
+ * An image tagged into more than one repository carries one `RepoDigests` entry per
+ * repository — `["nginx@sha256:A", "myregistry.com/nginx@sha256:B"]`. Taking index 0
+ * compares a digest from Docker Hub against one fetched from a private registry, which
+ * never matches, so the app shows an update that pulling can never clear. A badge that
+ * never goes away is worse than no badge: it teaches the user to ignore all of them.
+ */
+function digestForRepository(repoDigests: string[], image: string): string | null {
+  const wanted = parseImageRef(image).repository
+  for (const entry of repoDigests) {
+    const [repo, digest] = entry.split('@')
+    if (repo === undefined || digest === undefined) continue
+    if (parseImageRef(repo).repository === wanted) return digest
+  }
+  // No entry names this repository — comparing an unrelated one would invent an update.
+  return null
+}
 
 export type AppRow = typeof apps.$inferSelect
 
@@ -3407,10 +3514,18 @@ export class ImageUpdateChecker {
     for (const service of resolved.resolved.services) {
       if (!service.image) continue
 
-      const local = await this.deps.host.inspectImage(service.image)
-      // `RepoDigests` entries look like `nginx@sha256:…`; the digest is what compares.
-      const currentDigest = local?.repoDigests[0]?.split('@')[1] ?? null
-      const latestDigest = await this.deps.registry.latestDigest(service.image)
+      let currentDigest: string | null = null
+      let latestDigest: string | null = null
+      try {
+        const local = await this.deps.host.inspectImage(service.image)
+        currentDigest = local ? digestForRepository(local.repoDigests, service.image) : null
+        latestDigest = await this.deps.registry.latestDigest(service.image)
+      } catch {
+        // A wedged Docker socket throws from `inspectImage`. Record the attempt anyway:
+        // skipping the row leaves the service silently absent from the panel, which
+        // reads as "not checked" rather than "checked, could not tell". Everywhere else
+        // in this project an unknown is shown as unknown.
+      }
 
       // Both must be known. A null latest means the registry could not be reached, and
       // reporting unknown as "update available" trains the user to ignore the badge.
@@ -3434,6 +3549,18 @@ export class ImageUpdateChecker {
           set: row,
         })
     }
+
+    // Forget services the compose file no longer declares. Without this a service that
+    // was removed keeps its row forever, and its stale badge advertises an update for
+    // something that no longer exists.
+    const live = resolved.resolved.services.map((service) => service.name)
+    await this.deps.db
+      .delete(imageStatus)
+      .where(
+        live.length === 0
+          ? eq(imageStatus.appId, app.id)
+          : and(eq(imageStatus.appId, app.id), notInArray(imageStatus.serviceName, live)),
+      )
   }
 }
 ```
@@ -3539,9 +3666,24 @@ const images = new ImageUpdateChecker({
 
 - [ ] **Step 6: Wire and run**
 
-`AppDeps` gains `images: ImageUpdateChecker`. In `src/server/index.ts` build it with the real
-client: `createRegistryClient({ fetch })`. Register `imageRoutes` after `containerRoutes`, before
-`spaRoutes`.
+`AppDeps` gains `images: ImageUpdateChecker`. Register `imageRoutes` after `containerRoutes`,
+before `spaRoutes`.
+
+In `src/server/index.ts` build the real client **with the `onError` hook wired**. Task 8 added
+it precisely so a systematically broken registry — a typo'd private host, expired credentials, a
+rate limit — is diagnosable rather than silent, and it earns nothing if nobody passes it:
+
+```ts
+const registry = createRegistryClient({
+  fetch,
+  onError: (image, reason) => {
+    // Not fatal: `latestDigest` returns null and the sweep continues. But a registry
+    // failing every day for a month should leave a trail.
+    console.warn(`[image-check] ${image}: ${reason}`)
+  },
+})
+const images = new ImageUpdateChecker({ db, host, composeConfig, registry })
+```
 
 Run: `pnpm test && pnpm exec tsc --noEmit && pnpm exec biome check .`
 
