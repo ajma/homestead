@@ -38,6 +38,7 @@ export class FakeHost implements Host {
   composeResults = new Map<string, ComposeResult>();
   composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
   readTextFileErrors = new Map<string, Error>();
+  deleteFileErrors = new Map<string, Error>();
   listContainersCalls = 0;
 
   async listAppDirectories(): Promise<DiscoveredDir[]> {
@@ -83,6 +84,8 @@ export class FakeHost implements Host {
   }
 
   async deleteFile(rel: string): Promise<void> {
+    const error = this.deleteFileErrors.get(rel);
+    if (error) throw error;
     this.files.delete(rel);
   }
 

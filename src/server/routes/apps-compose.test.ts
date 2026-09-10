@@ -171,4 +171,59 @@ describe("compose file API", () => {
     ).toEqual([]);
     await app.close();
   });
+
+  it("does not mask validation errors with cleanup errors", async () => {
+    // If cleanup throws in the finally block it replaces whatever the try block was
+    // reporting, so a failed validation would surface as a filesystem error instead
+    // of the compose message the user needs to see.
+    const { app, cookie, id } = await withAdoptedApp();
+    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+      exitCode: 1,
+      stdout: "",
+      stderr: 'service "web" depends on undefined service "db"',
+    });
+
+    // Make cleanup fail for all scratch files.
+    (app.deps.host as FakeHost).deleteFileErrors.set(
+      "jellyfin/.homestead-validate-PLACEHOLDER",
+      new Error("EACCES: permission denied"),
+    );
+    // Match any scratch file path by overriding the deleteFile method.
+    const originalDelete = (app.deps.host as FakeHost).deleteFile.bind(app.deps.host);
+    (app.deps.host as FakeHost).deleteFile = async (rel: string) => {
+      if (rel.includes(".homestead-validate-")) {
+        throw new Error("EACCES: permission denied");
+      }
+      return originalDelete(rel);
+    };
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/compose/validate`,
+      headers: { cookie },
+      payload: { content: "services:\n  web:\n    depends_on: [db]\n" },
+    });
+
+    // Must report the validation error, not the cleanup error.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().valid).toBe(false);
+    expect(res.json().message).toContain("db");
+
+    // Prove it still works when valid.
+    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: VALID,
+      stderr: "",
+    });
+    const valid = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/compose/validate`,
+      headers: { cookie },
+      payload: { content: "services:\n  web:\n    image: nginx\n" },
+    });
+    expect(valid.statusCode).toBe(200);
+    expect(valid.json().valid).toBe(true);
+
+    await app.close();
+  });
 });
