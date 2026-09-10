@@ -18,14 +18,25 @@ declare module "fastify" {
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({
     logger: deps.config.nodeEnv !== "test",
-    // Real client IPs: the tunnel forwards CF-Connecting-IP; LAN requests carry none.
-    trustProxy: true,
+    // NEVER `trustProxy: true`. That believes X-Forwarded-For from any peer, and
+    // Homestead is reachable on the LAN by design — so any LAN client could forge
+    // `request.ip`, poisoning audit records and defeating IP-keyed rate limiting by
+    // rotating the header. Trust only the tunnel's own origin: cloudflared runs with
+    // network_mode: host and reaches Homestead over loopback, while LAN clients
+    // connect from a LAN address and are therefore not believed.
+    trustProxy: deps.config.trustedProxies,
   });
 
   app.decorate("deps", deps);
 
   await app.register(cookie);
-  await app.register(rateLimit, { max: 300, timeWindow: "1 minute" });
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: "1 minute",
+    // Explicit so the trust boundary is visible at the point it matters. `request.ip`
+    // is only meaningful because trustProxy is narrowed above.
+    keyGenerator: (request) => request.ip,
+  });
 
   await app.register(healthRoutes);
 

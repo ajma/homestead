@@ -15,6 +15,10 @@ const schema = z.object({
   HOMESTEAD_DOCKER_SOCKET: z.string().default("/var/run/docker.sock"),
   HOMESTEAD_BASE_URL: z.url(),
   HOMESTEAD_TRUSTED_ORIGINS: z.string().default(""),
+  // Peers whose X-Forwarded-For / CF-Connecting-IP headers may be believed.
+  // Defaults to loopback: cloudflared runs with network_mode: host and reaches
+  // Homestead over localhost, while LAN clients connect from a LAN address.
+  HOMESTEAD_TRUSTED_PROXIES: z.string().default("127.0.0.1,::1"),
   HOMESTEAD_ACCESS_TEAM_DOMAIN: optionalString,
   HOMESTEAD_ACCESS_AUD: optionalString,
   HOMESTEAD_SKIP_MOUNT_PREFLIGHT: z
@@ -32,6 +36,7 @@ export type Config = {
   dockerSocket: string;
   baseUrl: string;
   trustedOrigins: string[];
+  trustedProxies: string[];
   accessTeamDomain: string | null;
   accessAud: string | null;
   accessEnabled: boolean;
@@ -55,6 +60,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
 
   const trustedOrigins = [...new Set([parsed.HOMESTEAD_BASE_URL, ...extraOrigins])];
 
+  const trustedProxies = parsed.HOMESTEAD_TRUSTED_PROXIES.split(",")
+    .map((p) => p.trim())
+    .filter((p) => p !== "");
+
   const accessTeamDomain = parsed.HOMESTEAD_ACCESS_TEAM_DOMAIN;
   const accessAud = parsed.HOMESTEAD_ACCESS_AUD;
 
@@ -67,6 +76,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     dockerSocket: parsed.HOMESTEAD_DOCKER_SOCKET,
     baseUrl: parsed.HOMESTEAD_BASE_URL,
     trustedOrigins,
+    trustedProxies,
     accessTeamDomain,
     accessAud,
     accessEnabled: accessTeamDomain !== null && accessAud !== null,
