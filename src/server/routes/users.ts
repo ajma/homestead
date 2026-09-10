@@ -1,5 +1,6 @@
 import { ROLES } from "@shared/types";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, exists, isNotNull, isNull, ne, notExists, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
@@ -26,10 +27,49 @@ const publicUser = {
   createdAt: users.createdAt,
 };
 
+/** Self-join alias, needed to reference `users` inside a subquery on `users`. */
+const otherUsers = alias(users, "other_users");
+
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   const { db, auth } = app.deps;
 
   const countUsers = async () => (await db.select({ id: users.id }).from(users)).length;
+
+  /**
+   * SQL condition guarding the invariant "at least one administrator can still log in".
+   *
+   * Two properties, both learned the hard way:
+   *
+   * 1. It counts only ACTIVE admins (`disabled_at IS NULL`). Counting disabled ones let
+   *    an operator disable admin B, then disable admin A, and be left with zero admins
+   *    who can sign in — measured, both requests returned 200. Recovery from that state
+   *    means editing SQLite by hand, because the bootstrap has permanently closed.
+   * 2. It is a CONDITION on the mutating statement, not a preceding SELECT. A
+   *    check-then-write pair can interleave with a concurrent one — two requests each
+   *    removing a different admin can both observe the other and both proceed.
+   *
+   * The row being mutated also satisfies the guard when it is not itself an active
+   * admin, so deleting or disabling a viewer is never blocked by it.
+   */
+  const lastActiveAdminIsSafe = (targetId: string) =>
+    or(
+      // Some OTHER administrator remains who can still log in.
+      exists(
+        db
+          .select({ ok: sql`1` })
+          .from(otherUsers)
+          .where(
+            and(
+              eq(otherUsers.role, "admin"),
+              ne(otherUsers.id, targetId),
+              isNull(otherUsers.disabledAt),
+            ),
+          ),
+      ),
+      // Or this row is not an active administrator, so removing it strips nothing.
+      ne(users.role, "admin"),
+      isNotNull(users.disabledAt),
+    );
 
   async function audit(entry: {
     userId: string | null;
@@ -65,10 +105,27 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (!result.ok) return reply.code(result.status).send(await result.json());
 
     // Role is server-owned, so promote after creation rather than via the sign-up body.
-    await db
+    //
+    // The promotion is CONDITIONAL on no administrator existing yet, in one statement.
+    // The `countUsers()` check above is a fast path, not a guard: `signUpEmail` awaits,
+    // so two concurrent bootstraps can both pass it and both create a user. Making the
+    // UPDATE itself conditional means exactly one can win, whatever the interleaving.
+    // The loser's account survives as a viewer — an unwanted row an admin can delete,
+    // not an unwanted administrator. Reverting a promotion after the fact would not be
+    // equivalent: the loser would already hold a session cookie for an admin account.
+    const promoted = await db
       .update(users)
       .set({ role: "admin", scopeAllApps: true })
-      .where(eq(users.email, body.email));
+      .where(
+        and(
+          eq(users.email, body.email),
+          notExists(db.select({ ok: sql`1` }).from(otherUsers).where(eq(otherUsers.role, "admin"))),
+        ),
+      )
+      .returning({ id: users.id });
+
+    if (promoted.length === 0) return reply.code(409).send({ error: "already_initialised" });
+
     const [row] = await db.select(publicUser).from(users).where(eq(users.email, body.email));
     await audit({
       userId: row?.id ?? null,
@@ -136,15 +193,11 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(request.body);
 
-    if (body.role === "viewer" || body.disabled === true) {
-      const admins = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(and(eq(users.role, "admin"), ne(users.id, id)));
-      if (admins.length === 0) return reply.code(409).send({ error: "last_admin" });
-    }
+    // Demoting or disabling can strip the last administrator, so those two changes carry
+    // the guard as part of the UPDATE itself rather than as a preceding SELECT.
+    const stripsAdminPowers = body.role === "viewer" || body.disabled === true;
 
-    await db
+    const updated = await db
       .update(users)
       .set({
         ...(body.name !== undefined ? { name: body.name } : {}),
@@ -155,7 +208,17 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
             { disabledAt: body.disabled ? Date.now() : null }
           : {}),
       })
-      .where(eq(users.id, id));
+      .where(
+        stripsAdminPowers ? and(eq(users.id, id), lastActiveAdminIsSafe(id)) : eq(users.id, id),
+      )
+      .returning({ id: users.id });
+
+    if (updated.length === 0) {
+      const [exists_] = await db.select({ id: users.id }).from(users).where(eq(users.id, id));
+      return exists_
+        ? reply.code(409).send({ error: "last_admin" })
+        : reply.code(404).send({ error: "not_found" });
+    }
 
     await audit({
       userId: ctx.userId,
@@ -196,13 +259,18 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const ctx = requireAdmin(request);
     const { id } = z.object({ id: z.string() }).parse(request.params);
 
-    const admins = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(and(eq(users.role, "admin"), ne(users.id, id)));
-    if (admins.length === 0) return reply.code(409).send({ error: "last_admin" });
+    const deleted = await db
+      .delete(users)
+      .where(and(eq(users.id, id), lastActiveAdminIsSafe(id)))
+      .returning({ id: users.id });
 
-    await db.delete(users).where(eq(users.id, id));
+    if (deleted.length === 0) {
+      const [exists_] = await db.select({ id: users.id }).from(users).where(eq(users.id, id));
+      return exists_
+        ? reply.code(409).send({ error: "last_admin" })
+        : reply.code(404).send({ error: "not_found" });
+    }
+
     await audit({
       userId: ctx.userId,
       action: "user.deleted",
