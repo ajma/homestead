@@ -2059,6 +2059,25 @@ describe('rollUpStatus', () => {
     )
     expect(result.detail).toBe('2/3 services up, 1 missing')
   })
+
+  it('names the cause rather than only the shortfall', () => {
+    // The dot says something is wrong; this line says what. Without the cause clauses,
+    // three restarting containers and three absent ones both read "0/3 services up".
+    const detail = (containers: ContainerSummary[]) =>
+      rollUpStatus([service('a'), service('b'), service('c')], containers).detail
+
+    expect(detail([
+      container('a', 'restarting'), container('b', 'restarting'), container('c', 'restarting'),
+    ])).toBe('0/3 services up, 3 degraded')
+
+    expect(detail([])).toBe('0/3 services up, 3 missing')
+
+    expect(detail([
+      container('a', 'running', 'Up 2 hours'),
+      container('b', 'running', 'Up 1 minute (unhealthy)'),
+      container('c', 'running', 'Up 3 seconds (health: starting)'),
+    ])).toBe('1/3 services up, 1 starting, 1 failing')
+  })
 })
 ```
 
@@ -2126,8 +2145,20 @@ function classify(service: ResolvedService, container: ContainerSummary | undefi
   }
 }
 
-/** Worst-first, so a service's state is the worst of its replicas'. */
-const SEVERITY: ServiceState[] = ['down', 'degraded', 'starting', 'up', 'completed']
+/**
+ * Worst-first rank, so a service's state is the worst of its replicas'.
+ *
+ * A `Record` rather than an array on purpose: adding a member to `ServiceState` without
+ * ranking it here is then a compile error. An array typed `ServiceState[]` accepts a
+ * missing entry silently, and the new state would fall through to the `down` default.
+ */
+const SEVERITY: Record<ServiceState, number> = {
+  down: 0,
+  degraded: 1,
+  starting: 2,
+  up: 3,
+  completed: 4,
+}
 
 /**
  * Collapses one service's containers into a single state.
@@ -2139,10 +2170,10 @@ const SEVERITY: ServiceState[] = ['down', 'degraded', 'starting', 'up', 'complet
  * module exists to prevent.
  */
 function worst(states: ServiceState[]): ServiceState {
-  for (const candidate of SEVERITY) {
-    if (states.includes(candidate)) return candidate
-  }
-  return 'down'
+  return states.reduce<ServiceState>(
+    (acc, state) => (SEVERITY[state] < SEVERITY[acc] ? state : acc),
+    'completed',
+  )
 }
 
 export function rollUpStatus(
@@ -2167,12 +2198,22 @@ export function rollUpStatus(
   const up = count('up')
   const completed = count('completed')
   const missing = expected.filter((s) => (byService.get(s.name) ?? []).length === 0).length
+  // A service that is `down` but has a container is failing, not absent — an unhealthy
+  // health check or a non-zero exit. Separating the two is the whole point of the line.
+  const failing = count('down') - missing
 
   // `completed` counts toward the numerator. A one-shot that exited zero IS in its
   // intended state, and excluding it produced a green dot beside the words
-  // "0/1 services up" — which reads as broken. The trailing clause disambiguates.
+  // "0/1 services up" — which reads as broken.
+  //
+  // The remaining clauses name the cause, which is what this line is for: the dot says
+  // something is wrong, the line says what. Without them a stack of three restarting
+  // containers and a stack with three missing ones both read "0/3 services up".
   const parts = [`${up + completed}/${expected.length} services up`]
   if (completed > 0) parts.push(`${completed} completed`)
+  if (count('starting') > 0) parts.push(`${count('starting')} starting`)
+  if (count('degraded') > 0) parts.push(`${count('degraded')} degraded`)
+  if (failing > 0) parts.push(`${failing} failing`)
   if (missing > 0) parts.push(`${missing} missing`)
   const detail = parts.join(', ')
 
@@ -2186,7 +2227,7 @@ export function rollUpStatus(
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/status.test.ts`
-Expected: PASS, 16 tests.
+Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Commit**
 
