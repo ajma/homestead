@@ -2145,6 +2145,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     keyGenerator: (request) => request.ip,
   })
 
+  // setErrorHandler MUST come before any register(). Fastify child contexts capture the
+  // parent's handler at registration time, so a handler installed afterwards applies only
+  // to root-declared routes — measured: an encapsulated route returned raw SQL with bound
+  // parameters while a root route was correctly redacted.
   await app.register(healthRoutes)
 
   app.setNotFoundHandler(async (request, reply) => {
@@ -2470,7 +2474,7 @@ git commit -m "feat: add Better-Auth with server-owned role and scope fields"
 
 **Interfaces:**
 - Consumes: `Config`
-- Produces: `verifyAccessJwt(opts: { token: string; teamDomain: string; aud: string; fetchJwks?: JwksFetcher }): Promise<{ email: string }>` and `accessSignInPlugin(config: Config)`
+- Produces: `verifyAccessJwt(opts: { token: string; teamDomain: string; aud: string; fetchJwks?: JwksFetcher }): Promise<{ email: string }>` and `isAccessEnabled(config: Config): boolean`. There is deliberately no sign-in plugin, endpoint, or hook in this phase — see the note below
 
 The audience check is the security core. Homestead's purpose is running many Access applications in one Cloudflare account, all issuing tokens signed by the same team keys with the same issuer. A user allowed into Jellyfin holds a genuinely valid token; without `aud` verification they could present it here.
 
