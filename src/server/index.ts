@@ -1,4 +1,5 @@
 import { buildApp } from "./app.js";
+import { createAuth } from "./auth/auth.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -21,11 +22,14 @@ await runMigrations(db);
 const host = new LocalHost("local", config.composeRoot, config.dockerSocket);
 await host.init();
 
+const auth = createAuth(config, db);
+
 const app = await buildApp({
   config,
   db,
   host,
   secrets: new SecretStore(db, config.secretKey),
+  auth,
 });
 
 await app.listen({ port: config.port, host: "0.0.0.0" });

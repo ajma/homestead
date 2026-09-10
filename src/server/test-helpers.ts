@@ -1,4 +1,5 @@
 import { buildApp } from "./app.js";
+import { createAuth } from "./auth/auth.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -69,5 +70,6 @@ export async function buildTestApp() {
   await runMigrations(db);
   const secrets = new SecretStore(db, config.secretKey);
   const host = new FakeHost();
-  return buildApp({ config, db, host, secrets });
+  const auth = createAuth(config, db);
+  return buildApp({ config, db, host, secrets, auth });
 }
