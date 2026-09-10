@@ -84,7 +84,9 @@ describe("app inventory API", () => {
     });
     expect(second.statusCode).toBe(409);
     const list = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
-    expect(list.json()).toHaveLength(1);
+    expect(list.statusCode).toBe(200);
+    const apps = list.json();
+    expect(apps).toHaveLength(1);
     await app.close();
   });
 

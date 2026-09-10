@@ -129,7 +129,25 @@ export async function buildTestApp() {
   const host = new FakeHost();
   const auth = createAuth(config, db);
   const composeConfig = new ComposeConfigCache(host);
-  return buildApp({ config, db, host, secrets, auth, composeConfig });
+  const app = await buildApp({ config, db, host, secrets, auth, composeConfig });
+
+  // Assign each app instance its own source address to avoid rate-limit bucket
+  // collisions. Better-Auth's sign-in rate limiter is process-global and keyed by IP.
+  const instanceIp = getUniqueTestIp();
+  const originalInject = app.inject.bind(app);
+
+  // Wrap inject to default remoteAddress to this instance's IP when not specified.
+  // Preserve the method's type signature and allow tests that need a specific address
+  // to override (X-Forwarded-For forgery test, rate-limit regression test, etc.).
+  // biome-ignore lint/suspicious/noExplicitAny: Complex overloaded Fastify signature
+  (app as any).inject = (opts?: any, cb?: any) => {
+    if (typeof opts === "object" && opts && !("remoteAddress" in opts)) {
+      return originalInject({ ...opts, remoteAddress: instanceIp }, cb);
+    }
+    return originalInject(opts, cb);
+  };
+
+  return app;
 }
 
 const TEST_PASSWORD = "correct-horse-battery";
@@ -142,18 +160,15 @@ function getUniqueTestIp(): string {
 }
 
 export async function signUpAdmin(app: FastifyInstance) {
-  const ip = getUniqueTestIp();
   const res = await app.inject({
     method: "POST",
     url: "/api/setup/admin",
-    remoteAddress: ip,
     payload: { email: "admin@example.com", password: TEST_PASSWORD, name: "Admin" },
   });
   const cookie = String(res.headers["set-cookie"] ?? "").split(";")[0] ?? "";
   const me = await app.inject({
     method: "GET",
     url: "/api/me",
-    remoteAddress: ip,
     headers: { cookie },
   });
   return { cookie, id: me.json().id as string };
@@ -164,12 +179,10 @@ export async function createViewer(
   adminCookie: string,
   scope: { scopeAllApps: boolean; appIds?: string[] } = { scopeAllApps: true },
 ) {
-  const ip = getUniqueTestIp();
   const email = `viewer-${Math.random().toString(36).slice(2)}@example.com`;
   const created = await app.inject({
     method: "POST",
     url: "/api/users",
-    remoteAddress: ip,
     headers: { cookie: adminCookie },
     payload: {
       email,
@@ -183,7 +196,6 @@ export async function createViewer(
   const signIn = await app.inject({
     method: "POST",
     url: "/api/auth/sign-in/email",
-    remoteAddress: ip,
     payload: { email, password: TEST_PASSWORD },
   });
   return {
