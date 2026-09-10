@@ -82,6 +82,17 @@ function parseResolved(stdout: string): ParseOutcome {
 }
 
 /**
+ * Override filenames the compose CLI reads automatically, in fixed order for hash
+ * stability. Iterating a directory read would produce a nondeterministic hash.
+ */
+const OVERRIDE_FILENAMES = [
+  "compose.override.yaml",
+  "compose.override.yml",
+  "docker-compose.override.yaml",
+  "docker-compose.override.yml",
+];
+
+/**
  * Resolves `docker compose config` and caches the result against the compose file's
  * hash.
  *
@@ -117,12 +128,13 @@ export class ComposeConfigCache {
    * Hash of every file the CLI's output depends on.
    *
    * The compose file is not the only input: compose resolves `COMPOSE_PROJECT_NAME`
-   * and `${VAR}` interpolation from the sibling `.env`, both measured. Hashing only
-   * `compose.yaml` would serve a stale project name after an SSH edit to `.env` — and
-   * an out-of-band edit is precisely the case content hashing exists to catch. A
-   * missing `.env` is normal and contributes a constant.
+   * and `${VAR}` interpolation from the sibling `.env`, both measured, and reads
+   * override files automatically. Hashing only `compose.yaml` would serve a stale
+   * service set after an SSH edit to `.env` or an override — and out-of-band edits are
+   * precisely the case content hashing exists to catch. Missing files are normal and
+   * contribute a constant.
    *
-   * An unreadable `.env` must NOT hash the same as an absent one. A single `'absent'`
+   * An unreadable file must NOT hash the same as an absent one. A single `'absent'`
    * for every failure breaks the invariant the hash exists to hold — that distinct
    * input states produce distinct hashes — and the transition is reachable: resolve
    * once with no `.env` (cached as absent), then have one appear that Homestead cannot
@@ -143,7 +155,21 @@ export class ComposeConfigCache {
       .catch(
         (error: unknown) => `unreadable:${error instanceof Error ? error.message : String(error)}`,
       );
-    return `${compose.hash}:${env}`;
+
+    // Override filenames are iterated in fixed order, not discovered via directory read,
+    // so the hash is stable across calls.
+    const overrides: string[] = [];
+    for (const filename of OVERRIDE_FILENAMES) {
+      const hash = await this.host
+        .readTextFile(`${target.directory}/${filename}`)
+        .then((file) => file.hash)
+        .catch((error: unknown) =>
+          error instanceof Error ? `unreadable:${error.message}` : String(error),
+        );
+      overrides.push(hash);
+    }
+
+    return `${compose.hash}:${env}:${overrides.join(":")}`;
   }
 
   async resolve(target: ComposeTarget): Promise<ComposeValidation> {

@@ -160,4 +160,18 @@ describe("ComposeConfigCache", () => {
     });
     expect((await cache.resolve(target)).valid).toBe(true);
   });
+
+  it("re-runs the CLI when an override file changes", async () => {
+    // Compose reads compose.override.yaml automatically. Editing one over SSH changes
+    // the resolved services without touching the base file, so the override must be part
+    // of inputHash or a stale service set is served.
+    const host = hostWith(configJson);
+    host.files.set("jellyfin/compose.override.yaml", "services:\n  db:\n    image: postgres\n");
+    const cache = new ComposeConfigCache(host);
+    await cache.resolve(target);
+    host.files.set("jellyfin/compose.override.yaml", "services:\n  db:\n    image: mysql\n");
+    await cache.resolve(target);
+    // The base compose.yaml is untouched, but the override changed.
+    expect(host.composeCalls).toHaveLength(2);
+  });
 });
