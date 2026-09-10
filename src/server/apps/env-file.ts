@@ -166,12 +166,15 @@ export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvE
   }
 
   const trailingBlank = entries.length > 0 && entries[entries.length - 1]?.raw === "";
+  // An appended line inherits the file's prevailing ending. Giving it a bare LF was
+  // measured to turn a clean CRLF file mixed on the first key added.
+  const eol = entries.some((e) => e.raw.endsWith("\r")) ? "\r" : "";
   const newEntry: EnvEntry = {
     kind: "pair",
     key,
     value,
     comment: "",
-    raw: `${key}=${quoteIfNeeded(value)}`,
+    raw: `${key}=${quoteIfNeeded(value)}${eol}`,
   };
   return trailingBlank
     ? [...entries.slice(0, -1), newEntry, { kind: "other", raw: "" }]

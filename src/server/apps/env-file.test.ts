@@ -167,4 +167,24 @@ describe("upsertEnv", () => {
     const text = serialiseEnv(upsertEnv(parseEnv("A=1\n"), "B", "2"));
     expect(text).toBe("A=1\nB=2\n");
   });
+
+  it("appends to a CRLF file with CRLF, leaving no mixed endings", () => {
+    // Measured: a bare LF here turned a clean CRLF file mixed on the first key added.
+    expect(serialiseEnv(upsertEnv(parseEnv("A=1\r\nB=2\r\n"), "C", "3"))).toBe(
+      "A=1\r\nB=2\r\nC=3\r\n",
+    );
+    expect(serialiseEnv(upsertEnv(parseEnv("A=1\nB=2\n"), "C", "3"))).toBe("A=1\nB=2\nC=3\n");
+  });
+
+  it("leaves an unterminated quote alone rather than guessing", () => {
+    // `A="test\"` never closes its quote — the `\"` is escaped. There is no correct
+    // value to recover, so the best-effort result is documented rather than "fixed".
+    // The well-formed `A="test\""` is the case that must give `test"`.
+    const value = (content: string) => {
+      const entry = parseEnv(content).find((e) => e.kind === "pair");
+      return entry?.kind === "pair" ? entry.value : undefined;
+    };
+    expect(value('A="test\\""')).toBe('test"');
+    expect(value('A="test\\"')).toBe("test\\");
+  });
 });
