@@ -9,6 +9,7 @@ import type { Db } from "./db/client.js";
 import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
 import { healthRoutes } from "./routes/health.js";
+import { userRoutes } from "./routes/users.js";
 
 /** Headers a client must never be able to set on the request Better-Auth sees. */
 const CLIENT_IP_HEADERS = new Set(["x-forwarded-for", "x-real-ip", "cf-connecting-ip"]);
@@ -121,6 +122,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   await app.register(healthRoutes);
+  await app.register(userRoutes);
 
   app.setNotFoundHandler(async (request, reply) => {
     if (request.url.startsWith("/api/")) {
