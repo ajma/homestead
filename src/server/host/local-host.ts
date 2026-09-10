@@ -15,7 +15,7 @@ import type {
 } from "./types.js";
 import { HashMismatchError } from "./types.js";
 
-const COMPOSE_FILENAMES = [
+export const COMPOSE_FILENAMES = [
   "compose.yaml",
   "compose.yml",
   "docker-compose.yml",

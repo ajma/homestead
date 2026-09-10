@@ -3,7 +3,7 @@ import { createAuth } from "./auth/auth.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
-import { hashContent } from "./host/local-host.js";
+import { COMPOSE_FILENAMES, hashContent } from "./host/local-host.js";
 import type {
   ComposeOptions,
   ComposeResult,
@@ -43,7 +43,17 @@ export class FakeHost implements Host {
         directories.add(path.split("/")[0] ?? "");
       }
     }
-    return [...directories].map((directory) => ({ directory, composeFile: "compose.yaml" }));
+    const found: DiscoveredDir[] = [];
+    for (const directory of directories) {
+      for (const candidate of COMPOSE_FILENAMES) {
+        const path = `${directory}/${candidate}`;
+        if (this.files.has(path)) {
+          found.push({ directory, composeFile: candidate });
+          break;
+        }
+      }
+    }
+    return found.sort((a, b) => a.directory.localeCompare(b.directory));
   }
 
   async readTextFile(rel: string): Promise<FileRead> {
