@@ -1,7 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@web/api/client";
 import { useSetupStatus } from "@web/auth/useSession";
-import { type FormEvent, useState } from "react";
+// SyntheticEvent, not FormEvent — @types/react 19 marks FormEvent @deprecated.
+import { type SyntheticEvent, useState } from "react";
 
 export function Login() {
   const setup = useSetupStatus();
@@ -14,7 +15,7 @@ export function Login() {
 
   const needsSetup = setup.data?.needsSetup === true;
 
-  async function onSubmit(event: FormEvent) {
+  async function onSubmit(event: SyntheticEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
