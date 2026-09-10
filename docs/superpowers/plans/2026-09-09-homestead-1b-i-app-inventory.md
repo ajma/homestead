@@ -118,19 +118,42 @@ describe('app serializers', () => {
 
   it('omits every operational field from the viewer DTO', () => {
     const dto = toViewerApp(row, status) as Record<string, unknown>
+    // All eleven admin-only fields, not a sample. This test's name promises
+    // completeness, and it is the backstop if the exact-key-set test below is ever
+    // relaxed to reduce its (deliberate) maintenance friction.
     for (const forbidden of [
       'directory', 'composeFile', 'projectName', 'lastComposeHash',
       'hostId', 'isSystem', 'graceUntil', 'adoptedAt',
+      'showOnLauncher', 'sortOrder', 'archivedAt',
     ]) {
       expect(dto).not.toHaveProperty(forbidden)
     }
   })
 
   it('serialises the whole row for an admin', () => {
-    const dto = toAdminApp(row, status)
-    expect(dto.directory).toBe('jellyfin')
-    expect(dto.projectName).toBe('jellyfin')
-    expect(dto.status).toBe('up')
+    // Full shape, not spot-checks: a missing admin field would otherwise pass.
+    expect(toAdminApp(row, status)).toEqual({
+      id: 'app-1',
+      slug: 'jellyfin',
+      displayName: 'Jellyfin',
+      description: 'Movies and TV',
+      iconRef: 'jellyfin',
+      category: 'Media',
+      launchUrl: 'http://nas.local:8096',
+      status: 'up',
+      statusDetail: '4/4 services up',
+      hostId: 'local',
+      directory: 'jellyfin',
+      composeFile: 'compose.yaml',
+      projectName: 'jellyfin',
+      lastComposeHash: 'abc123',
+      isSystem: false,
+      showOnLauncher: true,
+      sortOrder: 0,
+      graceUntil: null,
+      adoptedAt: 1700000000,
+      archivedAt: null,
+    })
   })
 
   // A new column must not silently reach viewers. This is the guard that makes the
