@@ -3022,9 +3022,23 @@ async function validateContent(
     return check.valid ? { valid: true } : { valid: false, message: check.message }
   } finally {
     composeConfig.invalidate(target)
-    await host.deleteFile(`${directory}/${composeFile}`)
+    // Cleanup is best effort, and a throw here would REPLACE whatever the try block was
+    // reporting — including a real failure from `resolve`, which the user would then see
+    // as an unrelated filesystem error. A dotfile compose ignores is a much smaller
+    // problem than a masked diagnosis.
+    try {
+      await host.deleteFile(`${directory}/${composeFile}`)
+    } catch {
+      // Left behind. Accepted: see the note on abnormal termination below.
+    }
   }
 }
+
+// A scratch file also survives an abnormal termination between the write and the
+// `finally` — SIGKILL, or the container being stopped mid-validation. Accepted rather
+// than swept at startup: it is a dotfile, `docker compose` does not pick it up, and a
+// sweep would need a list-files-in-a-directory primitive on `Host` that nothing else
+// wants yet. Carried forward instead.
 
   app.get('/api/apps/:id/compose', async (request, reply) => {
     requireCapability(request, 'app:config')
