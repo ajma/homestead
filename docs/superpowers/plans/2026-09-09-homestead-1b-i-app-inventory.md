@@ -1539,7 +1539,7 @@ git commit -m "feat: add lossless .env parsing with value masking"
 - Test: `src/server/apps/adoption.test.ts`
 
 **Interfaces:**
-- Consumes: `Host.listAppDirectories`, `Host.listContainers`, `Db`
+- Consumes: `Host.listAppDirectories`, `Host.listContainers`, `Db`, and `parseEnv` from Task 5 (`@server/apps/env-file`)
 - Produces:
 
 ```ts
@@ -1647,6 +1647,58 @@ describe('scanForApps', () => {
     const result = await scanForApps({ db, host: hostWith([], []), hostId: 'local' })
     expect(result).toEqual({ discovered: [], orphans: [] })
   })
+
+  it('normalises the directory name the way compose does', async () => {
+    // `My Media` runs as project `mymedia`. Comparing the raw name matches nothing, and
+    // the failure is doubled: the stack reads as stopped AND its containers show up as
+    // an orphan, so one real directory produces two wrong rows.
+    const db = await seed()
+    const host = hostWith([['My Media', 'compose.yaml']], [container('mymedia', 'web')])
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered[0]).toMatchObject({
+      directory: 'My Media',
+      projectName: 'mymedia',
+      containerCount: 1,
+      running: true,
+    })
+    expect(result.orphans).toEqual([])
+  })
+
+  it('honours COMPOSE_PROJECT_NAME from the sibling .env', async () => {
+    const db = await seed()
+    const host = hostWith([['stack', 'compose.yaml']], [container('custom-name', 'web')])
+    host.files.set('stack/.env', '# set by the tutorial\nCOMPOSE_PROJECT_NAME=custom-name\n')
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered[0]).toMatchObject({
+      projectName: 'custom-name',
+      containerCount: 1,
+      running: true,
+    })
+    expect(result.orphans).toEqual([])
+  })
+
+  it('ignores a .env that sets COMPOSE_PROJECT_NAME to nothing', async () => {
+    const db = await seed()
+    const host = hostWith([['stack', 'compose.yaml']], [container('stack', 'web')])
+    host.files.set('stack/.env', 'COMPOSE_PROJECT_NAME=\n')
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered[0]).toMatchObject({ projectName: 'stack', containerCount: 1 })
+  })
+
+  it('prefers an adopted app\'s recorded name over what .env now says', async () => {
+    // Adoption resolved the name through the CLI, so it is authoritative even if
+    // someone edits .env afterwards without recreating the containers.
+    const db = await seed()
+    await db.insert(apps).values({
+      id: ulid(), hostId: 'local', slug: 'stack', displayName: 'Stack',
+      directory: 'stack', composeFile: 'compose.yaml', projectName: 'recorded',
+    })
+    const host = hostWith([['stack', 'compose.yaml']], [container('recorded', 'web')])
+    host.files.set('stack/.env', 'COMPOSE_PROJECT_NAME=changed-since\n')
+    const result = await scanForApps({ db, host, hostId: 'local' })
+    expect(result.discovered[0]).toMatchObject({ projectName: 'recorded', containerCount: 1 })
+    expect(result.orphans).toEqual([])
+  })
 })
 ```
 
@@ -1662,6 +1714,7 @@ import { eq } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
 import { apps } from '../db/schema.js'
 import type { Host } from '../host/types.js'
+import { parseEnv } from './env-file.js'
 
 export type DiscoveredApp = {
   directory: string
@@ -1677,13 +1730,51 @@ export type OrphanStack = { projectName: string; containerCount: number }
 export type ScanResult = { discovered: DiscoveredApp[]; orphans: OrphanStack[] }
 
 /**
+ * Compose's own project-name normalisation: lowercased, and anything outside
+ * `[a-z0-9_-]` dropped, with leading separators trimmed.
+ *
+ * `My Media` becomes `mymedia`. Comparing the raw directory name against a container
+ * label therefore never matches for any directory with a capital or a space, and the
+ * consequence is not a missing field — the stack reports `running: false` while its
+ * containers appear separately as an orphan. One real directory produces two wrong
+ * rows.
+ */
+function normaliseProjectName(directory: string): string {
+  return directory.toLowerCase().replace(/[^a-z0-9_-]/g, '').replace(/^[_-]+/, '')
+}
+
+/**
+ * The project name compose would use for a directory that Homestead has not adopted.
+ *
+ * `COMPOSE_PROJECT_NAME` in the sibling `.env` overrides the directory name outright,
+ * and it is common in stacks copied from a tutorial. Missing it produces the same
+ * two-wrong-rows failure as skipping normalisation. Reading one small file per
+ * directory is the cheap way to be right; the alternative is a `docker compose config`
+ * subprocess per directory, which on a NAS with thirty stacks is thirty processes for
+ * a screen the user opens to look around.
+ *
+ * A missing or unreadable `.env` is the normal case and falls back to the directory.
+ */
+async function inferProjectName(host: Host, directory: string): Promise<string> {
+  try {
+    const { content } = await host.readTextFile(`${directory}/.env`)
+    const entry = parseEnv(content).find(
+      (e) => e.kind === 'pair' && e.key === 'COMPOSE_PROJECT_NAME',
+    )
+    if (entry?.kind === 'pair' && entry.value !== '') return entry.value
+  } catch {
+    // No `.env`, or one we cannot read. Neither is an error worth failing a scan over.
+  }
+  return normaliseProjectName(directory)
+}
+
+/**
  * Joins directories on disk to containers labelled with a compose project.
  *
- * The project name is NOT guessed from the directory name. Compose normalises it
- * (`My Media` becomes `mymedia`) and a `COMPOSE_PROJECT_NAME` in `.env` overrides it
- * entirely, so guessing reports a healthy stack as stopped. Here the running
- * containers' own label supplies it when they exist; adoption resolves it properly via
- * `docker compose config` when they do not.
+ * The project name is never the raw directory name. Compose normalises it and a
+ * `COMPOSE_PROJECT_NAME` in `.env` overrides it entirely, so a naive comparison
+ * reports a healthy stack as stopped AND lists its containers as an orphan. An
+ * already-adopted app uses its recorded name, which adoption resolved properly.
  */
 export async function scanForApps(deps: {
   db: Db
@@ -1709,11 +1800,18 @@ export async function scanForApps(deps: {
 
   const claimedProjects = new Set<string>()
 
-  const discovered: DiscoveredApp[] = directories.map((dir) => {
+  const candidates = await Promise.all(
+    directories.map(async (dir) => {
+      const recorded = adoptedByDirectory.get(dir.directory)?.projectName
+      // An adopted app's recorded name wins: adoption resolved it through the CLI, so
+      // it is authoritative even when `.env` has since changed underneath us.
+      return recorded ?? (await inferProjectName(deps.host, dir.directory))
+    }),
+  )
+
+  const discovered: DiscoveredApp[] = directories.map((dir, i) => {
     const adoptedRow = adoptedByDirectory.get(dir.directory)
-    // Prefer the recorded project name; otherwise fall back to the directory name,
-    // which is what Compose would derive when nothing overrides it.
-    const candidate = adoptedRow?.projectName ?? dir.directory
+    const candidate = candidates[i] ?? dir.directory
     const matched = byProject.get(candidate)
     if (matched) claimedProjects.add(candidate)
 
@@ -1739,7 +1837,7 @@ export async function scanForApps(deps: {
 - [ ] **Step 4: Run the test and confirm it passes**
 
 Run: `pnpm vitest run src/server/apps/adoption.test.ts`
-Expected: PASS, 5 tests.
+Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
 
