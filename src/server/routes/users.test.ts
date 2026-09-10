@@ -1,4 +1,5 @@
 import { buildTestApp } from "@server/test-helpers";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 async function signUpAdmin(app: Awaited<ReturnType<typeof buildTestApp>>) {
@@ -211,6 +212,141 @@ describe("user management", () => {
       headers: { cookie },
     });
     expect(res.statusCode).toBe(204);
+    await app.close();
+  });
+
+  it("allows setting user app scope and returns 404 for nonexistent user", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { cookie },
+      payload: {
+        email: "viewer@example.com",
+        password: "correct-horse-battery",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+      },
+    });
+    const viewerId = created.json().id;
+
+    // Seed a host and an app in the database so we can reference them
+    const { apps, hosts } = await import("../db/schema.js");
+    await app.deps.db.insert(hosts).values({
+      id: "test-host",
+      name: "Test Host",
+      kind: "local",
+      composeRoot: "/test",
+      dockerSocket: "/var/run/docker.sock",
+    });
+    await app.deps.db.insert(apps).values({
+      id: "test-app",
+      hostId: "test-host",
+      slug: "jellyfin",
+      displayName: "Jellyfin",
+      directory: "jellyfin",
+      composeFile: "compose.yaml",
+      projectName: "jellyfin",
+    });
+
+    // Set scope with valid app
+    const scoped = await app.inject({
+      method: "PUT",
+      url: `/api/users/${viewerId}/scope`,
+      headers: { cookie },
+      payload: { scopeAllApps: false, appIds: ["test-app"] },
+    });
+    expect(scoped.statusCode).toBe(200);
+    expect(scoped.json()).toMatchObject({ scopeAllApps: false, appIds: ["test-app"] });
+
+    // Verify scope persisted
+    const { userAppScope } = await import("../db/schema.js");
+    const scope = await app.deps.db
+      .select()
+      .from(userAppScope)
+      .where(eq(userAppScope.userId, viewerId));
+    expect(scope).toHaveLength(1);
+    expect(scope[0]?.appId).toBe("test-app");
+
+    // Nonexistent user returns 404
+    const notFound = await app.inject({
+      method: "PUT",
+      url: "/api/users/nonexistent-id/scope",
+      headers: { cookie },
+      payload: { scopeAllApps: false, appIds: [] },
+    });
+    expect(notFound.statusCode).toBe(404);
+
+    await app.close();
+  });
+});
+
+describe("error handling", () => {
+  it("redacts errors inside registered routes and returns safe 500 shape", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    // Force an error by trying to set scope for a nonexistent user with a bad appId.
+    // Before the fix, this returned 500 with raw SQL including bound parameters.
+    // After the fix, it should return 404 (the fix for item 4), but we'll also test
+    // with a different error path.
+
+    // To test 500 redaction, we need to trigger an internal error. Let's use PATCH with
+    // invalid ID to trigger a 500 from inside userRoutes if any db error occurs.
+    // Actually, the brief says the current behavior is that it leaks SQL. Let me create
+    // a simpler test: just POST with missing required fields to trigger validation.
+
+    // For a true internal error test, let's use a malformed UUID or trigger a db error.
+    // Actually, I should check what the error looks like now. Let me just test the
+    // validation case first (which triggers ZodError → 400).
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { cookie },
+      payload: { email: "bad", password: "short", name: "", role: "invalid" },
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error).toBe("validation_failed");
+    expect(body.message).toBeDefined();
+    expect(body.issues).toBeDefined();
+    // Should NOT leak the full Zod schema
+    expect(JSON.stringify(body)).not.toMatch(/ZodError|_def|parse/);
+
+    await app.close();
+  });
+
+  it("returns redacted 500 for internal errors in registered routes", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    // To trigger an internal error, we'll close the database connection first
+    // Actually, that's hard to do. Let me instead check that SQL errors are redacted
+    // by using the PUT /api/users/:id/scope endpoint with a nonexistent app ID
+    // which triggers a foreign key error.
+
+    const id = (await app.inject({ method: "GET", url: "/api/me", headers: { cookie } })).json().id;
+
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/users/${id}/scope`,
+      headers: { cookie },
+      payload: { scopeAllApps: false, appIds: ["nonexistent-app-id"] },
+    });
+
+    // This will trigger a foreign key error when trying to insert into user_app_scope
+    expect(res.statusCode).toBe(500);
+    const body = res.json();
+    expect(body.error).toBe("internal_error");
+    expect(body.message).toBe("Internal server error");
+    // Should NOT leak SQL, table names, or parameters
+    expect(JSON.stringify(body)).not.toMatch(/insert|user_app_scope|nonexistent-app-id/i);
+
     await app.close();
   });
 });

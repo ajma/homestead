@@ -2,10 +2,10 @@ import { ROLES } from "@shared/types";
 import { and, eq, exists, isNotNull, isNull, ne, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import type { FastifyInstance } from "fastify";
-import { ulid } from "ulid";
 import { z } from "zod";
+import { audit } from "../audit.js";
 import { requireAdmin, requireAuth } from "../auth/context.js";
-import { auditLog, userAppScope, users } from "../db/schema.js";
+import { userAppScope, users } from "../db/schema.js";
 
 const createUserSchema = z.object({
   // z.email(), not z.string().email() — the latter is @deprecated in zod 4.
@@ -71,26 +71,6 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       isNotNull(users.disabledAt),
     );
 
-  async function audit(entry: {
-    userId: string | null;
-    action: string;
-    targetType?: string;
-    targetId?: string;
-    detail?: unknown;
-    ip?: string;
-  }) {
-    await db.insert(auditLog).values({
-      id: ulid(),
-      userId: entry.userId,
-      authPath: entry.userId ? "password" : "system",
-      action: entry.action,
-      targetType: entry.targetType ?? null,
-      targetId: entry.targetId ?? null,
-      detail: (entry.detail ?? null) as never,
-      ip: entry.ip ?? null,
-    });
-  }
-
   app.get("/api/setup/status", async () => ({ needsSetup: (await countUsers()) === 0 }));
 
   app.post("/api/setup/admin", async (request, reply) => {
@@ -127,12 +107,15 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (promoted.length === 0) return reply.code(409).send({ error: "already_initialised" });
 
     const [row] = await db.select(publicUser).from(users).where(eq(users.email, body.email));
-    await audit({
-      userId: row?.id ?? null,
-      action: "setup.admin_created",
-      targetType: "user",
-      targetId: row?.id,
-    });
+    await audit(
+      db,
+      { userId: null, authPath: "system" },
+      {
+        action: "setup.admin_created",
+        targetType: "user",
+        targetId: row?.id,
+      },
+    );
 
     for (const [key, value] of result.headers) {
       reply.header(key, value);
@@ -170,8 +153,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (row && !body.scopeAllApps && body.appIds.length > 0) {
       await db.insert(userAppScope).values(body.appIds.map((appId) => ({ userId: row.id, appId })));
     }
-    await audit({
-      userId: ctx.userId,
+    await audit(db, ctx, {
       action: "user.created",
       targetType: "user",
       targetId: row?.id,
@@ -220,8 +202,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         : reply.code(404).send({ error: "not_found" });
     }
 
-    await audit({
-      userId: ctx.userId,
+    await audit(db, ctx, {
       action: "user.updated",
       targetType: "user",
       targetId: id,
@@ -232,20 +213,28 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     return row;
   });
 
-  app.put("/api/users/:id/scope", async (request) => {
+  app.put("/api/users/:id/scope", async (request, reply) => {
     const ctx = requireAdmin(request);
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const body = z
       .object({ scopeAllApps: z.boolean(), appIds: z.array(z.string()).default([]) })
       .parse(request.body);
 
-    await db.update(users).set({ scopeAllApps: body.scopeAllApps }).where(eq(users.id, id));
+    const updated = await db
+      .update(users)
+      .set({ scopeAllApps: body.scopeAllApps })
+      .where(eq(users.id, id))
+      .returning({ id: users.id });
+
+    if (updated.length === 0) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+
     await db.delete(userAppScope).where(eq(userAppScope.userId, id));
     if (!body.scopeAllApps && body.appIds.length > 0) {
       await db.insert(userAppScope).values(body.appIds.map((appId) => ({ userId: id, appId })));
     }
-    await audit({
-      userId: ctx.userId,
+    await audit(db, ctx, {
       action: "user.scope_set",
       targetType: "user",
       targetId: id,
@@ -271,8 +260,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
         : reply.code(404).send({ error: "not_found" });
     }
 
-    await audit({
-      userId: ctx.userId,
+    await audit(db, ctx, {
       action: "user.deleted",
       targetType: "user",
       targetId: id,
