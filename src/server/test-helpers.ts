@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "./app.js";
 import { buildApp } from "./app.js";
 import { ComposeConfigCache } from "./apps/compose-config.js";
+import { ImageUpdateChecker } from "./apps/image-updates.js";
 import { JobRunner } from "./apps/job-runner.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost } from "./bootstrap.js";
@@ -25,7 +26,9 @@ import type {
 } from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
 
-export type TestApp = FastifyInstance & { deps: AppDeps & { host: FakeHost } };
+export type TestApp = FastifyInstance & {
+  deps: AppDeps & { host: FakeHost; registryDigests: Map<string, string> };
+};
 
 /**
  * Splits text into AT MOST `count` pieces at arbitrary offsets — deliberately not on line
@@ -214,7 +217,14 @@ export async function buildTestApp(): Promise<TestApp> {
   const auth = createAuth(config, db);
   const composeConfig = new ComposeConfigCache(host);
   const jobs = new JobRunner({ db, host, composeConfig });
-  const app = await buildApp({ config, db, host, secrets, auth, composeConfig, jobs });
+  const registryDigests = new Map<string, string>();
+  const images = new ImageUpdateChecker({
+    db,
+    host,
+    composeConfig,
+    registry: { latestDigest: async (image) => registryDigests.get(image) ?? null },
+  });
+  const app = await buildApp({ config, db, host, secrets, auth, composeConfig, jobs, images });
 
   // Assign each app instance its own source address to avoid rate-limit bucket
   // collisions. Better-Auth's sign-in rate limiter is process-global and keyed by IP.
@@ -232,7 +242,9 @@ export async function buildTestApp(): Promise<TestApp> {
     return originalInject(opts, cb);
   };
 
-  return app as TestApp;
+  const testApp = app as TestApp;
+  testApp.deps.registryDigests = registryDigests;
+  return testApp;
 }
 
 const TEST_PASSWORD = "correct-horse-battery";
