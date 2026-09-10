@@ -64,14 +64,6 @@ describe.skipIf(!hasDocker)("runCompose", () => {
     expect(chunks.join("")).toContain("nginx:alpine");
   });
 
-  it("refuses a directory outside the compose root", async () => {
-    const result = await host.runCompose({ directory: "../escape", composeFile: "compose.yaml" }, [
-      "config",
-    ]).result;
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("escape");
-  });
-
   it("passes arguments as an array, so shell metacharacters are inert", async () => {
     // If args were concatenated into a shell string this would execute `id`.
     const result = await host.runCompose({ directory: "good", composeFile: "compose.yaml" }, [
@@ -108,6 +100,14 @@ describe.skipIf(!hasDocker)("runCompose", () => {
 });
 
 describe("runCompose without Docker", () => {
+  it("refuses a directory outside the compose root", async () => {
+    const result = await host.runCompose({ directory: "../escape", composeFile: "compose.yaml" }, [
+      "config",
+    ]).result;
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("escape");
+  });
+
   it("settles result when the compose path does not resolve", async () => {
     // No Docker needed: the path guard rejects before anything spawns. Without the
     // `.catch` on the async IIFE this hangs forever instead of resolving.
