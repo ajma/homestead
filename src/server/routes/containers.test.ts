@@ -141,6 +141,24 @@ describe("container detail", () => {
     await app.close();
   });
 
+  it("answers 503 on the detail endpoint when Docker is unreachable", async () => {
+    // The list can render nothing; the detail endpoint cannot. Without the container
+    // list its ownership check is unanswerable, and 404 would tell the user the
+    // container does not exist when the truth is that we cannot see it.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.listContainers = async () => {
+      throw new Error("connect ENOENT /var/run/docker.sock");
+    };
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}/containers/container-1`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toBe("docker_unreachable");
+    await app.close();
+  });
+
   it("stays 200 with an empty list when Docker is unreachable", async () => {
     // Same rule as the app list: a wedged socket must not 500 the screen.
     const { app, cookie, id } = await withApp();
