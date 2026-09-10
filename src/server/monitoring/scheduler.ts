@@ -205,7 +205,19 @@ export class Scheduler {
       // One probe's failure ends that probe's turn, not the tick — but it must not be
       // invisible. A silent catch here hid every probe result being dropped: the tick
       // reported success while zero samples survived. See `serialise`.
-      this.deps.onProbeError?.(probe.id, error);
+      //
+      // The report itself is wrapped, exactly like the transition listeners above. An
+      // uncaught throw from this callback does not merely lose one message: it rejects
+      // the worker, so `tick()` returns a wrong count while the remaining probes carry
+      // on in the background AFTER `ticking` has already reset — which re-opens the
+      // concurrent-tick race the guard exists to prevent. Measured with six probes and
+      // a throwing hook: `tick()` resolved at 0 with one runner called, and the other
+      // five were still rescheduling 50ms later.
+      try {
+        this.deps.onProbeError?.(probe.id, error);
+      } catch {
+        // The channel for reporting this is the one that just failed.
+      }
     }
   }
 
