@@ -33,6 +33,19 @@ function normaliseProjectName(directory: string): string {
     .replace(/[^a-z0-9_-]/g, "")
     .replace(/^[_-]+/, "");
 }
+// Two names this cannot resolve, both left as they are on purpose:
+//
+// A name with nothing left after stripping — `Медиа`, `...` — normalises to `''`, which
+// never matches, so the directory reads as stopped and its containers list as an orphan.
+// That is the honest answer rather than a bug: compose refuses to derive a project name
+// from such a directory at all, so whatever is running was started with an explicit name
+// only the user knows. `byProject` never holds `''` because unlabelled containers are
+// skipped, so the empty lookup is inert.
+//
+// Two directories can normalise to the same name — `my_media` and `MY_MEDIA` — and both
+// then report the same containers. Measured, and faithful: compose treats them as one
+// project, so `up` in either directory really does control the same stack. Flagging it
+// would need a UI affordance that does not exist yet.
 
 /**
  * The project name compose would use for a directory that Homestead has not adopted.
