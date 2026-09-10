@@ -112,7 +112,7 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
       [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId));
     } catch (error) {
       request.log.error({ err: error, jobId }, "job stream failed");
-      sse.send("error", { message: "The job stream ended unexpectedly." });
+      sse.send("error", { message: error instanceof Error ? error.message : "job stream ended" });
     } finally {
       sse.send("done", {
         status: finished?.status ?? "failed",

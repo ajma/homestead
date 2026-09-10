@@ -249,7 +249,7 @@ describe("JobRunner", () => {
         return original(table as never);
       };
 
-      const job = await runner.start(row, "up", userId);
+      const _job = await runner.start(row, "up", userId);
       // Do not await job.done — simulates user closing the log pane before the job finishes.
       // Wait long enough for the job to complete internally.
       await new Promise((resolve) => setTimeout(resolve, 50));

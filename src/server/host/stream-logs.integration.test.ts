@@ -89,7 +89,9 @@ describe.skipIf(!hasDocker)("streamLogs against real Docker", () => {
       await host.init();
 
       // Baseline: measure the active handle count before streaming.
-      const baseline = process._getActiveHandles().length;
+      const baseline = (process as unknown as { _getActiveHandles(): unknown[] })
+        ._getActiveHandles()
+        .length;
 
       const abort = new AbortController();
       const lines: Array<{ text: string; stream: string }> = [];
@@ -111,7 +113,9 @@ describe.skipIf(!hasDocker)("streamLogs against real Docker", () => {
       // Without the fix, this would be baseline + 1 (the Docker stream).
       // Give the stream cleanup time to complete.
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(process._getActiveHandles().length).toBe(baseline);
+      expect(
+        (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles().length,
+      ).toBe(baseline);
     } finally {
       await run("docker", ["rm", "-f", idleName]).catch(() => {});
     }
