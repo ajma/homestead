@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { AppDeps } from "./app.js";
 import { buildApp } from "./app.js";
 import { ComposeConfigCache } from "./apps/compose-config.js";
 import { createAuth } from "./auth/auth.js";
@@ -17,6 +18,8 @@ import type {
   Host,
 } from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
+
+export type TestApp = FastifyInstance & { deps: AppDeps & { host: FakeHost } };
 
 /**
  * In-memory `Host` for tests.
@@ -123,7 +126,7 @@ export class FakeHost implements Host {
   }
 }
 
-export async function buildTestApp() {
+export async function buildTestApp(): Promise<TestApp> {
   const config = loadConfig({
     HOMESTEAD_SECRET_KEY: Buffer.alloc(32, 1).toString("base64"),
     HOMESTEAD_BASE_URL: "http://localhost:3000",
@@ -154,7 +157,7 @@ export async function buildTestApp() {
     return originalInject(opts, cb);
   };
 
-  return app;
+  return app as TestApp;
 }
 
 const TEST_PASSWORD = "correct-horse-battery";

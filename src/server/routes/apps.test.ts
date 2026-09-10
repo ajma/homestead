@@ -1,4 +1,4 @@
-import { buildTestApp, createViewer, type FakeHost, signUpAdmin } from "@server/test-helpers";
+import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { describe, expect, it } from "vitest";
 
 describe("app inventory API", () => {
@@ -18,11 +18,8 @@ describe("app inventory API", () => {
   it("adopts a discovered directory and resolves its project name", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set(
-      "jellyfin/compose.yaml",
-      "services:\n  web:\n    image: nginx\n",
-    );
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("jellyfin/compose.yaml", "services:\n  web:\n    image: nginx\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "custom-name", services: { web: { image: "nginx" } } }),
       stderr: "",
@@ -43,8 +40,8 @@ describe("app inventory API", () => {
   it("refuses to adopt a directory with an invalid compose file", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("broken/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("broken/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 1,
       stdout: "",
       stderr: "invalid compose project",
@@ -63,8 +60,8 @@ describe("app inventory API", () => {
   it("is idempotent: adopting twice does not duplicate", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "jellyfin", services: {} }),
       stderr: "",
@@ -93,8 +90,8 @@ describe("app inventory API", () => {
   it("gives a viewer the viewer DTO and an admin the admin DTO", async () => {
     const app = await buildTestApp();
     const { cookie: adminCookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "jellyfin", services: {} }),
       stderr: "",
@@ -135,8 +132,8 @@ describe("app inventory API", () => {
   it("hides apps outside a scoped viewer's allowlist", async () => {
     const app = await buildTestApp();
     const { cookie: adminCookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("a/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("a/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "a", services: {} }),
       stderr: "",
@@ -161,8 +158,8 @@ describe("app inventory API", () => {
   it("refuses to delete a system app", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("cloudflared/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("cloudflared/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "cloudflared", services: {} }),
       stderr: "",
@@ -197,9 +194,9 @@ describe("app inventory API", () => {
     // constraint violation that surfaced as a 500 mid-adopt, discarding the successes.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("My Media/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).files.set("My_Media/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("My Media/compose.yaml", "services: {}\n");
+    app.deps.host.files.set("My_Media/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "p", services: {} }),
       stderr: "",
@@ -225,8 +222,8 @@ describe("app inventory API", () => {
     // read as permanently down. Refusing and saying why beats creating a broken row.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("nameless/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("nameless/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ services: {} }),
       stderr: "",
@@ -247,8 +244,8 @@ describe("app inventory API", () => {
     // `set()` — a 500 for what is really a no-op request.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("a/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("a/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "a", services: {} }),
       stderr: "",
@@ -276,9 +273,9 @@ describe("app inventory API", () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     for (const dir of ["a", "b", "c"]) {
-      (app.deps.host as FakeHost).files.set(`${dir}/compose.yaml`, "services: {}\n");
+      app.deps.host.files.set(`${dir}/compose.yaml`, "services: {}\n");
     }
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "p", services: {} }),
       stderr: "",
@@ -289,10 +286,10 @@ describe("app inventory API", () => {
       headers: { cookie },
       payload: { directories: ["a", "b", "c"] },
     });
-    (app.deps.host as FakeHost).listContainersCalls = 0;
+    app.deps.host.listContainersCalls = 0;
     const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
     expect(res.json()).toHaveLength(3);
-    expect((app.deps.host as FakeHost).listContainersCalls).toBe(1);
+    expect(app.deps.host.listContainersCalls).toBe(1);
     await app.close();
   });
 
@@ -303,8 +300,8 @@ describe("app inventory API", () => {
     // interpolated secret, shown to the housemate this role exists to be safe for.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({ name: "jf", services: {} }),
       stderr: "",
@@ -318,12 +315,12 @@ describe("app inventory API", () => {
     const viewer = await createViewer(app, cookie);
 
     const secret = 'invalid value "sk-live-9f3c8" from /volume2/docker/jellyfin/.env';
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 1,
       stdout: "",
       stderr: secret,
     });
-    (app.deps.host as FakeHost).files.set("jellyfin/compose.yaml", "services: {}\n# edited\n");
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n# edited\n");
 
     const viewerRes = await app.inject({
       method: "GET",

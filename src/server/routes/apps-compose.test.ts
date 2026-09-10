@@ -1,4 +1,4 @@
-import { buildTestApp, createViewer, type FakeHost, signUpAdmin } from "@server/test-helpers";
+import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { describe, expect, it } from "vitest";
 
 const VALID = JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx" } } });
@@ -6,11 +6,8 @@ const VALID = JSON.stringify({ name: "jellyfin", services: { web: { image: "ngin
 async function withAdoptedApp() {
   const app = await buildTestApp();
   const { cookie } = await signUpAdmin(app);
-  (app.deps.host as FakeHost).files.set(
-    "jellyfin/compose.yaml",
-    "services:\n  web:\n    image: nginx\n",
-  );
-  (app.deps.host as FakeHost).composeResults.set("config --format json", {
+  app.deps.host.files.set("jellyfin/compose.yaml", "services:\n  web:\n    image: nginx\n");
+  app.deps.host.composeResults.set("config --format json", {
     exitCode: 0,
     stdout: VALID,
     stderr: "",
@@ -86,7 +83,7 @@ describe("compose file API", () => {
     const before = (
       await app.inject({ method: "GET", url: `/api/apps/${id}/compose`, headers: { cookie } })
     ).json();
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 1,
       stdout: "",
       stderr: 'service "web" depends on undefined service "ghost"',
@@ -103,9 +100,7 @@ describe("compose file API", () => {
     expect(res.statusCode).toBe(422);
     expect(res.json().message).toContain("ghost");
     // The original file must be untouched.
-    expect((app.deps.host as FakeHost).files.get("jellyfin/compose.yaml")).toContain(
-      "image: nginx",
-    );
+    expect(app.deps.host.files.get("jellyfin/compose.yaml")).toContain("image: nginx");
     await app.close();
   });
 
@@ -135,16 +130,14 @@ describe("compose file API", () => {
       });
 
     await validate("services:\n  web:\n    image: nginx\n");
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 1,
       stdout: "",
       stderr: "bad",
     });
     await validate("nonsense\n");
 
-    const strays = [...(app.deps.host as FakeHost).files.keys()].filter((f) =>
-      f.includes("homestead-validate"),
-    );
+    const strays = [...app.deps.host.files.keys()].filter((f) => f.includes("homestead-validate"));
     expect(strays).toEqual([]);
     await app.close();
   });
@@ -166,9 +159,9 @@ describe("compose file API", () => {
     );
     expect(results.map((r) => r.statusCode)).toEqual([200, 200, 200, 200, 200]);
     expect(results.every((r) => r.json().valid)).toBe(true);
-    expect(
-      [...(app.deps.host as FakeHost).files.keys()].filter((f) => f.includes("homestead-validate")),
-    ).toEqual([]);
+    expect([...app.deps.host.files.keys()].filter((f) => f.includes("homestead-validate"))).toEqual(
+      [],
+    );
     await app.close();
   });
 
@@ -177,20 +170,20 @@ describe("compose file API", () => {
     // reporting, so a failed validation would surface as a filesystem error instead
     // of the compose message the user needs to see.
     const { app, cookie, id } = await withAdoptedApp();
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 1,
       stdout: "",
       stderr: 'service "web" depends on undefined service "db"',
     });
 
     // Make cleanup fail for all scratch files.
-    (app.deps.host as FakeHost).deleteFileErrors.set(
+    app.deps.host.deleteFileErrors.set(
       "jellyfin/.homestead-validate-PLACEHOLDER",
       new Error("EACCES: permission denied"),
     );
     // Match any scratch file path by overriding the deleteFile method.
-    const originalDelete = (app.deps.host as FakeHost).deleteFile.bind(app.deps.host);
-    (app.deps.host as FakeHost).deleteFile = async (rel: string) => {
+    const originalDelete = app.deps.host.deleteFile.bind(app.deps.host);
+    app.deps.host.deleteFile = async (rel: string) => {
       if (rel.includes(".homestead-validate-")) {
         throw new Error("EACCES: permission denied");
       }
@@ -210,7 +203,7 @@ describe("compose file API", () => {
     expect(res.json().message).toContain("db");
 
     // Prove it still works when valid.
-    (app.deps.host as FakeHost).composeResults.set("config --format json", {
+    app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: VALID,
       stderr: "",
