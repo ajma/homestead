@@ -13,6 +13,17 @@ export type ContainerSummary = {
 
 export type FileRead = { content: string; hash: string };
 
+export type ComposeTarget = { directory: string; composeFile: string };
+
+export type ComposeResult = { exitCode: number; stdout: string; stderr: string };
+
+export type ComposeOptions = {
+  /** Called as output arrives. Phase 1B-ii uses this for lifecycle job streaming. */
+  onOutput?: (chunk: string, stream: "stdout" | "stderr") => void;
+  /** Defaults to 60s. Lifecycle operations in 1B-ii will raise it. */
+  timeoutMs?: number;
+};
+
 export interface Host {
   readonly id: string;
   listAppDirectories(): Promise<DiscoveredDir[]>;
@@ -24,6 +35,7 @@ export interface Host {
   ): Promise<{ hash: string }>;
   listContainers(filters?: { project?: string }): Promise<ContainerSummary[]>;
   inspectContainer(id: string): Promise<unknown>;
+  runCompose(target: ComposeTarget, args: string[], opts?: ComposeOptions): Promise<ComposeResult>;
 }
 
 export class HashMismatchError extends Error {

@@ -1,9 +1,18 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import Docker from "dockerode";
 import { PathGuard } from "./paths.js";
-import type { ContainerSummary, DiscoveredDir, FileRead, Host } from "./types.js";
+import type {
+  ComposeOptions,
+  ComposeResult,
+  ComposeTarget,
+  ContainerSummary,
+  DiscoveredDir,
+  FileRead,
+  Host,
+} from "./types.js";
 import { HashMismatchError } from "./types.js";
 
 const COMPOSE_FILENAMES = [
@@ -131,5 +140,46 @@ export class LocalHost implements Host {
 
   async inspectContainer(id: string): Promise<unknown> {
     return this.docker.getContainer(id).inspect();
+  }
+
+  async runCompose(
+    target: ComposeTarget,
+    args: string[],
+    opts: ComposeOptions = {},
+  ): Promise<ComposeResult> {
+    // PathGuard resolves and confines the compose file, so a caller cannot point the
+    // CLI at a path outside the compose root.
+    const composePath = await this.guard.resolveExisting(
+      join(target.directory, target.composeFile),
+    );
+
+    // execFile with an ARGUMENT ARRAY — never a shell string. `args` reaches us from
+    // request handlers, and a concatenated command would be an injection point.
+    const child = execFile("docker", ["compose", "-f", composePath, ...args], {
+      timeout: opts.timeoutMs ?? 60_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stdout += text;
+      opts.onOutput?.(text, "stdout");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stderr += text;
+      opts.onOutput?.(text, "stderr");
+    });
+
+    const exitCode = await new Promise<number>((resolve) => {
+      // 'close' rather than 'exit': it fires after the streams have drained, so no
+      // output is lost. `error` (spawn failure, timeout kill) also lands here.
+      child.on("close", (code) => resolve(code ?? 1));
+      child.on("error", () => resolve(1));
+    });
+
+    return { exitCode, stdout, stderr };
   }
 }

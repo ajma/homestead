@@ -4,7 +4,15 @@ import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
 import { hashContent } from "./host/local-host.js";
-import type { ContainerSummary, DiscoveredDir, FileRead, Host } from "./host/types.js";
+import type {
+  ComposeOptions,
+  ComposeResult,
+  ComposeTarget,
+  ContainerSummary,
+  DiscoveredDir,
+  FileRead,
+  Host,
+} from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
 
 /**
@@ -22,6 +30,10 @@ export class FakeHost implements Host {
   files = new Map<string, string>();
   containers: ContainerSummary[] = [];
   inspected: string[] = [];
+  /** Scripted results, keyed by the joined args. Unmatched calls throw rather than
+   *  returning a plausible empty success, which would let a test pass vacuously. */
+  composeResults = new Map<string, ComposeResult>();
+  composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
 
   async listAppDirectories(): Promise<DiscoveredDir[]> {
     return [...this.files.keys()]
@@ -57,6 +69,19 @@ export class FakeHost implements Host {
   async inspectContainer(id: string): Promise<unknown> {
     this.inspected.push(id);
     return {};
+  }
+
+  async runCompose(
+    target: ComposeTarget,
+    args: string[],
+    opts: ComposeOptions = {},
+  ): Promise<ComposeResult> {
+    this.composeCalls.push({ target, args });
+    const result = this.composeResults.get(args.join(" "));
+    if (!result) throw new Error(`FakeHost: no scripted compose result for: ${args.join(" ")}`);
+    if (result.stdout) opts.onOutput?.(result.stdout, "stdout");
+    if (result.stderr) opts.onOutput?.(result.stderr, "stderr");
+    return result;
   }
 }
 
