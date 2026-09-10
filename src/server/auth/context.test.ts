@@ -1,8 +1,9 @@
 import type { AuthContext } from "@server/auth/context";
-import { can, canForApp, visibleAppsWhere } from "@server/auth/context";
+import { can, canForApp, requireAdmin, visibleAppsWhere } from "@server/auth/context";
 import { createDb, runMigrations } from "@server/db/client";
 import { apps, hosts } from "@server/db/schema";
 import { and, eq } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
 import { ulid } from "ulid";
 import { describe, expect, it } from "vitest";
 
@@ -96,5 +97,26 @@ describe("visibleAppsWhere", () => {
       .from(apps)
       .where(and(visibleAppsWhere(viewerAll), eq(apps.slug, "b")));
     expect(rows).toHaveLength(1);
+  });
+
+  it("still yields nothing when an empty allowlist is composed with other conditions", async () => {
+    const db = await seed();
+    const none: AuthContext = { ...viewerScoped, appIds: [] };
+    // `sql`1 = 0`` must survive being ANDed with a condition that would otherwise match.
+    const rows = await db
+      .select()
+      .from(apps)
+      .where(and(visibleAppsWhere(none), eq(apps.slug, "b")));
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe("requireAdmin and requireCapability cannot diverge", () => {
+  it("admin passes both, viewer fails both", () => {
+    const asRequest = (auth: AuthContext) => ({ auth }) as unknown as FastifyRequest;
+    expect(() => requireAdmin(asRequest(admin))).not.toThrow();
+    expect(can(admin, "user:manage")).toBe(true);
+    expect(() => requireAdmin(asRequest(viewerAll))).toThrow();
+    expect(can(viewerAll, "user:manage")).toBe(false);
   });
 });

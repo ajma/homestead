@@ -69,8 +69,17 @@ export function requireCapability(request: FastifyRequest, capability: Capabilit
   return ctx;
 }
 
+/**
+ * Requires the capability to manage users, which today only `admin` holds.
+ *
+ * Expressed as a capability rather than a role check on purpose. An earlier version
+ * tested `ctx.role !== 'admin'` while throwing `ForbiddenError('user:manage')`, which
+ * mixed the two models: the code enforced role membership while the error told callers
+ * a capability was missing. Worse, the two would diverge the moment a third role was
+ * granted `user:manage` — `requireCapability` would admit it and `requireAdmin` would
+ * not. Delegating means there is exactly one place that decides what "may manage users"
+ * means, and it is the capability table.
+ */
 export function requireAdmin(request: FastifyRequest): AuthContext {
-  const ctx = requireAuth(request);
-  if (ctx.role !== "admin") throw new ForbiddenError("user:manage");
-  return ctx;
+  return requireCapability(request, "user:manage");
 }

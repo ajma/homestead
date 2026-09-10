@@ -87,9 +87,16 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   app.addHook("preHandler", async (request) => {
     const headers = new Headers();
+    // Same IP-header discipline as the /api/auth/* route. `getSession` validates a cookie
+    // rather than an address today, so this is defence in depth — but Better-Auth resolves
+    // client IPs from headers in several places, and one inconsistent call site is how the
+    // forgery this codebase already fixed would come back.
     for (const [key, value] of Object.entries(request.headers)) {
+      if (CLIENT_IP_HEADERS.has(key.toLowerCase())) continue;
       if (typeof value === "string") headers.set(key, value);
     }
+    headers.set("x-forwarded-for", request.ip);
+
     const session = await deps.auth.api.getSession({ headers });
     if (!session?.user) return;
 
