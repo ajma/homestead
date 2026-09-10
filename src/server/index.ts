@@ -1,5 +1,6 @@
 import { buildApp } from "./app.js";
 import { createAuth } from "./auth/auth.js";
+import { ensureLocalHost, LOCAL_HOST_ID } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -19,7 +20,9 @@ if (!config.skipMountPreflight) {
 const { db } = await createDb(config.dbPath);
 await runMigrations(db);
 
-const host = new LocalHost("local", config.composeRoot, config.dockerSocket);
+await ensureLocalHost(db, config);
+
+const host = new LocalHost(LOCAL_HOST_ID, config.composeRoot, config.dockerSocket);
 await host.init();
 
 const auth = createAuth(config, db);
