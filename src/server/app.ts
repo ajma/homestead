@@ -1,10 +1,12 @@
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
+import { eq } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Auth } from "./auth/auth.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
 import type { Db } from "./db/client.js";
+import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
 import { healthRoutes } from "./routes/health.js";
 
@@ -81,6 +83,34 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       }
       return reply.send(response.body ? await response.text() : null);
     },
+  });
+
+  app.addHook("preHandler", async (request) => {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(request.headers)) {
+      if (typeof value === "string") headers.set(key, value);
+    }
+    const session = await deps.auth.api.getSession({ headers });
+    if (!session?.user) return;
+
+    const [row] = await deps.db.select().from(users).where(eq(users.id, session.user.id));
+    if (!row || row.disabledAt !== null) return;
+
+    const scopeRows = row.scopeAllApps
+      ? []
+      : await deps.db
+          .select({ appId: userAppScope.appId })
+          .from(userAppScope)
+          .where(eq(userAppScope.userId, row.id));
+
+    request.auth = {
+      userId: row.id,
+      email: row.email,
+      role: row.role,
+      scopeAllApps: row.scopeAllApps,
+      appIds: scopeRows.map((s) => s.appId),
+      authPath: "password",
+    };
   });
 
   await app.register(healthRoutes);
