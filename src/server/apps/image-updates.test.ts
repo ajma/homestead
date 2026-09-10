@@ -193,6 +193,32 @@ describe("ImageUpdateChecker", () => {
     );
   });
 
+  it("does not throw when the database write fails", async () => {
+    // `check()` is documented as never throwing, and 1C calls it in a loop over every
+    // app — so a locked database or a full disk on one app must not end the sweep for
+    // everything after it. The upsert lives inside the per-service guard for this
+    // reason; a comment promising the contract is not the same as providing it.
+    const { db, host, app } = await seed();
+    host.images.set("nginx:alpine", { id: "x", repoDigests: ["nginx@sha256:old"] });
+    const original = db.insert.bind(db);
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+    (db as any).insert = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    try {
+      const checker = new ImageUpdateChecker({
+        db,
+        host,
+        composeConfig: new ComposeConfigCache(host),
+        registry: { latestDigest: async () => "sha256:new" },
+      });
+      await expect(checker.check(app)).resolves.toBeUndefined();
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).insert = original;
+    }
+  });
+
   it("does nothing and does not throw when the compose file will not resolve", async () => {
     const { db, host, app } = await seed();
     host.composeResults.set("config --format json", { exitCode: 1, stdout: "", stderr: "bad" });
