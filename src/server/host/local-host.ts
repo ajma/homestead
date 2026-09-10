@@ -173,6 +173,16 @@ export class LocalHost implements Host {
    * with an 8-byte header per chunk, so the bytes must be demultiplexed or the log fills
    * with control characters.
    */
+  /**
+   * Consume this with `for await`, or call `return()` on the iterator yourself.
+   *
+   * The body is a generator, so nothing runs — and no socket is opened — until the first
+   * `next()`. Measured: obtaining five iterables and never iterating them left the
+   * process's handle count unchanged. But an iterator advanced once and then abandoned
+   * without `return()` does leak, because only `return()` runs the `finally` below:
+   * three such iterators added three handles. `for await` always calls `return()` on
+   * break or throw, which is why every caller in this phase uses it.
+   */
   async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
     const container = this.docker.getContainer(opts.containerId);
     const details = await container.inspect();
@@ -243,7 +253,16 @@ export class LocalHost implements Host {
         }
         queue.close();
       });
-      readable.on("error", () => queue.close());
+      readable.on("error", () => {
+        // Same flush as the `end` path. A socket dying mid-character would otherwise
+        // drop it, and the two paths differing is how one of them silently rots.
+        if (demux) for (const chunk of demux.flush()) queue.push(chunk);
+        if (ttyDecoder) {
+          const trailing = ttyDecoder.end();
+          if (trailing !== "") queue.push({ text: trailing, stream: "stdout" });
+        }
+        queue.close();
+      });
     }
 
     try {

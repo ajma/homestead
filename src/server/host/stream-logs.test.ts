@@ -34,6 +34,21 @@ describe("FakeHost.streamLogs", () => {
   });
 });
 
+describe("streamLogs cleanup contract", () => {
+  it("opens nothing until the first next()", async () => {
+    // The body is a generator: obtaining the iterable must not touch Docker. Measured
+    // against the real daemon, five un-iterated iterables left the handle count
+    // unchanged — this pins the same property against the fake.
+    const host = new FakeHost();
+    host.logLines.set("abc", [{ text: "x", stream: "stdout" }]);
+    const iterable = host.streamLogs({ containerId: "abc" });
+    expect(host.logCalls).toEqual([]);
+    // Only once someone asks for a value does it record the call.
+    await iterable[Symbol.asyncIterator]().next();
+    expect(host.logCalls).toHaveLength(1);
+  });
+});
+
 describe("inspectContainer port projection", () => {
   it("reports an exposed-but-unpublished port as null, not port zero", async () => {
     // Docker gives `HostPort: ""` for a port that is exposed but not published, and
