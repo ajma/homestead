@@ -1345,7 +1345,7 @@ describe.skipIf(!hasDocker)('streamLogs against real Docker', () => {
 - [ ] **Step 7: Run everything**
 
 Run: `pnpm exec vitest run src/server/host/stream-logs.test.ts && pnpm test && pnpm exec tsc --noEmit`
-Expected: the focused file passes 5 tests; the full suite stays green.
+Expected: the focused file passes 6 tests; the full suite stays green.
 
 - [ ] **Step 8: Commit**
 
@@ -1965,6 +1965,24 @@ describe('lifecycle routes', () => {
     await app.close()
   })
 
+  it('sends exactly one terminal event whether the job succeeds or throws', async () => {
+    // `done` is the end of the stream and `error` is informational, so a client can
+    // tear down its EventSource on `done` alone. Sending `error` without `done` left
+    // such a client hanging; the log route already followed this contract and the two
+    // must not drift.
+    const { app, cookie, id } = await withApp()
+    app.deps.host.composeResults.set('up -d', { exitCode: 0, stdout: 'fine\n', stderr: '' })
+    const okStart = await app.inject({
+      method: 'POST', url: `/api/apps/${id}/actions/up`, headers: { cookie },
+    })
+    const okStream = await app.inject({
+      method: 'GET', url: `/api/jobs/${okStart.json().jobId}/stream`, headers: { cookie },
+    })
+    expect(okStream.body.match(/event: done/g)).toHaveLength(1)
+    expect(okStream.body).not.toContain('event: error')
+    await app.close()
+  })
+
   it('closes the stream and reports the error when the job output throws', async () => {
     // After hijack() Fastify cannot report an error — the headers are already out — so
     // an unguarded throw leaves the stream open and its 25s heartbeat firing for the
@@ -1994,6 +2012,8 @@ describe('lifecycle routes', () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toContain('partial')
     expect(res.body).toContain('event: error')
+    // And still exactly one terminal event, so a client waiting on `done` is not hung.
+    expect(res.body.match(/event: done/g)).toHaveLength(1)
     app.deps.host.releaseCompose()
     await app.close()
   })
@@ -2210,16 +2230,16 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
         sse.send('output', chunk)
       }
       await live.done
-
-      const [finished] = await db.select().from(jobs).where(eq(jobs.id, jobId))
-      sse.send('done', {
-        status: finished?.status ?? 'failed',
-        exitCode: finished?.exitCode ?? null,
-      })
     } catch (error) {
       request.log.error({ err: error, jobId }, 'job stream failed')
       sse.send('error', { message: 'The job stream ended unexpectedly.' })
     } finally {
+      // Exactly one terminal event on every path, success or failure. A client that
+      // waits for `done` before tearing down its EventSource would otherwise hang after
+      // an `error`; `error` is informational, `done` is the end of the stream. The log
+      // route follows the same contract — the two must not drift.
+      const [final] = await db.select().from(jobs).where(eq(jobs.id, jobId))
+      sse.send('done', { status: final?.status ?? 'failed', exitCode: final?.exitCode ?? null })
       sse.close()
     }
     // No `return reply`: the reply is hijacked, so returning it would ask Fastify to
@@ -2249,7 +2269,7 @@ const jobs = new JobRunner({ db, host, composeConfig })
 - [ ] **Step 7: Run it and confirm it passes**
 
 Run: `pnpm exec vitest run src/server/routes/jobs.test.ts && pnpm test && pnpm exec tsc --noEmit`
-Expected: the focused file passes 9 tests; the full suite stays green.
+Expected: the focused file passes 10 tests; the full suite stays green.
 
 - [ ] **Step 8: Commit**
 
@@ -2358,14 +2378,42 @@ describe('log streaming', () => {
     await app.close()
   })
 
-  it('clamps an absurd tail rather than passing it through', async () => {
+  it('clamps a too-large tail but defaults an unparseable one', async () => {
+    // Two different failures with two different right answers. Clamping garbage to the
+    // maximum served 5000 lines for `?tail=abc` — the most expensive response available,
+    // handed out for input that meant nothing.
     const { app, cookie, id } = await withApp()
     app.deps.host.logLines.set('container-1', [{ text: 'x\n', stream: 'stdout' }])
-    await app.inject({
-      method: 'GET', url: `/api/apps/${id}/containers/container-1/logs?tail=999999`,
-      headers: { cookie },
+    const tailFor = async (query: string) => {
+      app.deps.host.logCalls.length = 0
+      await app.inject({
+        method: 'GET',
+        url: `/api/apps/${id}/containers/container-1/logs${query}`,
+        headers: { cookie },
+      })
+      return app.deps.host.logCalls[0]?.tail
+    }
+    expect(await tailFor('?tail=999999')).toBe(5000)
+    expect(await tailFor('?tail=abc')).toBe(200)
+    expect(await tailFor('?tail=-5')).toBe(200)
+    expect(await tailFor('?tail=0')).toBe(200)
+    expect(await tailFor('')).toBe(200)
+    await app.close()
+  })
+
+  it('answers 503 rather than 500 when Docker cannot be reached', async () => {
+    // The ownership check needs a container list. A wedged socket must not surface as an
+    // opaque 500, and must NOT fall through to streaming — an empty list would make the
+    // ownership check vacuous.
+    const { app, cookie, id } = await withApp()
+    app.deps.host.listContainers = async () => {
+      throw new Error('connect ENOENT /var/run/docker.sock')
+    }
+    const res = await app.inject({
+      method: 'GET', url: `/api/apps/${id}/containers/container-1/logs`, headers: { cookie },
     })
-    expect(app.deps.host.logCalls[0]?.tail).toBe(5000)
+    expect(res.statusCode).toBe(503)
+    expect(res.json().error).toBe('docker_unreachable')
     await app.close()
   })
 })
@@ -2388,8 +2436,23 @@ import { loadApp } from './apps.js'
 /** More than this and the browser is the bottleneck, not the server. */
 const MAX_TAIL = 5000
 
+// `follow` defaults to true and nothing bounds the stream's duration: a tab left open
+// overnight on a chatty container holds one request and one heartbeat until it closes.
+// Accepted for now — the bound that matters is per-client, and the browser closing the
+// EventSource is that bound. A server-side max duration would cut a user watching a
+// deploy, which is the case the feature exists for.
+
 const query = z.object({
-  tail: z.coerce.number().int().positive().max(MAX_TAIL).catch(MAX_TAIL).default(200),
+  // Clamp what is merely too large; fall back to the DEFAULT for what is not a number.
+  // `.max(MAX_TAIL).catch(MAX_TAIL)` conflated the two, so `?tail=abc` and `?tail=-5`
+  // were served 5000 lines — garbage input getting the most expensive answer available.
+  tail: z.coerce
+    .number()
+    .int()
+    .positive()
+    .transform((value) => Math.min(value, MAX_TAIL))
+    .catch(200)
+    .default(200),
   follow: z
     .enum(['true', 'false'])
     .transform((value) => value === 'true')
@@ -2411,7 +2474,21 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
 
     // The container must belong to THIS app. Without this the id is a free handle to any
     // container on the host, including one from an app the caller is scoped out of.
-    const containers = await host.listContainers({ project: row.projectName ?? '' })
+    //
+    // A wedged Docker socket answers 503, not 500: the app list already degrades rather
+    // than erroring for the same cause, and an opaque 500 on the logs pane tells the user
+    // nothing about what to fix. It must NOT fall through to streaming — an empty
+    // container list would make the ownership check vacuous.
+    let containers: Awaited<ReturnType<typeof host.listContainers>>
+    try {
+      containers = await host.listContainers({ project: row.projectName ?? '' })
+    } catch (error) {
+      request.log.error({ err: error, appId: id }, 'listing containers failed')
+      return reply.code(503).send({
+        error: 'docker_unreachable',
+        message: 'Docker is not reachable, so logs cannot be opened.',
+      })
+    }
     if (!containers.some((container) => container.id === containerId)) {
       return reply.code(404).send({ error: 'not_found' })
     }
