@@ -3231,7 +3231,8 @@ import { auditLog, userAppScope, users } from '../db/schema.js'
 import { ulid } from 'ulid'
 
 const createUserSchema = z.object({
-  email: z.string().email(),
+  // z.email(), not z.string().email() — the latter is @deprecated in zod 4.
+  email: z.email(),
   password: z.string().min(12),
   name: z.string().min(1),
   role: z.enum(ROLES),
