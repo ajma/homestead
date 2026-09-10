@@ -79,8 +79,14 @@ export function parseImageRef(image: string): ImageRef {
  */
 function parseChallenge(header: string): Record<string, string> {
   const out: Record<string, string> = {};
-  if (!/^\s*Bearer\b/i.test(header)) return out;
-  for (const match of header.matchAll(/([a-zA-Z_]+)=(?:"([^"]*)"|([^\s,]+))/g)) {
+  // RFC 9110 lets one header offer several schemes — `Basic realm="x", Bearer realm="y"`
+  // is legal. Requiring the header to START with Bearer threw away the Bearer option in
+  // that case, so we find it wherever it appears and read the parameters after it.
+  const bearer = /\bBearer\b/i.exec(header);
+  if (!bearer) return out;
+  for (const match of header
+    .slice(bearer.index)
+    .matchAll(/([a-zA-Z_]+)=(?:"([^"]*)"|([^\s,]+))/g)) {
     const [, key, quoted, bare] = match;
     const value = quoted ?? bare;
     if (key !== undefined && value !== undefined) out[key.toLowerCase()] = value;
@@ -109,7 +115,15 @@ export function createRegistryClient(deps: {
    */
   async function latestDigest(image: string): Promise<string | null> {
     const fail = (reason: string): null => {
-      deps.onError?.(image, reason);
+      // The callback is the caller's logger. If it throws, the throw would escape
+      // `latestDigest` and abort the daily sweep for every app after this one — a
+      // reporting channel taking down the thing it reports on. Same shape as a `finally`
+      // that masks the error it was added to surface.
+      try {
+        deps.onError?.(image, reason);
+      } catch {
+        // Nothing useful to do: the channel for saying so is the one that just failed.
+      }
       return null;
     };
     try {

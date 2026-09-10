@@ -167,6 +167,37 @@ describe("registry client", () => {
     expect(await createRegistryClient({ fetch: impl }).latestDigest("nginx")).toBe("sha256:ok");
   });
 
+  it("keeps working when the error callback itself throws", async () => {
+    // The callback is the caller's logger. A throw escaping here would abort the daily
+    // sweep for every app after this one — the reporting channel taking down the thing
+    // it reports on.
+    const { impl } = fakeFetch([{ status: 404, headers: {} }]);
+    const client = createRegistryClient({
+      fetch: impl,
+      onError: () => {
+        throw new Error("logger is misconfigured");
+      },
+    });
+    await expect(client.latestDigest("nginx")).resolves.toBeNull();
+  });
+
+  it("finds the Bearer scheme in a multi-scheme challenge", async () => {
+    // `Basic realm="x", Bearer realm="y"` is legal per RFC 9110, and demanding the header
+    // START with Bearer threw away the option that actually works.
+    const { impl } = fakeFetch([
+      {
+        status: 401,
+        headers: {
+          "www-authenticate":
+            'Basic realm="private", Bearer realm="https://auth.example/token",service="reg"',
+        },
+      },
+      { status: 200, headers: {}, body: { token: "tok" } },
+      { status: 200, headers: { "docker-content-digest": "sha256:multi" } },
+    ]);
+    expect(await createRegistryClient({ fetch: impl }).latestDigest("nginx")).toBe("sha256:multi");
+  });
+
   it("ignores a non-Bearer challenge rather than guessing", async () => {
     const { impl } = fakeFetch([
       { status: 401, headers: { "www-authenticate": 'Basic realm="private"' } },
