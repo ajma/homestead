@@ -1460,6 +1460,30 @@ describe('LocalHost filesystem', () => {
   it('rejects a path outside the root', async () => {
     await expect(host.readTextFile('../escape.txt')).rejects.toThrow()
   })
+
+  it('creates new files owner-only, because .env holds secrets', async () => {
+    await host.writeTextFile('jellyfin/.env', 'DB_PASSWORD=hunter2\n', null)
+    const { mode } = await stat(join(root, 'jellyfin', '.env'))
+    expect(mode & 0o777).toBe(0o600)
+  })
+
+  it('preserves the existing mode instead of resetting it to the umask', async () => {
+    const target = join(root, 'jellyfin', 'locked.env')
+    await writeFile(target, 'API_KEY=abc\n')
+    await chmod(target, 0o600)
+
+    const { hash } = await host.readTextFile('jellyfin/locked.env')
+    await host.writeTextFile('jellyfin/locked.env', 'API_KEY=xyz\n', hash)
+
+    const { mode } = await stat(target)
+    expect(mode & 0o777).toBe(0o600) // Was silently becoming 0644 before this guard.
+  })
+
+  it('leaves no temp files behind', async () => {
+    await host.writeTextFile('jellyfin/compose.yaml', 'services: {}\n', null).catch(() => {})
+    const entries = await readdir(join(root, 'jellyfin'))
+    expect(entries.filter((e) => e.includes('.tmp'))).toHaveLength(0)
+  })
 })
 ```
 
@@ -1472,7 +1496,7 @@ Expected: FAIL — module not found.
 
 ```ts
 import { createHash } from 'node:crypto'
-import { readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { chmod, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import Docker from 'dockerode'
 import { PathGuard } from './paths.js'
@@ -1549,8 +1573,22 @@ export class LocalHost implements Host {
     // it — so even if a symlink is planted between PathGuard's check and this write
     // (a TOCTOU race), the write lands inside the root. Never `writeFile` to `abs`
     // directly; that call follows symlinks.
+    //
+    // The temp file's mode becomes the destination's mode after rename, so it must be
+    // chosen deliberately. `.env` files hold database passwords and API keys, and the
+    // compose root is an SMB share. Defaulting to the umask (0644 here) would publish
+    // new secrets to every local user AND silently downgrade a file the user had
+    // already chmod'ed to 0600.
+    const mode = await stat(abs)
+      .then((s) => s.mode & 0o777)
+      .catch(() => 0o600) // New file: owner-only. Callers may relax it afterwards.
+
     const temp = join(dirname(abs), `.homestead-${process.pid}-${Date.now()}.tmp`)
-    await writeFile(temp, content, 'utf8')
+    // 'wx' fails if the path exists, so a pre-created file with a permissive mode
+    // cannot be reused. Mode is applied at creation, then forced with chmod because
+    // the process umask can strip bits from the requested mode.
+    await writeFile(temp, content, { encoding: 'utf8', mode, flag: 'wx' })
+    await chmod(temp, mode)
     await rename(temp, abs)
     return { hash: hashContent(content) }
   }
