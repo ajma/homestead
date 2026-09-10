@@ -284,7 +284,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     }
 
     if (adopted.length === 0) {
-      return reply.code(anyConflict ? 409 : 422).send({ adopted, failed });
+      return reply.code(anyConflict ? 409 : 422).send({ error: "adopt_failed", adopted, failed });
     }
     return reply.code(201).send({ adopted, failed });
   });
