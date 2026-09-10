@@ -59,6 +59,30 @@ describe("PathGuard", () => {
     );
   });
 
+  it("rejects a write whose TARGET is a symlink escaping the root, inside a legitimate parent", async () => {
+    // The parent (jellyfin/) is entirely legitimate. Only the target is a symlink.
+    // Verified: without the target check, writeTextFile overwrites the outside file.
+    await symlink(join(outside, "passwd"), join(root, "jellyfin", ".env"));
+    const guard = new PathGuard(root);
+    await guard.init();
+    await expect(guard.resolveForWrite("jellyfin/.env")).rejects.toBeInstanceOf(PathEscapeError);
+  });
+
+  it("still allows creating a genuinely new file in a legitimate directory", async () => {
+    const guard = new PathGuard(root);
+    await guard.init();
+    await expect(guard.resolveForWrite("jellyfin/brand-new.env")).resolves.toContain(
+      "brand-new.env",
+    );
+  });
+
+  it.each(["", ".", "./", "  "])("rejects %j, which addresses the root itself", async (rel) => {
+    const guard = new PathGuard(root);
+    await guard.init();
+    await expect(guard.resolveExisting(rel)).rejects.toBeInstanceOf(PathEscapeError);
+    await expect(guard.resolveForWrite(rel)).rejects.toBeInstanceOf(PathEscapeError);
+  });
+
   it("allows a write to a not-yet-existing file inside the root", async () => {
     const guard = new PathGuard(root);
     await guard.init();
