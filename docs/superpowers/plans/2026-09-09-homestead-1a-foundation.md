@@ -1154,6 +1154,21 @@ describe('PathGuard', () => {
     await expect(guard.resolveForWrite('escape/newfile.txt')).rejects.toBeInstanceOf(PathEscapeError)
   })
 
+  it('rejects a write whose TARGET is a symlink escaping the root, inside a legitimate parent', async () => {
+    // The parent (jellyfin/) is entirely legitimate. Only the target is a symlink.
+    // Verified: without the target check, writeTextFile overwrites the outside file.
+    await symlink(join(outside, 'passwd'), join(root, 'jellyfin', '.env'))
+    const guard = new PathGuard(root)
+    await guard.init()
+    await expect(guard.resolveForWrite('jellyfin/.env')).rejects.toBeInstanceOf(PathEscapeError)
+  })
+
+  it('still allows creating a genuinely new file in a legitimate directory', async () => {
+    const guard = new PathGuard(root)
+    await guard.init()
+    await expect(guard.resolveForWrite('jellyfin/brand-new.env')).resolves.toContain('brand-new.env')
+  })
+
   it('allows a write to a not-yet-existing file inside the root', async () => {
     const guard = new PathGuard(root)
     await guard.init()
@@ -1224,14 +1239,17 @@ export class PathGuard {
   }
 
   /**
-   * Resolves a path that may not exist yet. The parent directory must exist and
-   * must itself resolve inside the root, so a symlinked parent cannot be used to
-   * write outside.
+   * Resolves a path that may not exist yet. Two separate checks are required:
+   * the parent directory must resolve inside the root, AND if the target itself
+   * already exists it must also resolve inside the root.
    */
   async resolveForWrite(rel: string): Promise<string> {
     this.assertInitialised()
     if (isAbsolute(rel)) throw new PathEscapeError(rel)
     const candidate = resolve(this.roots[0]!, rel)
+
+    // Check 1: the parent must exist and resolve inside the root. Stops
+    // `escape -> /etc` being used to write `escape/newfile`.
     let realParent: string
     try {
       realParent = await realpath(dirname(candidate))
@@ -1239,6 +1257,19 @@ export class PathGuard {
       throw new PathEscapeError(rel)
     }
     if (!this.roots.some((r) => isInside(realParent, r))) throw new PathEscapeError(rel)
+
+    // Check 2: if the target already exists, IT must resolve inside the root too.
+    // A legitimate parent can still contain a symlink pointing anywhere — planting
+    // `app/.env -> /etc/cron.d/x` passes check 1 and would otherwise be written through.
+    // A target that does not exist yet is fine; that is the normal create case.
+    try {
+      const realTarget = await realpath(candidate)
+      if (!this.roots.some((r) => isInside(realTarget, r))) throw new PathEscapeError(rel)
+    } catch (error) {
+      if (error instanceof PathEscapeError) throw error
+      // ENOENT: target does not exist yet. Proceed.
+    }
+
     return resolve(realParent, basename(candidate))
   }
 }
@@ -1492,7 +1523,11 @@ export class LocalHost implements Host {
       throw new HashMismatchError(expectedHash, currentHash ?? '<absent>')
     }
 
-    // Write to a sibling temp file and rename, so a crash cannot truncate the original.
+    // Write to a sibling temp file and rename. Two reasons: a crash cannot truncate the
+    // original, and `rename` REPLACES a symlink at the destination rather than following
+    // it — so even if a symlink is planted between PathGuard's check and this write
+    // (a TOCTOU race), the write lands inside the root. Never `writeFile` to `abs`
+    // directly; that call follows symlinks.
     const temp = join(dirname(abs), `.homestead-${process.pid}-${Date.now()}.tmp`)
     await writeFile(temp, content, 'utf8')
     await rename(temp, abs)
