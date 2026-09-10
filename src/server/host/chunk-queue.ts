@@ -13,7 +13,9 @@ import type { JobChunk } from "./types.js";
  */
 export class ChunkQueue implements AsyncIterable<JobChunk> {
   private readonly buffer: JobChunk[] = [];
-  private wake: (() => void) | null = null;
+  /** Stream index of `buffer[0]`. Rises as chunks are dropped, so cursors stay meaningful. */
+  private base = 0;
+  private readonly waiters = new Set<() => void>();
   private closed = false;
   private droppedCount = 0;
 
@@ -24,6 +26,7 @@ export class ChunkQueue implements AsyncIterable<JobChunk> {
     this.buffer.push(chunk);
     while (this.buffer.length > this.limit) {
       this.buffer.shift();
+      this.base++;
       this.droppedCount++;
     }
     this.signal();
@@ -39,22 +42,38 @@ export class ChunkQueue implements AsyncIterable<JobChunk> {
   }
 
   private signal(): void {
-    const wake = this.wake;
-    this.wake = null;
-    wake?.();
+    // Copy and clear: a waiter re-registers on its next loop, and resolving while
+    // iterating the live set would skip entries.
+    const waiting = [...this.waiters];
+    this.waiters.clear();
+    for (const wake of waiting) wake();
   }
 
+  /**
+   * Each iterator gets its OWN cursor, so two consumers both see every chunk.
+   *
+   * Consuming by shifting off a shared buffer looks simpler and is wrong here: two browser
+   * tabs watching one deploy would split the output between them, and with a single
+   * stored waiter the second would hang after the first chunk. A job's stream is watched
+   * by however many tabs the user has open.
+   *
+   * A cursor that falls behind the retained window jumps to `base` — it has been dropped
+   * past, which is the backpressure working, not an error.
+   */
   async *[Symbol.asyncIterator](): AsyncIterator<JobChunk> {
+    let cursor = this.base;
     while (true) {
-      while (this.buffer.length > 0) {
-        const next = this.buffer.shift();
+      if (cursor < this.base) cursor = this.base;
+      while (cursor < this.base + this.buffer.length) {
+        const next = this.buffer[cursor - this.base];
+        cursor++;
         if (next) yield next;
       }
-      // Buffer drained. Ending only here, and not on `closed` alone, is what guarantees a
-      // consumer sees chunks pushed before it started iterating.
+      // Drained. Ending only here, not on `closed` alone, is what guarantees a consumer
+      // sees chunks pushed before it started iterating.
       if (this.closed) return;
       await new Promise<void>((resolve) => {
-        this.wake = resolve;
+        this.waiters.add(resolve);
       });
     }
   }

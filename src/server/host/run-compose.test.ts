@@ -105,7 +105,9 @@ describe.skipIf(!hasDocker)("runCompose", () => {
     ]).result;
     expect(result.exitCode).toBe(0);
   });
+});
 
+describe("runCompose without Docker", () => {
   it("settles result when the compose path does not resolve", async () => {
     // No Docker needed: the path guard rejects before anything spawns. Without the
     // `.catch` on the async IIFE this hangs forever instead of resolving.

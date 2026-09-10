@@ -164,6 +164,34 @@ export class LocalHost implements Host {
   private static readonly TAIL_BYTES = 256 * 1024;
 
   /**
+   * Keeps the last `TAIL_BYTES` characters of a stream without re-copying the whole tail
+   * on every chunk.
+   *
+   * Concatenating and slicing per chunk allocates two full tails each time — on a `pull`
+   * emitting ten thousand chunks that is gigabytes of garbage for a quarter-megabyte of
+   * output. Holding the pieces and joining once at the end is amortised linear.
+   */
+  private static tailKeeper() {
+    const pieces: string[] = [];
+    let length = 0;
+    return {
+      push(text: string) {
+        pieces.push(text);
+        length += text.length;
+        while (length > LocalHost.TAIL_BYTES && pieces.length > 1) {
+          length -= pieces.shift()?.length ?? 0;
+        }
+      },
+      text(): string {
+        const joined = pieces.join("");
+        return joined.length > LocalHost.TAIL_BYTES
+          ? joined.slice(joined.length - LocalHost.TAIL_BYTES)
+          : joined;
+      },
+    };
+  }
+
+  /**
    * Spawns `docker compose` and returns a handle rather than a finished result.
    *
    * `spawn`, not `execFile`: `execFile` buffers the entire output while we also read it
@@ -174,14 +202,9 @@ export class LocalHost implements Host {
   runCompose(target: ComposeTarget, args: string[], opts: ComposeOptions = {}): JobHandle {
     const queue = new ChunkQueue();
     const state = { child: null as ChildProcess | null, cancelled: false };
-    const tails = { stdout: "", stderr: "" };
-
-    const keepTail = (stream: "stdout" | "stderr", text: string) => {
-      const combined = tails[stream] + text;
-      tails[stream] =
-        combined.length > LocalHost.TAIL_BYTES
-          ? combined.slice(combined.length - LocalHost.TAIL_BYTES)
-          : combined;
+    const tails = {
+      stdout: LocalHost.tailKeeper(),
+      stderr: LocalHost.tailKeeper(),
     };
 
     const result = (async (): Promise<ComposeResult> => {
@@ -190,7 +213,9 @@ export class LocalHost implements Host {
       );
       if (state.cancelled) {
         queue.close();
-        return { exitCode: 130, stdout: "", stderr: "cancelled before start" };
+        // 143 here too, not 130: a caller checking for "cancelled" should not have to
+        // know whether the process had started yet.
+        return { exitCode: 143, stdout: "", stderr: "cancelled before start" };
       }
 
       return await new Promise<ComposeResult>((resolve) => {
@@ -204,14 +229,14 @@ export class LocalHost implements Host {
           const pipe = child[stream];
           pipe?.setEncoding("utf8");
           pipe?.on("data", (text: string) => {
-            keepTail(stream, text);
+            tails[stream].push(text);
             queue.push({ text, stream });
           });
         }
 
         child.on("error", (error) => {
           queue.close();
-          resolve({ exitCode: 1, stdout: tails.stdout, stderr: error.message });
+          resolve({ exitCode: 1, stdout: tails.stdout.text(), stderr: error.message });
         });
 
         child.on("close", (code, signal) => {
@@ -219,7 +244,7 @@ export class LocalHost implements Host {
           // A signalled exit reports 128+n the way a shell would, so a killed `pull` is
           // distinguishable from a compose file that genuinely failed to validate.
           const exitCode = code ?? (signal === "SIGTERM" ? 143 : 1);
-          resolve({ exitCode, stdout: tails.stdout, stderr: tails.stderr });
+          resolve({ exitCode, stdout: tails.stdout.text(), stderr: tails.stderr.text() });
         });
       });
     })().catch((error: unknown) => {

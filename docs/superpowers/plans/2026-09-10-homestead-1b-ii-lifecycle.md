@@ -139,6 +139,41 @@ describe('ChunkQueue', () => {
     expect(queue.dropped).toBe(2)
   })
 
+  it('gives every concurrent consumer the whole stream', async () => {
+    // Two browser tabs watching one deploy. A queue that shifts off a shared buffer
+    // splits the output between them, and with one stored waiter the second hangs after
+    // the first chunk — measured against the first implementation.
+    const queue = new ChunkQueue()
+    const first = drain(queue)
+    const second = drain(queue)
+    await new Promise((r) => setTimeout(r, 5))
+    queue.push({ text: 'a', stream: 'stdout' })
+    queue.push({ text: 'b', stream: 'stdout' })
+    queue.close()
+    expect(await first).toEqual(['a', 'b'])
+    expect(await second).toEqual(['a', 'b'])
+  })
+
+  it('lets a consumer that fell behind resume at the oldest retained chunk', async () => {
+    const queue = new ChunkQueue(2)
+    queue.push({ text: '1', stream: 'stdout' })
+    queue.push({ text: '2', stream: 'stdout' })
+    queue.push({ text: '3', stream: 'stdout' })
+    queue.close()
+    // '1' is gone; the consumer picks up from what is still retained rather than stalling.
+    expect(await drain(queue)).toEqual(['2', '3'])
+  })
+
+  it('survives a consumer that breaks out early', async () => {
+    const queue = new ChunkQueue()
+    queue.push({ text: 'a', stream: 'stdout' })
+    for await (const _ of queue) break
+    queue.push({ text: 'b', stream: 'stdout' })
+    queue.close()
+    // The abandoned waiter must not wedge later pushes or a later consumer.
+    expect(await drain(queue)).toEqual(['a', 'b'])
+  })
+
   it('ignores pushes after close rather than throwing', async () => {
     const queue = new ChunkQueue()
     queue.close()
@@ -171,7 +206,9 @@ import type { JobChunk } from './types.js'
  */
 export class ChunkQueue implements AsyncIterable<JobChunk> {
   private readonly buffer: JobChunk[] = []
-  private wake: (() => void) | null = null
+  /** Stream index of `buffer[0]`. Rises as chunks are dropped, so cursors stay meaningful. */
+  private base = 0
+  private readonly waiters = new Set<() => void>()
   private closed = false
   private droppedCount = 0
 
@@ -182,6 +219,7 @@ export class ChunkQueue implements AsyncIterable<JobChunk> {
     this.buffer.push(chunk)
     while (this.buffer.length > this.limit) {
       this.buffer.shift()
+      this.base++
       this.droppedCount++
     }
     this.signal()
@@ -197,22 +235,38 @@ export class ChunkQueue implements AsyncIterable<JobChunk> {
   }
 
   private signal(): void {
-    const wake = this.wake
-    this.wake = null
-    wake?.()
+    // Copy and clear: a waiter re-registers on its next loop, and resolving while
+    // iterating the live set would skip entries.
+    const waiting = [...this.waiters]
+    this.waiters.clear()
+    for (const wake of waiting) wake()
   }
 
+  /**
+   * Each iterator gets its OWN cursor, so two consumers both see every chunk.
+   *
+   * Consuming by shifting off a shared buffer looks simpler and is wrong here: two browser
+   * tabs watching one deploy would split the output between them, and with a single
+   * stored waiter the second would hang after the first chunk. A job's stream is watched
+   * by however many tabs the user has open.
+   *
+   * A cursor that falls behind the retained window jumps to `base` — it has been dropped
+   * past, which is the backpressure working, not an error.
+   */
   async *[Symbol.asyncIterator](): AsyncIterator<JobChunk> {
+    let cursor = this.base
     while (true) {
-      while (this.buffer.length > 0) {
-        const next = this.buffer.shift()
+      if (cursor < this.base) cursor = this.base
+      while (cursor < this.base + this.buffer.length) {
+        const next = this.buffer[cursor - this.base]
+        cursor++
         if (next) yield next
       }
-      // Buffer drained. Ending only here, and not on `closed` alone, is what guarantees a
-      // consumer sees chunks pushed before it started iterating.
+      // Drained. Ending only here, not on `closed` alone, is what guarantees a consumer
+      // sees chunks pushed before it started iterating.
       if (this.closed) return
       await new Promise<void>((resolve) => {
-        this.wake = resolve
+        this.waiters.add(resolve)
       })
     }
   }
@@ -264,6 +318,34 @@ Replace the existing method in `src/server/host/local-host.ts`. Add `spawn` to t
   private static readonly TAIL_BYTES = 256 * 1024;
 
   /**
+   * Keeps the last `TAIL_BYTES` characters of a stream without re-copying the whole tail
+   * on every chunk.
+   *
+   * Concatenating and slicing per chunk allocates two full tails each time — on a `pull`
+   * emitting ten thousand chunks that is gigabytes of garbage for a quarter-megabyte of
+   * output. Holding the pieces and joining once at the end is amortised linear.
+   */
+  private static tailKeeper() {
+    const pieces: string[] = [];
+    let length = 0;
+    return {
+      push(text: string) {
+        pieces.push(text);
+        length += text.length;
+        while (length > LocalHost.TAIL_BYTES && pieces.length > 1) {
+          length -= pieces.shift()?.length ?? 0;
+        }
+      },
+      text(): string {
+        const joined = pieces.join("");
+        return joined.length > LocalHost.TAIL_BYTES
+          ? joined.slice(joined.length - LocalHost.TAIL_BYTES)
+          : joined;
+      },
+    };
+  }
+
+  /**
    * Spawns `docker compose` and returns a handle rather than a finished result.
    *
    * `spawn`, not `execFile`: `execFile` buffers the entire output while we also read it
@@ -274,21 +356,18 @@ Replace the existing method in `src/server/host/local-host.ts`. Add `spawn` to t
   runCompose(target: ComposeTarget, args: string[], opts: ComposeOptions = {}): JobHandle {
     const queue = new ChunkQueue();
     const state = { child: null as ChildProcess | null, cancelled: false };
-    const tails = { stdout: "", stderr: "" };
-
-    const keepTail = (stream: "stdout" | "stderr", text: string) => {
-      const combined = tails[stream] + text;
-      tails[stream] =
-        combined.length > LocalHost.TAIL_BYTES
-          ? combined.slice(combined.length - LocalHost.TAIL_BYTES)
-          : combined;
+    const tails = {
+      stdout: LocalHost.tailKeeper(),
+      stderr: LocalHost.tailKeeper(),
     };
 
     const result = (async (): Promise<ComposeResult> => {
       const composePath = await this.guard.resolveExisting(join(target.directory, target.composeFile));
       if (state.cancelled) {
         queue.close();
-        return { exitCode: 130, stdout: "", stderr: "cancelled before start" };
+        // 143 here too, not 130: a caller checking for "cancelled" should not have to
+        // know whether the process had started yet.
+        return { exitCode: 143, stdout: "", stderr: "cancelled before start" };
       }
 
       return await new Promise<ComposeResult>((resolve) => {
@@ -302,14 +381,14 @@ Replace the existing method in `src/server/host/local-host.ts`. Add `spawn` to t
           const pipe = child[stream];
           pipe?.setEncoding("utf8");
           pipe?.on("data", (text: string) => {
-            keepTail(stream, text);
+            tails[stream].push(text);
             queue.push({ text, stream });
           });
         }
 
         child.on("error", (error) => {
           queue.close();
-          resolve({ exitCode: 1, stdout: tails.stdout, stderr: error.message });
+          resolve({ exitCode: 1, stdout: tails.stdout.text(), stderr: error.message });
         });
 
         child.on("close", (code, signal) => {
@@ -317,7 +396,7 @@ Replace the existing method in `src/server/host/local-host.ts`. Add `spawn` to t
           // A signalled exit reports 128+n the way a shell would, so a killed `pull` is
           // distinguishable from a compose file that genuinely failed to validate.
           const exitCode = code ?? (signal === "SIGTERM" ? 143 : 1);
-          resolve({ exitCode, stdout: tails.stdout, stderr: tails.stderr });
+          resolve({ exitCode, stdout: tails.stdout.text(), stderr: tails.stderr.text() });
         });
       });
     })().catch((error: unknown) => {
@@ -426,8 +505,10 @@ with this helper at module scope in the same file:
 
 ```ts
 /**
- * Splits text into `count` pieces at arbitrary offsets — deliberately NOT on line
+ * Splits text into AT MOST `count` pieces at arbitrary offsets — deliberately not on line
  * boundaries. Code that assumes a chunk is a whole line is the bug this exists to catch.
+ * Fewer pieces than asked for when the text is shorter than the count; the point is
+ * "more than one, split anywhere", not an exact number.
  */
 function splitIntoChunks(text: string, count: number): string[] {
   if (text === "") return [];
@@ -479,8 +560,11 @@ Append to `src/server/host/run-compose.test.ts`:
   })
 ```
 
-The third test must **not** be `skipIf(!hasDocker)` — it exercises the path guard, which needs
-no daemon. The carry-forward flags that these files' `skipIf` currently hides the only coverage
+The third test must **not** be `skipIf(!hasDocker)`, and that includes not being nested inside
+a `describe.skipIf(!hasDocker)` block — the first attempt at this task put it there, which skips
+it just as thoroughly. Put it in its own `describe` outside the gated one. It exercises the path
+guard, which needs no daemon, and the carry-forward flags these files as holding the only
+coverage of compose-root confinement. The carry-forward flags that these files' `skipIf` currently hides the only coverage
 of compose-root confinement; every assertion here that can run without Docker must.
 
 - [ ] **Step 10: Run everything**

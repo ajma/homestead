@@ -23,8 +23,10 @@ import { HashMismatchError } from "./host/types.js";
 export type TestApp = FastifyInstance & { deps: AppDeps & { host: FakeHost } };
 
 /**
- * Splits text into `count` pieces at arbitrary offsets — deliberately NOT on line
+ * Splits text into AT MOST `count` pieces at arbitrary offsets — deliberately not on line
  * boundaries. Code that assumes a chunk is a whole line is the bug this exists to catch.
+ * Fewer pieces than asked for when the text is shorter than the count; the point is
+ * "more than one, split anywhere", not an exact number.
  */
 function splitIntoChunks(text: string, count: number): string[] {
   if (text === "") return [];

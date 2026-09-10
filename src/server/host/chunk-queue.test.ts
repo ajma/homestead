@@ -43,6 +43,41 @@ describe("ChunkQueue", () => {
     expect(queue.dropped).toBe(2);
   });
 
+  it("gives every concurrent consumer the whole stream", async () => {
+    // Two browser tabs watching one deploy. A queue that shifts off a shared buffer
+    // splits the output between them, and with one stored waiter the second hangs after
+    // the first chunk — measured against the first implementation.
+    const queue = new ChunkQueue();
+    const first = drain(queue);
+    const second = drain(queue);
+    await new Promise((r) => setTimeout(r, 5));
+    queue.push({ text: "a", stream: "stdout" });
+    queue.push({ text: "b", stream: "stdout" });
+    queue.close();
+    expect(await first).toEqual(["a", "b"]);
+    expect(await second).toEqual(["a", "b"]);
+  });
+
+  it("lets a consumer that fell behind resume at the oldest retained chunk", async () => {
+    const queue = new ChunkQueue(2);
+    queue.push({ text: "1", stream: "stdout" });
+    queue.push({ text: "2", stream: "stdout" });
+    queue.push({ text: "3", stream: "stdout" });
+    queue.close();
+    // '1' is gone; the consumer picks up from what is still retained rather than stalling.
+    expect(await drain(queue)).toEqual(["2", "3"]);
+  });
+
+  it("survives a consumer that breaks out early", async () => {
+    const queue = new ChunkQueue();
+    queue.push({ text: "a", stream: "stdout" });
+    for await (const _ of queue) break;
+    queue.push({ text: "b", stream: "stdout" });
+    queue.close();
+    // The abandoned waiter must not wedge later pushes or a later consumer.
+    expect(await drain(queue)).toEqual(["a", "b"]);
+  });
+
   it("ignores pushes after close rather than throwing", async () => {
     const queue = new ChunkQueue();
     queue.close();
