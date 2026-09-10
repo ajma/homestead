@@ -1010,6 +1010,19 @@ describe('http_internal', () => {
     expect(calls).toHaveLength(0)
   })
 
+  it('refuses a non-http scheme without making the request', async () => {
+    // The API rejects these when the user types one, but this is the code that performs
+    // the fetch, and a row can reach it by other routes. Measured before this check:
+    // `file:///etc/passwd` was passed to fetch.
+    const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }))
+    const runners = createHttpRunners({ fetch: impl })
+    for (const target of ['file:///etc/passwd', 'ftp://x/y', 'data:text/plain,hi']) {
+      const result = await runners.internal.run(probe({ target }), ctx)
+      expect(result, target).toMatchObject({ status: 'down', faultClass: 'config' })
+    }
+    expect(calls).toHaveLength(0)
+  })
+
   it('passes an abort signal derived from the probe timeout', async () => {
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }))
     await createHttpRunners({ fetch: impl }).internal.run(probe({ timeoutMs: 1234 }), ctx)
@@ -1146,10 +1159,21 @@ export function createHttpRunners(deps: {
     if (!probe.target) {
       return { failure: { status: 'down', faultClass: 'config', detail: { error: 'no target' } } }
     }
+    // Scheme-check here as well as at the API. The probe API rejects a non-http(s) target
+    // when the user types it, but this is the code that actually makes the request, and a
+    // row can reach it by other routes — a migration, an import, a direct database edit.
+    // The component that performs the fetch is the right place to refuse a scheme it
+    // should never fetch.
+    let parsed: URL
     try {
-      new URL(probe.target)
+      parsed = new URL(probe.target)
     } catch {
       return { failure: { status: 'down', faultClass: 'config', detail: { error: 'target is not a URL' } } }
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return {
+        failure: { status: 'down', faultClass: 'config', detail: { error: 'target must be http or https' } },
+      }
     }
 
     const startedAt = Date.now()
@@ -2374,7 +2398,11 @@ const createBody = z
     expectedStatusPattern: z.string().refine(isValidStatusPattern, 'not a status pattern').optional(),
     timeoutMs: z.number().int().min(100).max(60_000).optional(),
     intervalSeconds: z.number().int().min(10).max(86_400).optional(),
-    insecureTls: z.boolean().optional(),
+    // Not accepted while it does nothing. Node's `fetch` has no per-request TLS option,
+    // so the runner cannot honour this, and a switch that silently has no effect is worse
+    // than an absent one: a user with a self-signed LAN certificate would turn it on,
+    // watch the probe keep failing, and have no way to tell why.
+    insecureTls: z.literal(false).optional(),
   })
   .refine((body) => body.kind === 'docker' || body.target !== undefined, {
     message: 'an http probe needs a target',
@@ -2386,7 +2414,7 @@ const patchBody = z.object({
   expectedStatusPattern: z.string().refine(isValidStatusPattern, 'not a status pattern').optional(),
   timeoutMs: z.number().int().min(100).max(60_000).optional(),
   intervalSeconds: z.number().int().min(10).max(86_400).optional(),
-  insecureTls: z.boolean().optional(),
+  insecureTls: z.literal(false).optional(),
   enabled: z.boolean().optional(),
 })
 
