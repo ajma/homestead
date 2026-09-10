@@ -14,6 +14,7 @@ import type { Host } from "./host/types.js";
 import { appRoutes } from "./routes/apps.js";
 import { healthRoutes } from "./routes/health.js";
 import { jobRoutes } from "./routes/jobs.js";
+import { logRoutes } from "./routes/logs.js";
 import { spaRoutes } from "./routes/spa.js";
 import { userRoutes } from "./routes/users.js";
 
@@ -164,6 +165,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(userRoutes);
   await app.register(appRoutes);
   await app.register(jobRoutes);
+  await app.register(logRoutes);
   await app.register(spaRoutes);
 
   return app;
