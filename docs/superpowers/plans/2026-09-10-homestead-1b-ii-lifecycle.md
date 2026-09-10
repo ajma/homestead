@@ -986,7 +986,10 @@ Add `StringDecoder` from `node:string_decoder`, `ChunkQueue` and `LogDemultiplex
 ```ts
   logLines = new Map<string, LogLine[]>();
   logCalls: LogOptions[] = [];
+  /** Scripted inspect data. NOTE the existing `inspected` field is a `string[]` call log —
+   *  rename that to `inspectCalls` rather than replacing it, so nothing loses the log. */
   inspected = new Map<string, ContainerInspect>();
+  inspectCalls: string[] = [];
   images = new Map<string, ImageInspect>();
 
   async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
@@ -995,6 +998,7 @@ Add `StringDecoder` from `node:string_decoder`, `ChunkQueue` and `LogDemultiplex
   }
 
   async inspectContainer(id: string): Promise<ContainerInspect> {
+    this.inspectCalls.push(id);
     const found = this.inspected.get(id);
     if (!found) throw new Error(`no such container: ${id}`);
     return found;
@@ -1005,8 +1009,10 @@ Add `StringDecoder` from `node:string_decoder`, `ChunkQueue` and `LogDemultiplex
   }
 ```
 
-The existing `inspected` map may already hold a different shape; retype it to `ContainerInspect`
-and fix any test that seeds it.
+**`inspected` today is `string[]`** — a log of the ids passed to `inspectContainer`, pushed to
+at `test-helpers.ts:106`, not a data map. Rename that field to `inspectCalls` and add
+`inspected` as the `Map<string, ContainerInspect>` above; replacing it outright would silently
+drop the call log. Nothing outside `test-helpers.ts` reads it today, so the rename is safe.
 
 - [ ] **Step 6: Run everything**
 
@@ -1444,6 +1450,16 @@ async function withApp() {
   return { app, cookie, id: adopted.json().adopted[0].id as string }
 }
 
+/** Polls until `ready`, or fails loudly rather than hanging the suite. */
+async function until<T>(attempt: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
+  for (let i = 0; i < 100; i++) {
+    const value = await attempt()
+    if (ready(value)) return value
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error('condition never became true')
+}
+
 describe('lifecycle routes', () => {
   it('starts a job and returns its id immediately', async () => {
     const { app, cookie, id } = await withApp()
@@ -1525,8 +1541,12 @@ describe('lifecycle routes', () => {
       method: 'POST', url: `/api/apps/${id}/actions/up`, headers: { cookie },
     })
     const jobId = started.json().jobId
-    await app.deps.jobs.live(jobId)?.done
-    const res = await app.inject({ method: 'GET', url: `/api/jobs/${jobId}`, headers: { cookie } })
+    // Poll rather than `await live(jobId)?.done`: `live` returns undefined once the job
+    // has finished, so `?.done` silently no-ops and the GET below races the runner.
+    const res = await until(
+      () => app.inject({ method: 'GET', url: `/api/jobs/${jobId}`, headers: { cookie } }),
+      (r) => r.json().status !== 'running',
+    )
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({ status: 'succeeded', exitCode: 0, kind: 'up' })
     expect(res.json().output).toContain('started')
