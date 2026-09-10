@@ -254,6 +254,12 @@ export const secrets = sqliteTable("secrets", {
   updatedAt: integer("updated_at").notNull().default(now),
 });
 
+export const settings = sqliteTable("settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: integer("updated_at").notNull().default(now),
+});
+
 export const imageStatus = sqliteTable(
   "image_status",
   {
@@ -291,6 +297,7 @@ export const schema = {
   jobs,
   auditLog,
   secrets,
+  settings,
   imageStatus,
   setupState,
 };

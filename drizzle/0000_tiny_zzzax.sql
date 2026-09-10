@@ -181,6 +181,12 @@ CREATE TABLE `sessions` (
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `sessions_token_unique` ON `sessions` (`token`);--> statement-breakpoint
+CREATE TABLE `settings` (
+	`key` text PRIMARY KEY NOT NULL,
+	`value` text NOT NULL,
+	`updated_at` integer DEFAULT (unixepoch()) NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE `setup_state` (
 	`id` integer PRIMARY KEY DEFAULT 1 NOT NULL,
 	`completed_steps` text DEFAULT '[]' NOT NULL,

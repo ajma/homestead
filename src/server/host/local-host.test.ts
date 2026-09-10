@@ -99,8 +99,21 @@ describe("LocalHost filesystem", () => {
     expect(mode & 0o777).toBe(0o600); // Was silently becoming 0644 before this guard.
   });
 
-  it("leaves no temp files behind", async () => {
-    await host.writeTextFile("jellyfin/compose.yaml", "services: {}\n", null).catch(() => {});
+  it("leaves no temp files behind after a post-writeFile failure", async () => {
+    // Create a new file first
+    await host.writeTextFile("jellyfin/test.txt", "initial\n", null);
+
+    // Make the directory read-only so rename() will fail AFTER writeFile() succeeds
+    await chmod(join(root, "jellyfin"), 0o500);
+
+    try {
+      const { hash } = await host.readTextFile("jellyfin/test.txt");
+      await host.writeTextFile("jellyfin/test.txt", "modified\n", hash).catch(() => {});
+    } finally {
+      // Restore permissions for cleanup
+      await chmod(join(root, "jellyfin"), 0o700);
+    }
+
     const entries = await readdir(join(root, "jellyfin"));
     expect(entries.filter((e) => e.includes(".tmp"))).toHaveLength(0);
   });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import Docker from "dockerode";
 import { PathGuard } from "./paths.js";
@@ -92,13 +92,23 @@ export class LocalHost implements Host {
       .catch(() => 0o600); // New file: owner-only. Callers may relax it afterwards.
 
     const temp = join(dirname(abs), `.homestead-${process.pid}-${Date.now()}.tmp`);
-    // 'wx' fails if the path exists, so a pre-created file with a permissive mode
-    // cannot be reused. Mode is applied at creation, then forced with chmod because
-    // the process umask can strip bits from the requested mode.
-    await writeFile(temp, content, { encoding: "utf8", mode, flag: "wx" });
-    await chmod(temp, mode);
-    await rename(temp, abs);
-    return { hash: hashContent(content) };
+    let renamed = false;
+    try {
+      // 'wx' fails if the path exists, so a pre-created file with a permissive mode
+      // cannot be reused. Mode is applied at creation, then forced with chmod because
+      // the process umask can strip bits from the requested mode.
+      await writeFile(temp, content, { encoding: "utf8", mode, flag: "wx" });
+      await chmod(temp, mode);
+      await rename(temp, abs);
+      renamed = true;
+      return { hash: hashContent(content) };
+    } finally {
+      // Clean up temp file if it still exists (rename failed). After a successful rename,
+      // the temp path no longer exists, so `force: true` makes this safe.
+      if (!renamed) {
+        await rm(temp, { force: true });
+      }
+    }
   }
 
   async listContainers(filters?: { project?: string }): Promise<ContainerSummary[]> {
