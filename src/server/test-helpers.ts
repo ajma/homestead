@@ -34,6 +34,7 @@ export class FakeHost implements Host {
    *  returning a plausible empty success, which would let a test pass vacuously. */
   composeResults = new Map<string, ComposeResult>();
   composeCalls: Array<{ target: ComposeTarget; args: string[] }> = [];
+  readTextFileErrors = new Map<string, Error>();
 
   async listAppDirectories(): Promise<DiscoveredDir[]> {
     return [...this.files.keys()]
@@ -42,6 +43,8 @@ export class FakeHost implements Host {
   }
 
   async readTextFile(rel: string): Promise<FileRead> {
+    const error = this.readTextFileErrors.get(rel);
+    if (error) throw error;
     const content = this.files.get(rel);
     if (content === undefined) throw new Error(`no such file: ${rel}`);
     return { content, hash: hashContent(content) };

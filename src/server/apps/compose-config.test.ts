@@ -126,6 +126,18 @@ describe("ComposeConfigCache", () => {
     expect(host.composeCalls).toHaveLength(2);
   });
 
+  it("does not treat an unreadable .env as an absent one", async () => {
+    // Cache once with no .env at all, then make a read fail for a different reason.
+    // A shared 'absent' marker would collide here and serve the stale valid result,
+    // even though the CLI — which reads .env itself — would now fail.
+    const host = hostWith(configJson);
+    const cache = new ComposeConfigCache(host);
+    await cache.resolve(target);
+    host.readTextFileErrors.set("jellyfin/.env", new Error("EACCES: permission denied"));
+    await cache.resolve(target);
+    expect(host.composeCalls).toHaveLength(2);
+  });
+
   it("re-runs the CLI when only the sibling .env changed", async () => {
     const host = hostWith(configJson);
     host.files.set("jellyfin/.env", "COMPOSE_PROJECT_NAME=one\n");
