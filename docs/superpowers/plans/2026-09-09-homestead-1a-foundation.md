@@ -881,7 +881,17 @@ git commit -m "feat: add complete database schema with migrations"
 
 **Interfaces:**
 - Consumes: `Config.secretKey`, `Db`
-- Produces: `encrypt(key: Buffer, plaintext: string): { ciphertext: string; iv: string; tag: string }`, `decrypt(key: Buffer, parts): string`, and class `SecretStore` with `set(name, value): Promise<void>`, `get(name): Promise<string | null>`, `delete(name): Promise<void>`
+- Produces: `encrypt(key: Buffer, plaintext: string, aad: string): { ciphertext: string; iv: string; tag: string }`, `decrypt(key: Buffer, parts, aad: string): string`, and class `SecretStore` with `set(name, value): Promise<void>`, `get(name): Promise<string | null>`, `delete(name): Promise<void>`
+
+**The `aad` parameter is mandatory and is the secret's name.** GCM authenticates a ciphertext
+but knows nothing about where it is stored, so without additional authenticated data an attacker
+with database write access — or a partially-restored backup — can swap two rows'
+`ciphertext`/`iv`/`tag` triples and `get('cf_api_token')` will decrypt *successfully*, returning
+the tunnel token instead. The tag is valid; it is simply valid for the wrong value. Binding the
+name into the AAD makes that swap fail closed.
+
+`SecretStore.get` must pass the **queried** name as the AAD, never `row.key`. Using the stored
+column would authenticate the row against itself and restore the very hole this closes.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -932,9 +942,11 @@ const ALGORITHM = 'aes-256-gcm'
 
 export type EncryptedParts = { ciphertext: string; iv: string; tag: string }
 
-export function encrypt(key: Buffer, plaintext: string): EncryptedParts {
+/** `aad` binds the ciphertext to the secret's name. See the note above. */
+export function encrypt(key: Buffer, plaintext: string, aad: string): EncryptedParts {
   const iv = randomBytes(12)
   const cipher = createCipheriv(ALGORITHM, key, iv)
+  cipher.setAAD(Buffer.from(aad, 'utf8'))
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
   return {
     ciphertext: ciphertext.toString('base64'),
@@ -943,8 +955,9 @@ export function encrypt(key: Buffer, plaintext: string): EncryptedParts {
   }
 }
 
-export function decrypt(key: Buffer, parts: EncryptedParts): string {
+export function decrypt(key: Buffer, parts: EncryptedParts, aad: string): string {
   const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(parts.iv, 'base64'))
+  decipher.setAAD(Buffer.from(aad, 'utf8'))
   decipher.setAuthTag(Buffer.from(parts.tag, 'base64'))
   return Buffer.concat([
     decipher.update(Buffer.from(parts.ciphertext, 'base64')),
@@ -959,7 +972,7 @@ export class SecretStore {
   ) {}
 
   async set(name: string, value: string): Promise<void> {
-    const parts = encrypt(this.key, value)
+    const parts = encrypt(this.key, value, name)
     await this.db
       .insert(secrets)
       .values({ key: name, ...parts, updatedAt: Math.floor(Date.now() / 1000) })
@@ -971,7 +984,8 @@ export class SecretStore {
 
   async get(name: string): Promise<string | null> {
     const [row] = await this.db.select().from(secrets).where(eq(secrets.key, name))
-    return row ? decrypt(this.key, row) : null
+    // AAD is the *queried* name, never row.key — see the note above.
+    return row ? decrypt(this.key, row, name) : null
   }
 
   async delete(name: string): Promise<void> {
@@ -1013,7 +1027,51 @@ describe('SecretStore', () => {
 Run: `pnpm vitest run src/server/crypto/secrets.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Add the row-swap regression test**
+
+Append to the test file:
+
+```ts
+import { eq } from 'drizzle-orm'
+import { secrets } from '@server/db/schema'
+
+describe('name binding', () => {
+  it('refuses to decrypt a secret whose row was swapped with another', async () => {
+    const { db } = await createDb(':memory:')
+    await runMigrations(db)
+    const store = new SecretStore(db, key)
+
+    await store.set('cf_api_token', 'the-cloudflare-token')
+    await store.set('tunnel_token', 'the-tunnel-token')
+
+    // Simulate an attacker with DB write access, or a partially restored backup,
+    // moving the tunnel token's encrypted payload into the API token's row.
+    const [tunnelRow] = await db.select().from(secrets).where(eq(secrets.key, 'tunnel_token'))
+    await db
+      .update(secrets)
+      .set({
+        ciphertext: tunnelRow!.ciphertext,
+        iv: tunnelRow!.iv,
+        tag: tunnelRow!.tag,
+      })
+      .where(eq(secrets.key, 'cf_api_token'))
+
+    // Without AAD this returns 'the-tunnel-token' with a valid auth tag.
+    await expect(store.get('cf_api_token')).rejects.toThrow()
+  })
+
+  it('rejects a value encrypted under a different name', () => {
+    const parts = encrypt(key, 'value', 'name-a')
+    expect(() => decrypt(key, parts, 'name-b')).toThrow()
+    expect(decrypt(key, parts, 'name-a')).toBe('value')
+  })
+})
+```
+
+Run: `pnpm vitest run src/server/crypto/secrets.test.ts`
+Expected: PASS, 7 tests.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/server/crypto
