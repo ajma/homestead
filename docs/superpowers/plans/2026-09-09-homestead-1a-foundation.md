@@ -22,6 +22,18 @@ Every task's requirements implicitly include this section.
 - **Layout:** single package, three zones — `src/web`, `src/server`, `src/shared`. Path aliases `@shared/*`, `@server/*`, `@web/*`.
 - **No `Co-Authored-By` trailers and no AI-attribution lines in commit messages.** Plain author commits only.
 - **Biome is the only linter/formatter.** No ESLint, no Prettier.
+- **Deprecated-but-working APIs are invisible to every gate here, and no command finds
+  them.** Measured: a file using `z.string().email()` and React's `FormEvent` produced
+  zero output from `tsc --noEmit` and exit 0, because deprecations are *suggestion*
+  diagnostics the CLI never prints. TypeScript 7 is the Go port, so the compiler API that
+  could enumerate them sits behind explicitly `unstable/*` paths; Biome does not read
+  JSDoc `@deprecated`. This class has bitten the project three times. Therefore:
+  grep your diff for the known forms — zod string-methods
+  (`z.string().email()/.url()/.uuid()/.ip()/.datetime()` → top-level `z.email()`,
+  `z.url()`, …) and React `FormEvent` (→ `SyntheticEvent`) — and if you introduce an API
+  you are unsure about, say so in your report rather than treating silence as clean.
+  Editor diagnostics are the only surface that reports these, and the controller sees
+  them while subagents do not.
 - **Tests are Vitest**, colocated as `*.test.ts` beside the code under test.
 - **Create the complete schema in Task 3, including `exposures` and Cloudflare-related columns**, even though no Phase 1 code reads them. The spec's position is that the data model cannot be phased.
 - **Never build a shell command as a string.** Subprocess invocations use an argument array.
