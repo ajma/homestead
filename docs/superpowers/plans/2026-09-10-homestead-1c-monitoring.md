@@ -1478,6 +1478,24 @@ describe('persistResult', () => {
     expect(second).toMatchObject({ status: 'down', changed: true })
   })
 
+  it('records what was observed in the sample and the debounced status on the probe', async () => {
+    // These deliberately differ. A probe flapping below the threshold never confirms a
+    // transition, so samples holding the debounced status would record uninterrupted
+    // `up` and uptime would read 100% for an app failing every other minute.
+    const { db, probe } = await seed()
+    await persistResult(db, probe, { status: 'up' }, opts)
+    const [up] = await db.select().from(probes).where(eq(probes.id, probe.id))
+
+    const transition = await persistResult(db, up as never, { status: 'down' }, opts)
+    expect(transition.status).toBe('up') // held: one failure is not a confirmed outage
+
+    const samples = await db.select().from(checkResults).orderBy(checkResults.checkedAt)
+    expect(samples.map((s) => s.status)).toEqual(['up', 'down'])
+
+    const [after] = await db.select().from(probes).where(eq(probes.id, probe.id))
+    expect(after?.lastStatus).toBe('up')
+  })
+
   it('stores the fault class and detail on both rows', async () => {
     const { db, probe } = await seed()
     await persistResult(
@@ -1562,10 +1580,22 @@ export async function persistResult(
   })
 
   await db.transaction(async (tx) => {
+    // The SAMPLE records what was OBSERVED, not the debounced status.
+    //
+    // Spec §3 calls `check_results` "every sample", and that is what makes 48 hours of
+    // raw data worth keeping: a probe flapping fail/recover/fail/recover never confirms
+    // a transition, so storing the held status would record it as uninterrupted `up` and
+    // uptime would read 100% for an app failing every other minute. The debounced view
+    // — the one the launcher shows — lives on the probe row below.
+    //
+    // A consequence worth knowing: a deploy's grace window shows `starting` on the probe
+    // row while the samples record the `down` that was actually observed, so a restart
+    // does count against uptime. That is honest — the app was unreachable — and the
+    // rollup has only up/degraded/down buckets, so there is nowhere to put `starting`.
     await tx.insert(checkResults).values({
       id: ulid(),
       probeId: probe.id,
-      status: transition.status,
+      status: result.status,
       faultClass: result.faultClass ?? null,
       latencyMs: result.latencyMs ?? null,
       detail: result.detail ?? null,
@@ -1897,7 +1927,12 @@ export class Scheduler {
    * silently stopping all monitoring.
    */
   async tick(): Promise<number> {
-    if (this.ticking) return 0 // a slow tick must not overlap itself
+    // A slow tick must not overlap itself. This is also what makes `persistResult` safe:
+    // it computes the transition from a `ProbeRow` read earlier in the tick, so two
+    // concurrent runs of one probe would both start from the same
+    // `consecutiveFailures` and each write 1 where the second should write 2. One tick
+    // at a time, and each probe appearing once per tick, is what prevents that.
+    if (this.ticking) return 0
     this.ticking = true
     try {
       const now = this.now()
@@ -2495,6 +2530,14 @@ const createBody = z
     message: 'an http probe needs a target',
   })
 
+/**
+ * Configuration only — never the denormalised state columns.
+ *
+ * `lastStatus`, `statusSince`, `consecutiveFailures` and their siblings have exactly one
+ * writer, `persistResult`, and that is the whole reason the launcher can read them with
+ * one indexed query and no aggregation. A second writer here would desynchronise them
+ * from `check_results` silently.
+ */
 const patchBody = z.object({
   label: z.string().min(1).nullable().optional(),
   target: targetSchema.optional(),
