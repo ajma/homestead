@@ -231,4 +231,20 @@ describe("ImageUpdateChecker", () => {
     await expect(checker.check(app)).resolves.toBeUndefined();
     expect(await db.select().from(imageStatus)).toEqual([]);
   });
+
+  it("does nothing and does not throw when the compose file cannot be read", async () => {
+    // Rename compose.yaml over SSH, or let the SMB mount return EIO. Without a guard,
+    // `resolve()` throws despite the doc-block saying check() never does. Consequence for
+    // 1C: the scheduled sweep dies at the first moved file and never reaches the rest.
+    const { db, host, app } = await seed();
+    host.readTextFileErrors.set("jellyfin/compose.yaml", new Error("ENOENT: no such file"));
+    const checker = new ImageUpdateChecker({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      registry: { latestDigest: async () => "sha256:new" },
+    });
+    await expect(checker.check(app)).resolves.toBeUndefined();
+    expect(await db.select().from(imageStatus)).toEqual([]);
+  });
 });

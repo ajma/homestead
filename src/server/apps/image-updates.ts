@@ -44,10 +44,16 @@ export class ImageUpdateChecker {
    * file or one unreachable registry must not stop the rest.
    */
   async check(app: AppRow): Promise<void> {
-    const resolved = await this.deps.composeConfig.resolve({
-      directory: app.directory,
-      composeFile: app.composeFile,
-    });
+    let resolved: Awaited<ReturnType<typeof this.deps.composeConfig.resolve>>;
+    try {
+      resolved = await this.deps.composeConfig.resolve({
+        directory: app.directory,
+        composeFile: app.composeFile,
+      });
+    } catch {
+      // A compose file that cannot be read is the same outcome as one that will not resolve.
+      return;
+    }
     if (!resolved.valid) return;
 
     const checkedAt = Math.floor(Date.now() / 1000);
