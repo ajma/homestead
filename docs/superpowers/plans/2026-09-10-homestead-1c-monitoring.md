@@ -2208,7 +2208,11 @@ export const RAW_RETENTION_HOURS = 48
 export const ROLLUP_RETENTION_DAYS = 90
 
 /** Aggregates every complete hour that has no rollup yet, then prunes. Never throws. */
-export async function runRetention(db: Db, now: number): Promise<{ hoursRolled: number }>
+export async function runRetention(
+  db: Db,
+  now: number,
+  onError?: (error: unknown) => void,
+): Promise<{ hoursRolled: number }>
 ```
 
 Spec §3: 20 apps × 3 probes at 60s is ~2.6M rows a month, so raw samples last 48 hours and
@@ -2290,14 +2294,39 @@ describe('runRetention', () => {
     expect(await db.select().from(checkRollups)).toHaveLength(3)
   })
 
-  it('is idempotent — running twice does not double-count', async () => {
+  it('is idempotent by skipping rolled hours, not by failing on them', async () => {
+    // Row counts alone cannot tell the two apart. With `HAVING NOT EXISTS` removed the
+    // composite primary key rejects the duplicate and the catch swallows it, leaving
+    // exactly the same rows — so this asserts the second run reported NO error, which
+    // only holds if the clause did the skipping.
     const { db, probeId } = await seed()
     await db.insert(checkResults).values([sample(probeId, T0 + 10, 'up')])
-    await runRetention(db, T0 + HOUR + 60)
-    await runRetention(db, T0 + HOUR + 60)
+
+    const errors: unknown[] = []
+    await runRetention(db, T0 + HOUR + 60, (error) => errors.push(error))
+    await runRetention(db, T0 + HOUR + 60, (error) => errors.push(error))
+
+    expect(errors).toEqual([])
     const rows = await db.select().from(checkRollups)
     expect(rows).toHaveLength(1)
     expect(rows[0]?.upCount).toBe(1)
+  })
+
+  it('reports a failure rather than swallowing it', async () => {
+    const { db } = await seed()
+    const errors: unknown[] = []
+    const original = db.run.bind(db)
+    // biome-ignore lint/suspicious/noExplicitAny: narrow double over one method
+    ;(db as any).run = () => {
+      throw new Error('SQLITE_IOERR')
+    }
+    try {
+      await expect(runRetention(db, T0 + HOUR + 60, (e) => errors.push(e))).resolves.toBeDefined()
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      ;(db as any).run = original
+    }
+    expect(String(errors[0])).toContain('SQLITE_IOERR')
   })
 
   it('prunes raw samples older than 48 hours but keeps newer ones', async () => {
@@ -2383,7 +2412,20 @@ export const ROLLUP_RETENTION_DAYS = 90
  *
  * Never throws: this runs on a timer whose rejection would vanish.
  */
-export async function runRetention(db: Db, now: number): Promise<{ hoursRolled: number }> {
+export async function runRetention(
+  db: Db,
+  now: number,
+  /**
+   * Called if anything here fails.
+   *
+   * Without it the catch below is indistinguishable from success, and that is not
+   * hypothetical: the idempotence test passed with `HAVING NOT EXISTS` REMOVED, because
+   * the composite primary key rejected the duplicate and this catch swallowed it. The
+   * observable state was identical, so the test verified idempotence-by-accident rather
+   * than the clause it named.
+   */
+  onError?: (error: unknown) => void,
+): Promise<{ hoursRolled: number }> {
   let hoursRolled = 0
   try {
     const currentHourStart = now - (now % HOUR)
@@ -2415,9 +2457,14 @@ export async function runRetention(db: Db, now: number): Promise<{ hoursRolled: 
     await db
       .delete(checkRollups)
       .where(lt(checkRollups.hourStart, now - ROLLUP_RETENTION_DAYS * 24 * HOUR))
-  } catch {
+  } catch (error) {
     // A retention failure is a disk-space problem for tomorrow, not a reason to take the
-    // timer down today.
+    // timer down today — but it must not be silent.
+    try {
+      onError?.(error)
+    } catch {
+      // The channel for reporting this is the one that just failed.
+    }
   }
   return { hoursRolled }
 }
