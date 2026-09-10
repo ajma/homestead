@@ -65,9 +65,11 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const sse = sseResponse(request, reply);
+    const abort = new AbortController();
     let disconnected = false;
     void sse.closed.then(() => {
       disconnected = true;
+      abort.abort();
     });
 
     try {
@@ -75,6 +77,7 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
         containerId,
         tail: options.tail,
         follow: options.follow,
+        signal: abort.signal,
       })) {
         if (disconnected) break;
         sse.send("line", line);

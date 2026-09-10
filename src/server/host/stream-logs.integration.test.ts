@@ -64,4 +64,56 @@ describe.skipIf(!hasDocker)("streamLogs against real Docker", () => {
     expect(JSON.stringify(inspected.env)).not.toContain("/usr/local/sbin");
     expect(inspected.env.every((e) => e.masked === "••••••••" || e.masked === "")).toBe(true);
   });
+
+  it("closes the Docker socket when the signal is aborted on an idle container", async () => {
+    // Without the signal, an abandoned log stream on an idle container with follow:true
+    // holds the Docker socket open indefinitely. The loop consults `disconnected` only
+    // when a chunk arrives, and on an idle container no chunk ever arrives. One socket,
+    // one ChunkQueue, and one request object per closed tab, for the life of the process.
+    const idleName = `homestead-logtest-idle-${Date.now()}`;
+    try {
+      // A container that prints one line then sleeps. A chatty container passes without
+      // the fix because the next chunk arrives in milliseconds and the break fires.
+      await run("docker", [
+        "run",
+        "-d",
+        "--name",
+        idleName,
+        "alpine:3",
+        "sh",
+        "-c",
+        "echo 'started'; sleep 3600",
+      ]);
+
+      const host = new LocalHost("local", "/tmp", "/var/run/docker.sock");
+      await host.init();
+
+      // Baseline: measure the active handle count before streaming.
+      const baseline = process._getActiveHandles().length;
+
+      const abort = new AbortController();
+      const lines: Array<{ text: string; stream: string }> = [];
+
+      // Start streaming, consume one line, then abort.
+      const iter = host.streamLogs({ containerId: idleName, follow: true, signal: abort.signal });
+      for await (const line of iter) {
+        lines.push(line);
+        if (lines.length >= 1) {
+          abort.abort();
+          break;
+        }
+      }
+
+      expect(lines.length).toBeGreaterThanOrEqual(1);
+      expect(lines[0]?.text).toContain("started");
+
+      // The Docker socket is closed and the handle count returns to baseline.
+      // Without the fix, this would be baseline + 1 (the Docker stream).
+      // Give the stream cleanup time to complete.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(process._getActiveHandles().length).toBe(baseline);
+    } finally {
+      await run("docker", ["rm", "-f", idleName]).catch(() => {});
+    }
+  });
 });

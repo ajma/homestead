@@ -203,6 +203,21 @@ export class LocalHost implements Host {
     const demux = tty ? null : new LogDemultiplexer();
     const ttyDecoder = tty ? new StringDecoder("utf8") : null;
 
+    // Without this, an abandoned log stream on an idle container holds the Docker socket
+    // open indefinitely: the loop below consults `disconnected` only when a chunk arrives,
+    // and on an idle container with follow:true no chunk ever arrives.
+    const onAbort = () => {
+      if (!Buffer.isBuffer(stream)) {
+        (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+      }
+      queue.close();
+    };
+    if (opts.signal?.aborted) {
+      onAbort();
+    } else {
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+    }
+
     if (Buffer.isBuffer(stream)) {
       try {
         for (const chunk of demux

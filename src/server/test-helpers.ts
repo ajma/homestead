@@ -153,7 +153,12 @@ export class FakeHost implements Host {
 
   async *streamLogs(opts: LogOptions): AsyncIterable<LogLine> {
     this.logCalls.push(opts);
-    for (const line of this.logLines.get(opts.containerId) ?? []) yield line;
+    if (opts.signal?.aborted) return;
+    const lines = this.logLines.get(opts.containerId) ?? [];
+    for (const line of lines) {
+      if (opts.signal?.aborted) return;
+      yield line;
+    }
   }
 
   async inspectContainer(id: string): Promise<ContainerInspect> {

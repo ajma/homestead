@@ -19,7 +19,13 @@ export type ComposeResult = { exitCode: number; stdout: string; stderr: string }
 
 export type JobChunk = { text: string; stream: "stdout" | "stderr" };
 
-export type LogOptions = { containerId: string; tail?: number; follow?: boolean; since?: number };
+export type LogOptions = {
+  containerId: string;
+  tail?: number;
+  follow?: boolean;
+  since?: number;
+  signal?: AbortSignal;
+};
 export type LogLine = { text: string; stream: "stdout" | "stderr" };
 
 export type ContainerInspect = {

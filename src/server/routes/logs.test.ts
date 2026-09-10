@@ -146,4 +146,18 @@ describe("log streaming", () => {
     expect(res.json().error).toBe("docker_unreachable");
     await app.close();
   });
+
+  it("passes an abort signal to streamLogs", async () => {
+    // The route must pass a signal so streamLogs can clean up when the client disconnects.
+    // Without it, an idle container with follow:true holds the Docker socket open forever.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.logLines.set("container-1", [{ text: "x\n", stream: "stdout" }]);
+    await app.inject({
+      method: "GET",
+      url: `/api/apps/${id}/containers/container-1/logs?follow=true`,
+      headers: { cookie },
+    });
+    expect(app.deps.host.logCalls[0]?.signal).toBeInstanceOf(AbortSignal);
+    await app.close();
+  });
 });
