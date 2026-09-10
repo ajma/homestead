@@ -106,4 +106,29 @@ describe("applyTransition", () => {
     const out = run({ observed: "up", state: state({ lastStatus: "unknown", statusSince: null }) });
     expect(out).toMatchObject({ status: "up", changed: true, statusSince: NOW });
   });
+
+  it("holds unknown, not starting, for an unconfirmed first failure", () => {
+    // Nothing is starting — the probe has simply not confirmed a failure yet. Saying
+    // `starting` implies a deploy the user did not do, and the launcher already has a
+    // rendering for unknown.
+    const out = run({
+      observed: "down",
+      state: state({ lastStatus: "unknown", statusSince: null }),
+    });
+    expect(out).toMatchObject({ status: "unknown", consecutiveFailures: 1, changed: false });
+  });
+
+  it("keeps statusSince moving when a restart begins", () => {
+    // A review called this a false outage record. It is not: the status is `starting`,
+    // not `down`, and "the restart you initiated is never reported as an outage" is
+    // delivered by that value. `statusSince` means "the current status began at", so
+    // freezing it would have a restarting app claim it has been starting since whenever
+    // it was last healthy — wrong in a way the timeline cannot recover from.
+    const out = run({
+      observed: "down",
+      graceUntil: NOW + 60,
+      state: state({ statusSince: NOW - 5000 }),
+    });
+    expect(out).toMatchObject({ status: "starting", statusSince: NOW, changed: true });
+  });
 });

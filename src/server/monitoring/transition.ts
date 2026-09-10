@@ -13,7 +13,7 @@ export type TransitionInput = {
 };
 
 export type TransitionOutput = {
-  status: "up" | "degraded" | "down" | "starting";
+  status: "up" | "degraded" | "down" | "starting" | "unknown";
   consecutiveFailures: number;
   statusSince: number;
   changed: boolean;
@@ -49,9 +49,10 @@ export function applyTransition(input: TransitionInput): TransitionOutput {
   } else if (consecutiveFailures >= failureThreshold) {
     status = observed;
   } else {
-    // Not yet confirmed. Hold whatever we were showing, unless we have never shown
-    // anything — an unknown probe should not report `up` on its first failed check.
-    status = state.lastStatus === "unknown" ? "starting" : state.lastStatus;
+    // Not yet confirmed: hold whatever we were showing. A probe that has never reported
+    // anything holds `unknown` rather than claiming `starting` — nothing is starting, we
+    // simply have not confirmed a failure yet, and the launcher already renders unknown.
+    status = state.lastStatus === "unknown" ? "unknown" : state.lastStatus;
   }
 
   const changed = status !== state.lastStatus;
