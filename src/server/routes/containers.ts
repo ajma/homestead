@@ -1,11 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { type AppRow, currentProjectName } from "../apps/status-for.js";
 import { requireCapability } from "../auth/context.js";
 import type { ContainerSummary } from "../host/types.js";
 import { loadApp } from "./apps.js";
 
 export async function containerRoutes(app: FastifyInstance): Promise<void> {
-  const { db, host } = app.deps;
+  const { db, host, composeConfig } = app.deps;
 
   /**
    * The app's containers, or a signal that Docker could not be asked.
@@ -17,10 +18,11 @@ export async function containerRoutes(app: FastifyInstance): Promise<void> {
    * container does not exist when the truth is that we cannot tell.
    */
   async function containersFor(
-    projectName: string | null,
+    row: AppRow,
   ): Promise<{ ok: true; containers: ContainerSummary[] } | { ok: false }> {
     try {
-      return { ok: true, containers: await host.listContainers({ project: projectName ?? "" }) };
+      const projectName = await currentProjectName({ host, composeConfig }, row);
+      return { ok: true, containers: await host.listContainers({ project: projectName }) };
     } catch {
       return { ok: false };
     }
@@ -36,7 +38,7 @@ export async function containerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    const found = await containersFor(row.projectName);
+    const found = await containersFor(row);
     // An unreachable Docker renders as no containers here, deliberately.
     return found.ok ? found.containers : [];
   });
@@ -52,7 +54,7 @@ export async function containerRoutes(app: FastifyInstance): Promise<void> {
 
     // Ownership, not just existence. A raw container id would otherwise reach any
     // container on the host, including one from an app this caller cannot see.
-    const found = await containersFor(row.projectName);
+    const found = await containersFor(row);
     // 503, not 404. Without the list the ownership question is unanswerable, and 404
     // would assert the container does not exist when we simply cannot see it. The log
     // route answers the same way for the same reason.

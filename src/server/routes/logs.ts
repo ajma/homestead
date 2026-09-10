@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { currentProjectName } from "../apps/status-for.js";
 import { requireCapability } from "../auth/context.js";
 import { sseResponse } from "../sse.js";
 import { loadApp } from "./apps.js";
@@ -31,7 +32,7 @@ const query = z.object({
 });
 
 export async function logRoutes(app: FastifyInstance): Promise<void> {
-  const { db, host } = app.deps;
+  const { db, host, composeConfig } = app.deps;
 
   app.get("/api/apps/:id/containers/:containerId/logs", async (request, reply) => {
     const ctx = requireCapability(request, "app:config");
@@ -52,7 +53,8 @@ export async function logRoutes(app: FastifyInstance): Promise<void> {
     // container list would make the ownership check vacuous.
     let containers: Awaited<ReturnType<typeof host.listContainers>>;
     try {
-      containers = await host.listContainers({ project: row.projectName ?? "" });
+      const projectName = await currentProjectName({ host, composeConfig }, row);
+      containers = await host.listContainers({ project: projectName });
     } catch (error) {
       request.log.error({ err: error, appId: id }, "listing containers failed");
       return reply.code(503).send({

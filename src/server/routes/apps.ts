@@ -6,7 +6,7 @@ import { z } from "zod";
 import { scanForApps } from "../apps/adoption.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
-import { rollUpStatus } from "../apps/status.js";
+import { statusFor } from "../apps/status-for.js";
 import { audit } from "../audit.js";
 import type { AuthContext } from "../auth/context.js";
 import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
@@ -153,40 +153,6 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   // wants yet. Carried forward instead.
 
   /**
-   * Current status for one app.
-   *
-   * `containers` is passed in by the list route, which fetches once for every app.
-   * Letting each row call `listContainers` itself meant one Docker API round trip per
-   * app on a screen that shows all of them — thirty on this NAS, every page load.
-   */
-  async function statusFor(row: typeof apps.$inferSelect, containers?: ContainerSummary[]) {
-    const target = { directory: row.directory, composeFile: row.composeFile };
-    try {
-      const resolved = await composeConfig.resolve(target);
-      if (!resolved.valid) {
-        // `resolved.message` is raw `docker compose config` stderr. It routinely carries
-        // absolute paths and interpolated `.env` values, so it goes in `adminDetail` and
-        // the viewer gets a description instead.
-        return {
-          status: "unknown" as const,
-          detail: "compose configuration is invalid",
-          adminDetail: resolved.message,
-        };
-      }
-      const found = containers ?? (await host.listContainers({ project: row.projectName ?? "" }));
-      return rollUpStatus(resolved.resolved.services, found);
-    } catch (error) {
-      // A missing or unresolvable compose file. The compose root is an SMB share the user
-      // edits over SSH, so a renamed or moved file is ordinary operation.
-      return {
-        status: "unknown" as const,
-        detail: "compose file could not be read",
-        adminDetail: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
-  /**
    * A slug no other app on this host holds.
    *
    * `apps_host_slug` is unique, and `normaliseSlug` is lossy — `My Media` and
@@ -289,7 +255,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // generated here. Composing the scope predicate would return nothing for a scoped
       // principal, so a successful adoption would report an empty `adopted` list.
       const [row] = await db.select().from(apps).where(eq(apps.id, id));
-      if (row) adopted.push(toAdminApp(row, await statusFor(row)));
+      if (row) adopted.push(toAdminApp(row, await statusFor({ host, composeConfig }, row)));
       await audit(db, ctx, {
         action: "app.adopted",
         targetType: "app",
@@ -340,7 +306,11 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
             const status = { status: "unknown" as const, detail: "Docker is unreachable" };
             return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
           }
-          const status = await statusFor(row, byProject.get(row.projectName ?? "") ?? []);
+          const status = await statusFor(
+            { host, composeConfig },
+            row,
+            byProject.get(row.projectName ?? "") ?? [],
+          );
           return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
         }),
       );
@@ -355,7 +325,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    const status = await statusFor(row);
+    const status = await statusFor({ host, composeConfig }, row);
     return can(ctx, "app:config") ? toAdminApp(row, status) : toViewerApp(row, status);
   });
 
@@ -388,7 +358,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     });
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    return toAdminApp(row, await statusFor(row));
+    return toAdminApp(row, await statusFor({ host, composeConfig }, row));
   });
 
   app.delete("/api/apps/:id", async (request, reply) => {
