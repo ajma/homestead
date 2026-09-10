@@ -79,7 +79,36 @@ describe("rollUpStatus", () => {
       ],
     );
     expect(result.status).toBe("up");
-    expect(result.detail).toContain("1 completed");
+    expect(result.detail).toBe("2/2 services up, 1 completed");
+  });
+
+  it("counts a completed one-shot toward the numerator", () => {
+    // Excluding it produced a green dot beside "0/1 services up", which reads as broken.
+    expect(
+      rollUpStatus([service("init", "no")], [container("init", "exited", "Exited (0)")]),
+    ).toEqual({ status: "up", detail: "1/1 services up, 1 completed" });
+  });
+
+  it("takes the worst state across a scaled service's replicas", () => {
+    // Keying containers by service name kept only the last, so two healthy replicas
+    // beside one unhealthy reported the app as up — a green dot over a broken service.
+    const result = rollUpStatus(
+      [service("web")],
+      [
+        container("web", "running", "Up 2 hours (healthy)"),
+        container("web", "running", "Up 2 hours (unhealthy)"),
+        container("web", "running", "Up 2 hours (healthy)"),
+      ],
+    );
+    expect(result.status).toBe("down");
+  });
+
+  it("calls a scaled service up when every replica is up", () => {
+    const result = rollUpStatus(
+      [service("web")],
+      [container("web", "running", "Up 2 hours"), container("web", "running", "Up 1 hour")],
+    );
+    expect(result).toEqual({ status: "up", detail: "1/1 services up" });
   });
 
   it("is down when a one-shot exits non-zero", () => {

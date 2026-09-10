@@ -54,21 +54,52 @@ function classify(service: ResolvedService, container: ContainerSummary | undefi
   }
 }
 
+/** Worst-first, so a service's state is the worst of its replicas'. */
+const SEVERITY: ServiceState[] = ["down", "degraded", "starting", "up", "completed"];
+
+/**
+ * Collapses one service's containers into a single state.
+ *
+ * A service can have more than one container — `deploy.replicas`, or a `scale` left
+ * over from a manual `docker compose up --scale`. Keying a Map by service name kept
+ * only the last one, so two healthy replicas beside one unhealthy reported the whole
+ * app as up: a green dot over a partly broken service, which is the exact failure this
+ * module exists to prevent.
+ */
+function worst(states: ServiceState[]): ServiceState {
+  for (const candidate of SEVERITY) {
+    if (states.includes(candidate)) return candidate;
+  }
+  return "down";
+}
+
 export function rollUpStatus(
   expected: ResolvedService[],
   containers: ContainerSummary[],
 ): AppStatusSummary {
   if (expected.length === 0) return { status: "unknown", detail: null };
 
-  const byService = new Map(containers.map((c) => [c.service ?? "", c]));
-  const states = expected.map((service) => classify(service, byService.get(service.name)));
+  const byService = new Map<string, ContainerSummary[]>();
+  for (const c of containers) {
+    const key = c.service ?? "";
+    byService.set(key, [...(byService.get(key) ?? []), c]);
+  }
+
+  const states = expected.map((service) => {
+    const found = byService.get(service.name) ?? [];
+    if (found.length === 0) return classify(service, undefined);
+    return worst(found.map((c) => classify(service, c)));
+  });
 
   const count = (state: ServiceState) => states.filter((s) => s === state).length;
   const up = count("up");
   const completed = count("completed");
-  const missing = expected.filter((s) => !byService.has(s.name)).length;
+  const missing = expected.filter((s) => (byService.get(s.name) ?? []).length === 0).length;
 
-  const parts = [`${up}/${expected.length} services up`];
+  // `completed` counts toward the numerator. A one-shot that exited zero IS in its
+  // intended state, and excluding it produced a green dot beside the words
+  // "0/1 services up" — which reads as broken. The trailing clause disambiguates.
+  const parts = [`${up + completed}/${expected.length} services up`];
   if (completed > 0) parts.push(`${completed} completed`);
   if (missing > 0) parts.push(`${missing} missing`);
   const detail = parts.join(", ");
