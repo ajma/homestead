@@ -13,23 +13,72 @@ export type ComposeValidation =
   | { valid: true; resolved: ResolvedCompose }
   | { valid: false; message: string };
 
-type RawService = {
-  image?: string;
-  restart?: string;
-  ports?: Array<{ published?: string | number }>;
-};
+type ParseOutcome = { ok: true; resolved: ResolvedCompose } | { ok: false; message: string };
 
-function parseResolved(stdout: string): ResolvedCompose {
-  const raw = JSON.parse(stdout) as { name?: string; services?: Record<string, RawService> };
-  const services = Object.entries(raw.services ?? {}).map(([name, service]) => ({
-    name,
-    image: service.image ?? null,
-    restart: service.restart ?? null,
-    publishedPorts: (service.ports ?? [])
-      .map((p) => Number(p.published))
-      .filter((p) => Number.isFinite(p) && p > 0),
-  }));
-  return { projectName: raw.name ?? "", services };
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Parses `docker compose config --format json` defensively.
+ *
+ * Everything here is a guard against a measured failure, not hypothetical caution.
+ * Against the previous version: malformed JSON and empty stdout threw `SyntaxError`,
+ * a `null` service threw `TypeError`, and — worst — `"services": "nope"` returned
+ * `valid: true` carrying four bogus services, because `Object.entries` on a string
+ * enumerates its characters. This function returns a result; it never throws.
+ *
+ * A service entry that is not an object FAILS the parse rather than being filtered
+ * out. Dropping it would shrink the expected service set, and Task 7 rolls container
+ * states up against that set — so a silently missing service would report a degraded
+ * stack as healthy. Failing closed is the only safe direction here.
+ */
+function parseResolved(stdout: string): ParseOutcome {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout);
+  } catch {
+    return { ok: false, message: "docker compose config produced output that is not JSON" };
+  }
+
+  if (!isPlainObject(raw)) {
+    return { ok: false, message: "docker compose config produced JSON that is not an object" };
+  }
+
+  const rawServices = raw.services ?? {};
+  if (!isPlainObject(rawServices)) {
+    return { ok: false, message: "docker compose config reported `services` as a non-object" };
+  }
+
+  const services: ResolvedService[] = [];
+  for (const [name, service] of Object.entries(rawServices)) {
+    if (!isPlainObject(service)) {
+      return {
+        ok: false,
+        message: `docker compose config reported service "${name}" as a non-object`,
+      };
+    }
+    // Ports are advisory — they feed launch-URL suggestions, not correctness — so a
+    // shape Number() cannot read is dropped rather than failing the whole resolve.
+    // Measured: "8080-8090" and "127.0.0.1:9000" both yield NaN and are discarded.
+    const rawPorts = Array.isArray(service.ports) ? service.ports : [];
+    const publishedPorts = rawPorts
+      .map((entry) => (isPlainObject(entry) ? Number(entry.published) : Number.NaN))
+      .filter((port) => Number.isFinite(port) && port > 0);
+
+    services.push({
+      name,
+      image: stringOrNull(service.image),
+      restart: stringOrNull(service.restart),
+      publishedPorts,
+    });
+  }
+
+  return { ok: true, resolved: { projectName: stringOrNull(raw.name) ?? "", services } };
 }
 
 /**
@@ -50,17 +99,41 @@ export class ComposeConfigCache {
 
   constructor(private readonly host: Host) {}
 
+  /**
+   * Unambiguous key. Template concatenation collides across the path boundary —
+   * measured: `{directory:'foo', composeFile:'bar/compose.yaml'}` and
+   * `{directory:'foo/bar', composeFile:'compose.yaml'}` produced the same key, and the
+   * second target received the first's cached config with `valid: true`.
+   */
   private key(target: ComposeTarget): string {
-    return `${target.directory}/${target.composeFile}`;
+    return JSON.stringify([target.directory, target.composeFile]);
   }
 
   invalidate(target: ComposeTarget): void {
     this.entries.delete(this.key(target));
   }
 
+  /**
+   * Hash of every file the CLI's output depends on.
+   *
+   * The compose file is not the only input: compose resolves `COMPOSE_PROJECT_NAME`
+   * and `${VAR}` interpolation from the sibling `.env`, both measured. Hashing only
+   * `compose.yaml` would serve a stale project name after an SSH edit to `.env` — and
+   * an out-of-band edit is precisely the case content hashing exists to catch. A
+   * missing `.env` is normal and contributes a constant.
+   */
+  private async inputHash(target: ComposeTarget): Promise<string> {
+    const compose = await this.host.readTextFile(`${target.directory}/${target.composeFile}`);
+    const env = await this.host
+      .readTextFile(`${target.directory}/.env`)
+      .then((file) => file.hash)
+      .catch(() => "absent");
+    return `${compose.hash}:${env}`;
+  }
+
   async resolve(target: ComposeTarget): Promise<ComposeValidation> {
     const key = this.key(target);
-    const { hash } = await this.host.readTextFile(key);
+    const hash = await this.inputHash(target);
 
     const cached = this.entries.get(key);
     if (cached && cached.hash === hash) return { valid: true, resolved: cached.resolved };
@@ -74,8 +147,15 @@ export class ComposeConfigCache {
       return { valid: false, message: (result.stderr || result.stdout).trim() };
     }
 
-    const resolved = parseResolved(result.stdout);
-    this.entries.set(key, { hash, resolved });
-    return { valid: true, resolved };
+    const parsed = parseResolved(result.stdout);
+    if (!parsed.ok) {
+      // Same reasoning as an exit-code failure: not cached, and surfaced as a result
+      // rather than thrown, because callers destructure a discriminated union.
+      this.entries.delete(key);
+      return { valid: false, message: parsed.message };
+    }
+
+    this.entries.set(key, { hash, resolved: parsed.resolved });
+    return { valid: true, resolved: parsed.resolved };
   }
 }

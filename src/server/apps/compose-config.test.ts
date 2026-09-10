@@ -72,6 +72,71 @@ describe("ComposeConfigCache", () => {
     expect(host.composeCalls).toHaveLength(2);
   });
 
+  it.each([
+    ["malformed JSON", '{"incomplete'],
+    ["empty output", ""],
+    ["JSON that is not an object", '"just a string"'],
+    ["services reported as a string", '{"name":"a","services":"nope"}'],
+    ["a null service entry", '{"name":"a","services":{"web":null}}'],
+  ])("returns a failure rather than throwing for %s", async (_label, stdout) => {
+    // Every one of these was measured against an earlier version: the first three threw
+    // SyntaxError, the null service threw TypeError, and `"services":"nope"` returned
+    // valid:true carrying four bogus services because Object.entries enumerates a
+    // string's characters. A non-object service must FAIL rather than be filtered —
+    // dropping it would shrink the expected set the status rollup checks against.
+    const cache = new ComposeConfigCache(hostWith(stdout));
+    const result = await cache.resolve(target);
+    expect(result.valid).toBe(false);
+  });
+
+  it("drops port shapes Number() cannot read, keeping the rest", async () => {
+    // "8080-8090" and "127.0.0.1:9000" are legal compose and both yield NaN. Ports are
+    // advisory (launch-URL suggestions), so they are dropped rather than failing.
+    const ports = JSON.stringify({
+      name: "a",
+      services: {
+        web: {
+          image: "x",
+          ports: [
+            { published: "8080-8090" },
+            { published: "127.0.0.1:9000" },
+            { published: "7000" },
+          ],
+        },
+      },
+    });
+    const result = await new ComposeConfigCache(hostWith(ports)).resolve(target);
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.resolved.services[0]?.publishedPorts).toEqual([7000]);
+  });
+
+  it("does not confuse two targets whose concatenated paths are identical", async () => {
+    const host = new FakeHost();
+    host.files.set("foo/bar/compose.yaml", "A");
+    host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: '{"name":"A","services":{}}',
+      stderr: "",
+    });
+    const cache = new ComposeConfigCache(host);
+    await cache.resolve({ directory: "foo", composeFile: "bar/compose.yaml" });
+    await cache.resolve({ directory: "foo/bar", composeFile: "compose.yaml" });
+    // One call would mean the second target read the first's cached entry.
+    expect(host.composeCalls).toHaveLength(2);
+  });
+
+  it("re-runs the CLI when only the sibling .env changed", async () => {
+    const host = hostWith(configJson);
+    host.files.set("jellyfin/.env", "COMPOSE_PROJECT_NAME=one\n");
+    const cache = new ComposeConfigCache(host);
+    await cache.resolve(target);
+    host.files.set("jellyfin/.env", "COMPOSE_PROJECT_NAME=two\n");
+    await cache.resolve(target);
+    // compose.yaml is untouched, but the CLI resolves the project name from .env.
+    expect(host.composeCalls).toHaveLength(2);
+  });
+
   it("does not cache a failure, so fixing the file recovers without a restart", async () => {
     const host = hostWith("", 1, "invalid compose project");
     const cache = new ComposeConfigCache(host);
