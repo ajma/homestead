@@ -250,6 +250,25 @@ export async function statusFor(
 with `await currentProjectName({ host, composeConfig }, row)`. Both files will need
 `composeConfig` from `app.deps`.
 
+**`GET /api/apps` needs the same change and is easy to miss.** It fetches one container
+snapshot and partitions it into a `byProject` map, then looks each row up by
+`row.projectName ?? ''` — the stored copy — and hands the result to `statusFor` as its
+`containers` argument, which makes `statusFor` skip its own lookup entirely. So fixing
+`statusFor` alone leaves the list route exactly as wrong as before.
+
+Measured with the stored name stale: `GET /api/apps/:id` reports `up, 1/1 services up`
+while `GET /api/apps` reports `down, 0/1 services up, 1 missing` — the same app, the same
+instant, two answers, and the wrong one is on the launcher. Change the lookup to:
+
+```ts
+        const project = await currentProjectName({ host, composeConfig }, row)
+        const status = await statusFor({ host, composeConfig }, row, byProject.get(project) ?? [])
+```
+
+The extra `resolve` per row is a cache hit — `ComposeConfigCache` is keyed on file content —
+so this costs a map lookup, not a subprocess. The existing test asserting one `listContainers`
+call per request must still pass.
+
 - [ ] **Step 5: Run everything and commit**
 
 ```bash
