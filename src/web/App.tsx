@@ -3,6 +3,7 @@ import { useSession } from "@web/auth/useSession";
 import { AdminApps } from "@web/routes/AdminApps";
 import { AppLayout } from "@web/routes/AppLayout";
 import { EditApp } from "@web/routes/EditApp";
+import { OverviewTab } from "@web/routes/edit/OverviewTab";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
 import { Placeholder } from "@web/routes/Placeholder";
@@ -27,7 +28,7 @@ function Routed() {
         <Route path="/apps" element={isAdmin ? <AdminApps /> : <Navigate to="/" replace />} />
         <Route path="/apps/:slug/*" element={isAdmin ? <EditApp /> : <Navigate to="/" replace />}>
           <Route index element={<Navigate to="overview" replace />} />
-          <Route path="overview" element={<Placeholder title="Overview" />} />
+          <Route path="overview" element={<OverviewTab />} />
           <Route path="containers" element={<Placeholder title="Containers" />} />
           <Route path="logs" element={<Placeholder title="Logs" />} />
         </Route>
