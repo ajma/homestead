@@ -12,12 +12,15 @@ import type { SecretStore } from "./crypto/secrets.js";
 import type { Db } from "./db/client.js";
 import { userAppScope, users } from "./db/schema.js";
 import type { Host } from "./host/types.js";
+import type { IconMetadata } from "./icons/metadata.js";
+import type { IconStore } from "./icons/store.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
 import { containerRoutes } from "./routes/containers.js";
 import type { EventBus } from "./routes/events.js";
 import { eventRoutes } from "./routes/events.js";
 import { healthRoutes } from "./routes/health.js";
+import { iconRoutes } from "./routes/icons.js";
 import { imageRoutes } from "./routes/images.js";
 import { jobRoutes } from "./routes/jobs.js";
 import { launcherRoutes } from "./routes/launcher.js";
@@ -70,6 +73,7 @@ export type AppDeps = {
   images: ImageUpdateChecker;
   scheduler: Scheduler;
   events: EventBus;
+  icons: { metadata: IconMetadata; store: IconStore };
 };
 
 declare module "fastify" {
@@ -182,6 +186,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(probeRoutes);
   await app.register(eventRoutes);
   await app.register(launcherRoutes);
+  await app.register(iconRoutes);
   await app.register(spaRoutes);
 
   return app;

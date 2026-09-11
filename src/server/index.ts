@@ -10,6 +10,8 @@ import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
 import { LocalHost } from "./host/local-host.js";
 import { PreflightError, runMountPreflight } from "./host/preflight.js";
+import { IconMetadata } from "./icons/metadata.js";
+import { IconStore } from "./icons/store.js";
 import { dockerRunner } from "./monitoring/docker-runner.js";
 import { createHttpRunners } from "./monitoring/http-runner.js";
 import { RetentionTimer } from "./monitoring/retention.js";
@@ -74,6 +76,11 @@ const retention = new RetentionTimer({
   },
 });
 
+const iconMetadata = new IconMetadata({ cacheDir: config.iconCacheDir });
+// Never throws: a NAS that boots without internet must still serve the launcher.
+await iconMetadata.load();
+const iconStore = new IconStore({ cacheDir: config.iconCacheDir, metadata: iconMetadata });
+
 const app = await buildApp({
   config,
   db,
@@ -85,6 +92,7 @@ const app = await buildApp({
   images,
   scheduler,
   events,
+  icons: { metadata: iconMetadata, store: iconStore },
 });
 
 scheduler.start();

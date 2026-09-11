@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "./app.js";
 import { buildApp } from "./app.js";
@@ -25,6 +28,8 @@ import type {
   LogOptions,
 } from "./host/types.js";
 import { HashMismatchError } from "./host/types.js";
+import { IconMetadata } from "./icons/metadata.js";
+import { IconStore } from "./icons/store.js";
 import { dockerRunner } from "./monitoring/docker-runner.js";
 import { createHttpRunners } from "./monitoring/http-runner.js";
 import { Scheduler } from "./monitoring/scheduler.js";
@@ -262,6 +267,32 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     },
   });
   scheduler.onTransition((transition) => events.publish(transition));
+
+  const iconMetadata = new IconMetadata({
+    cacheDir: join(tmpdir(), `homestead-test-icons-${randomUUID()}`),
+    fetchImpl: (async () =>
+      new Response(
+        JSON.stringify({
+          jellyfin: { base: ["svg"], aliases: ["emby"], categories: ["media"] },
+          plex: { base: ["svg"], aliases: [], categories: ["media"] },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof fetch,
+  });
+  await iconMetadata.load();
+  // A fresh tmp dir per app, not `config.iconCacheDir` (which defaults to the repo-relative
+  // "./data/icons"): sharing that path across parallel test workers would race on the same
+  // files and leave real icon SVGs on disk for git to notice after the suite exits.
+  const iconStore = new IconStore({
+    cacheDir: join(tmpdir(), `homestead-test-icon-store-${randomUUID()}`),
+    metadata: iconMetadata,
+    fetchImpl: (async () =>
+      new Response('<svg xmlns="http://www.w3.org/2000/svg"/>', {
+        status: 200,
+        headers: { "content-type": "image/svg+xml" },
+      })) as unknown as typeof fetch,
+  });
+
   const app = await buildApp({
     config,
     db,
@@ -273,6 +304,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     images,
     scheduler,
     events,
+    icons: { metadata: iconMetadata, store: iconStore },
   });
 
   // Assign each app instance its own source address to avoid rate-limit bucket
