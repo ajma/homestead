@@ -21,4 +21,27 @@ describe("relativeTime", () => {
     // "Healthy · -4s", which reads as a bug in the product.
     expect(relativeTime(NOW + 4, NOW)).toBe("0s");
   });
+
+  it.each([
+    [59, "59s"],
+    [60, "1m"],
+    [3599, "59m"],
+    [3600, "1h"],
+    [86_399, "23h"],
+    [86_400, "1d"],
+  ])("switches unit exactly at %is", (elapsed, expected) => {
+    // Off-by-one at a unit boundary renders "60m" or "24h", which looks like a bug even
+    // though nothing is wrong. Each boundary is asserted on both sides.
+    expect(relativeTime(NOW - elapsed, NOW)).toBe(expected);
+  });
+
+  it("floors a fractional interval instead of rendering '12.4m'", () => {
+    expect(relativeTime(NOW - 12.7 * 60, NOW)).toBe("12m");
+  });
+
+  it("does not fall over on an implausibly old timestamp", () => {
+    // `statusSince` is nullable and defaults are easy to get wrong; a probe row seeded
+    // with 0 must render something, not "NaNd" or "Infinityd".
+    expect(relativeTime(0, NOW)).toMatch(/^\d+d$/);
+  });
 });

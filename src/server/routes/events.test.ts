@@ -52,10 +52,15 @@ async function collect(
   cookie: string,
   emit: () => void,
 ) {
+  const before = app.deps.events.subscriberCount();
   const streaming = app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Poll, do not sleep. A fixed 20ms was enough on an idle machine and not enough under
+  // parallel suite load: `publish` then reached zero subscribers and the assertion read
+  // `expected '' to contain 'event: status'`. Measured at roughly one run in eight.
+  await waitUntil(() => app.deps.events.subscriberCount() > before);
   emit();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // `publish` calls the subscriber synchronously, so this only lets the write land.
+  await new Promise((resolve) => setTimeout(resolve, 5));
   app.deps.scheduler.stop();
   app.deps.events.closeAll();
   return streaming;
@@ -274,8 +279,7 @@ describe("closing a user's stream when their access changes", () => {
     const { app, cookie } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(app.deps.events.subscriberCount()).toBe(1);
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
 
     const patched = await app.inject({
       method: "PATCH",
@@ -297,8 +301,7 @@ describe("closing a user's stream when their access changes", () => {
     const { app, cookie } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(app.deps.events.subscriberCount()).toBe(1);
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
 
     const patched = await app.inject({
       method: "PATCH",
@@ -321,8 +324,7 @@ describe("closing a user's stream when their access changes", () => {
     const { app, cookie } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(app.deps.events.subscriberCount()).toBe(1);
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
 
     const patched = await app.inject({
       method: "PATCH",
@@ -345,8 +347,7 @@ describe("closing a user's stream when their access changes", () => {
     const { app, cookie, id } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(app.deps.events.subscriberCount()).toBe(1);
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
 
     const patched = await app.inject({
       method: "PATCH",
@@ -370,8 +371,7 @@ describe("closing a user's stream when their access changes", () => {
     const { app, cookie } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(app.deps.events.subscriberCount()).toBe(1);
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
 
     const scoped = await app.inject({
       method: "PUT",
@@ -391,8 +391,7 @@ describe("closing a user's stream when their access changes", () => {
     const { app, cookie } = await withApp();
     const viewer = await createViewer(app, cookie);
     const streaming = openStream(app, viewer.cookie);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(app.deps.events.subscriberCount()).toBe(1);
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
 
     const deleted = await app.inject({
       method: "DELETE",
