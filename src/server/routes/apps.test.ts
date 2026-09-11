@@ -59,22 +59,22 @@ describe("app inventory API", () => {
     await app.close();
   });
 
-  it("pre-fills iconRef from a confident alias prefix match", async () => {
-    // The fixture's "jellyfin" entry carries the alias "emby". A directory named
-    // "emby-server" normalises to "embyserver", which the alias "emby" prefixes.
+  it("pre-fills iconRef from a confident exact alias match", async () => {
+    // The fixture's "jellyfin" entry carries the alias "emby". A directory named exactly
+    // "emby" is a confident hit even though it names a different slug.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
-    app.deps.host.files.set("emby-server/compose.yaml", "services: {}\n");
+    app.deps.host.files.set("emby/compose.yaml", "services: {}\n");
     app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
-      stdout: JSON.stringify({ name: "emby-server", services: {} }),
+      stdout: JSON.stringify({ name: "emby", services: {} }),
       stderr: "",
     });
     const res = await app.inject({
       method: "POST",
       url: "/api/apps/adopt",
       headers: { cookie },
-      payload: { directories: ["emby-server"] },
+      payload: { directories: ["emby"] },
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().adopted[0].iconRef).toBe("jellyfin");
@@ -82,8 +82,8 @@ describe("app inventory API", () => {
   });
 
   it("declines a weak substring-only match rather than guessing wrong", async () => {
-    // "myplexserver" only contains "plex" partway through — a substring match, not a
-    // prefix or exact one — and a wrong icon is worse than a letter tile.
+    // "myplexserver" only contains "plex" partway through — a substring match, not an
+    // exact one — and a wrong icon is worse than a letter tile.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     app.deps.host.files.set("myplexserver/compose.yaml", "services: {}\n");
@@ -97,6 +97,29 @@ describe("app inventory API", () => {
       url: "/api/apps/adopt",
       headers: { cookie },
       payload: { directories: ["myplexserver"] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().adopted[0].iconRef).toBeNull();
+    await app.close();
+  });
+
+  it("declines a NAS-ordinary prefix directory like 'plex-backup' rather than guessing wrong", async () => {
+    // A wrong icon is worse than the letter-tile fallback: "plex-backup" is exactly the
+    // kind of suffixed directory that is ordinary on a NAS and used to sail through as a
+    // confident bidirectional prefix hit.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("plex-backup/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "plex-backup", services: {} }),
+      stderr: "",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["plex-backup"] },
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().adopted[0].iconRef).toBeNull();

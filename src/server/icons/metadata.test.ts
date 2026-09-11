@@ -25,6 +25,15 @@ const RANKING = {
   embydeck: { base: ["svg"], aliases: [], categories: [], colors: {} },
 };
 
+// Fixture for the exact-match adoption-suggestion tests below. "media-server" carries
+// the alias "media" specifically so `media-old` — a directory suffix that is ordinary on
+// a NAS — has something plausible to falsely prefix-match if the bug regresses.
+const DIRECTORY_MATCH = {
+  jellyfin: { base: ["svg"], aliases: ["emby"], categories: ["media"], colors: {} },
+  plex: { base: ["svg", "png"], aliases: [], categories: ["media"], colors: {} },
+  "media-server": { base: ["svg"], aliases: ["media"], categories: [], colors: {} },
+};
+
 function dir() {
   return mkdtempSync(join(tmpdir(), "homestead-icons-"));
 }
@@ -212,19 +221,46 @@ describe("IconMetadata", () => {
   });
 
   it("matches a directory name against a slug or alias for the adoption suggestion", async () => {
-    const meta = new IconMetadata({ cacheDir: dir(), fetchImpl: fetchOk(UPSTREAM, { n: 0 }) });
+    const meta = new IconMetadata({
+      cacheDir: dir(),
+      fetchImpl: fetchOk(DIRECTORY_MATCH, { n: 0 }),
+    });
     await meta.load();
     expect(meta.matchDirectory("jellyfin")).toBe("jellyfin");
-    // "emby-server" is longer than the alias "emby" it should match — the direction
-    // `search` does not check, since a search box query is normally the shorter string.
-    expect(meta.matchDirectory("emby-server")).toBe("jellyfin");
   });
 
-  it("declines a directory name that only substring-matches, not prefixes, a slug", async () => {
-    const meta = new IconMetadata({ cacheDir: dir(), fetchImpl: fetchOk(UPSTREAM, { n: 0 }) });
+  it("matches a directory name against an alias, not only a slug", async () => {
+    const meta = new IconMetadata({
+      cacheDir: dir(),
+      fetchImpl: fetchOk(DIRECTORY_MATCH, { n: 0 }),
+    });
     await meta.load();
-    // "myplexserver" contains "plex" partway through, but neither string prefixes the
-    // other — a wrong icon is worse than the letter-tile fallback.
+    expect(meta.matchDirectory("media")).toBe("media-server");
+  });
+
+  it("declines a directory name that only prefixes a slug or alias — a bare prefix hit is not confident enough", async () => {
+    // "plex-backup" and "media-old" are exactly the NAS-ordinary directory names the
+    // reviewer measured acquiring the wrong logo under the old bidirectional prefix
+    // check: `plex-backup` prefix-matched the slug "plex", and `media-old` would
+    // prefix-match the alias "media" on "media-server". A wrong logo is worse than the
+    // letter-tile fallback, so neither may suggest anything now.
+    const meta = new IconMetadata({
+      cacheDir: dir(),
+      fetchImpl: fetchOk(DIRECTORY_MATCH, { n: 0 }),
+    });
+    await meta.load();
+    expect(meta.matchDirectory("plex-backup")).toBeNull();
+    expect(meta.matchDirectory("media-old")).toBeNull();
+  });
+
+  it("declines a directory name that only substring-matches, not exactly, a slug", async () => {
+    const meta = new IconMetadata({
+      cacheDir: dir(),
+      fetchImpl: fetchOk(DIRECTORY_MATCH, { n: 0 }),
+    });
+    await meta.load();
+    // "myplexserver" contains "plex" partway through, but is not exactly "plex" —
+    // a wrong icon is worse than the letter-tile fallback.
     expect(meta.matchDirectory("myplexserver")).toBeNull();
   });
 

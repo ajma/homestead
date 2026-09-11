@@ -127,35 +127,30 @@ export class IconMetadata {
    * A confident match between an adopted directory's name and a slug or alias, for
    * spec §8's adoption-time icon suggestion.
    *
-   * Deliberately not built on `search`: that method assumes the caller's query is the
-   * shorter, partial string (typing "jel" to find "jellyfin"), whereas a directory name
-   * is usually the *longer* one ("emby-server" against the alias "emby"). The prefix
-   * check here runs both directions for that reason. An exact hit always wins; among
-   * prefix hits, the longest matched name wins, so a coincidental short alias elsewhere
-   * in the catalogue cannot outrank a more specific one. A substring-only relationship —
-   * neither exact nor a prefix in either direction — is never confident enough to return.
+   * Exact match only, case-insensitive — no prefix branch. A prefix relationship is
+   * ordinary on a NAS (`plex-backup`, `media-old`, `emby-test`) and a wrong icon is worse
+   * than the letter-tile fallback: a placeholder tile is visibly a placeholder, but a
+   * wrong logo looks deliberate, so nobody reports it and the launcher is quietly
+   * distrusted from then on. A directory holding an app is overwhelmingly named exactly
+   * after it (`jellyfin`), so exact-only still does the job; manual selection covers the
+   * rest in a later phase.
+   *
+   * Deliberately not built on `search`: that method's prefix direction assumes the
+   * caller's query is the shorter, partial string (typing "jel" to find "jellyfin"), so
+   * `search("emby-server")` finds nothing even though "emby-server" is a directory that
+   * should suggest the "emby" alias. Kept as two separate questions on purpose — do not
+   * merge them back into one "search-like" helper.
    */
   matchDirectory(name: string): string | null {
     const needle = name.toLowerCase();
     if (needle === "") return null;
 
-    let exact: string | null = null;
-    let bestPrefix: { slug: string; length: number } | null = null;
-
     for (const icon of this.index) {
       for (const candidate of [icon.slug, ...icon.aliases]) {
-        const lower = candidate.toLowerCase();
-        if (lower === needle) {
-          exact = icon.slug;
-        } else if (
-          (needle.startsWith(lower) || lower.startsWith(needle)) &&
-          (!bestPrefix || lower.length > bestPrefix.length)
-        ) {
-          bestPrefix = { slug: icon.slug, length: lower.length };
-        }
+        if (candidate.toLowerCase() === needle) return icon.slug;
       }
     }
-    return exact ?? bestPrefix?.slug ?? null;
+    return null;
   }
 
   search(q: string, limit = 20): IconMeta[] {
