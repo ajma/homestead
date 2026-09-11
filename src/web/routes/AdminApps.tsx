@@ -5,6 +5,7 @@ import { StatusChip } from "@web/components/StatusChip";
 import { relativeTime } from "@web/lib/relative-time";
 import { useNow } from "@web/lib/use-now";
 import { AdoptDialog } from "@web/routes/AdoptDialog";
+import { CreateAppDialog } from "@web/routes/CreateAppDialog";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -123,7 +124,7 @@ export function AdminApps() {
       )}
 
       {adopting && <AdoptDialog onClose={() => setAdopting(false)} />}
-      {creating && null}
+      {creating && <CreateAppDialog onClose={() => setCreating(false)} />}
     </div>
   );
 }
