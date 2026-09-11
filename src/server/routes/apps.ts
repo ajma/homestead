@@ -115,6 +115,27 @@ export async function loadApp(db: Db, ctx: AuthContext, id: string) {
   return row;
 }
 
+/**
+ * `loadApp`, plus a fallback to slug. Scoped identically — the same `visibleAppsWhere`
+ * predicate on both queries — because this is still a route a scoped admin can reach.
+ *
+ * Exists for `GET /api/apps/:id` alone, so `EditApp` can resolve `:slug` through the
+ * cheap single-app endpoint instead of `useAdminApps()`'s whole-inventory rollup (the 1E
+ * final-fix brief, Important 3): the edit page never has a real id to look up with until
+ * after this resolves. Every mutation (`PATCH`/`DELETE`/actions) keeps using `loadApp`
+ * alone — those are always called with the real id the client already holds, never a
+ * slug typed into a URL.
+ */
+export async function loadAppByIdOrSlug(db: Db, ctx: AuthContext, idOrSlug: string) {
+  const byId = await loadApp(db, ctx, idOrSlug);
+  if (byId) return byId;
+  const [bySlug] = await db
+    .select()
+    .from(apps)
+    .where(and(eq(apps.slug, idOrSlug), visibleAppsWhere(ctx)));
+  return bySlug;
+}
+
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   const { db, host, composeConfig, icons } = app.deps;
 
@@ -496,7 +517,8 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/apps/:id", async (request, reply) => {
     const ctx = requireCapability(request, "app:read");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const row = await loadApp(db, ctx, id);
+    // Accepts a slug too — see `loadAppByIdOrSlug`'s doc comment.
+    const row = await loadAppByIdOrSlug(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     const status = await statusFor({ host, composeConfig }, row);
     if (!can(ctx, "app:config")) return toViewerApp(row, status);

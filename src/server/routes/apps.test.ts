@@ -294,6 +294,70 @@ describe("app inventory API", () => {
     await app.close();
   });
 
+  it("GET /api/apps/:id also resolves a slug, for the edit page's single-app query", async () => {
+    // The root fix for Important 3 in the 1E final-fix brief: `EditApp` only has `:slug`
+    // from the URL until this resolves, so the cheap single-app endpoint has to accept
+    // one — the alternative was `useAdminApps()`'s whole-inventory rollup staying active
+    // on every edit page.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jellyfin", services: {} }),
+      stderr: "",
+    });
+    const adopted = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin"] },
+    });
+    const { id, slug } = adopted.json().adopted[0] as { id: string; slug: string };
+
+    const byId = await app.inject({ method: "GET", url: `/api/apps/${id}`, headers: { cookie } });
+    const bySlug = await app.inject({
+      method: "GET",
+      url: `/api/apps/${slug}`,
+      headers: { cookie },
+    });
+
+    expect(byId.statusCode).toBe(200);
+    expect(bySlug.statusCode).toBe(200);
+    expect(bySlug.json()).toEqual(byId.json());
+    await app.close();
+  });
+
+  it("scopes the slug lookup exactly like the id lookup, not wider", async () => {
+    const app = await buildTestApp();
+    const { cookie: adminCookie } = await signUpAdmin(app);
+    app.deps.host.files.set("a/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "a", services: {} }),
+      stderr: "",
+    });
+    const adopted = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie: adminCookie },
+      payload: { directories: ["a"] },
+    });
+    const { slug } = adopted.json().adopted[0] as { id: string; slug: string };
+
+    const viewer = await createViewer(app, adminCookie, {
+      scopeAllApps: false,
+      appIds: [],
+    });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${slug}`,
+      headers: { cookie: viewer.cookie },
+    });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
   it("gives colliding directory names distinct slugs", async () => {
     // `My Media` and `My_Media` both normalise to `mymedia` — the underscore is
     // stripped, the hyphen in `my-media` is not, so THESE two are the colliding pair.

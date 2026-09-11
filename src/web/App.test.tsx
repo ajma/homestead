@@ -79,6 +79,14 @@ function stubMe(overrides: Partial<Me> = {}, extra: { apps?: AdminApp[] } = {}) 
       if (url.includes("/api/launcher")) return json(200, { apps: [] });
       if (url.includes("/containers")) return json(200, { containers: [], dockerReachable: true });
       if (url.endsWith("/api/apps")) return json(200, apps);
+      // `EditApp` resolves `:slug` through `GET /api/apps/:id`, which accepts a slug too
+      // (Important 3 of the 1E final-fix brief) — a single-app object, not the list.
+      const singleAppMatch = /\/api\/apps\/([^/]+)$/.exec(url);
+      if (singleAppMatch) {
+        const key = singleAppMatch[1];
+        const found = apps.find((candidate) => candidate.id === key || candidate.slug === key);
+        return found ? json(200, found) : json(404, { error: "not_found" });
+      }
       // jobs, images, probes, the launcher list, and anything else this file doesn't
       // name explicitly — an empty array is the shape every one of those endpoints
       // returns when there is nothing to report.

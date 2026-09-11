@@ -2,7 +2,7 @@
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
-import { adminAppsKey } from "@web/api/admin";
+import { adminAppKey } from "@web/api/admin";
 import { EditApp } from "@web/routes/EditApp";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -31,9 +31,18 @@ const app: AdminApp = {
   lastDeployAt: null,
 };
 
-function mount(path = "/apps/jellyfin/overview", seed: AdminApp[] = [app]) {
+/**
+ * `EditApp` now resolves through `useAdminApp(slug)` (`GET /api/apps/:id`, which accepts
+ * a slug too — Important 3 of the 1E final-fix brief), not `useAdminApps()`'s whole-list
+ * cache. Seeding `adminAppKey(slug)` directly, the way these tests used to seed
+ * `adminAppsKey`, keeps the tests that don't care about the fetch itself synchronous;
+ * `fetch` is still stubbed underneath so a test can also drive the not-found path for
+ * real.
+ */
+function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  client.setQueryData(adminAppsKey, seed);
+  const slug = path.split("/")[2] ?? "";
+  if (seedApp) client.setQueryData(adminAppKey(slug), seedApp);
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
@@ -49,32 +58,38 @@ function mount(path = "/apps/jellyfin/overview", seed: AdminApp[] = [app]) {
   );
 }
 
+function stubFetch(response: unknown, status = 200) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify(response), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+    ),
+  );
+}
+
 describe("EditApp", () => {
   it("shows the app's name and status in a header", () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(JSON.stringify(app), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }),
-      ),
-    );
+    stubFetch(app);
     mount();
     expect(screen.getByRole("heading", { name: /Jellyfin/ })).toBeTruthy();
+  });
+
+  it("keeps the status header sticky, per spec's 'sticky status header' requirement", () => {
+    stubFetch(app);
+    mount();
+    const header = screen.getByRole("banner");
+    expect(header.className).toContain("sticky");
+    expect(header.className).toContain("top-0");
   });
 
   it("renders only the active tab's content", () => {
     // Tabs are the data-loading boundary. If a hidden tab renders, its queries fire and
     // a log stream opens because someone glanced at the status header.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
-      ),
-    );
+    stubFetch(app);
     mount("/apps/jellyfin/containers");
     expect(screen.getByText("CONTAINERS")).toBeTruthy();
     expect(screen.queryByText("LOGS")).toBeNull();
@@ -82,13 +97,7 @@ describe("EditApp", () => {
   });
 
   it("offers a tab link per route", () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
-      ),
-    );
+    stubFetch(app);
     mount();
     for (const name of ["Overview", "Containers", "Logs"]) {
       expect(screen.getByRole("link", { name })).toBeTruthy();
@@ -96,26 +105,14 @@ describe("EditApp", () => {
   });
 
   it("has no exposure tab, since Cloudflare is Phase 2", () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
-      ),
-    );
+    stubFetch(app);
     mount();
     expect(screen.queryByRole("link", { name: /Exposure/ })).toBeNull();
   });
 
   it("says so plainly when the slug matches no app", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
-      ),
-    );
-    mount("/apps/nope/overview", []);
+    stubFetch({ error: "not_found" }, 404);
+    mount("/apps/nope/overview", null);
     await waitFor(() => expect(screen.getByText(/No app called/)).toBeTruthy());
   });
 });

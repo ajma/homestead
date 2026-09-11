@@ -1,6 +1,6 @@
 import type { AdminApp } from "@shared/dto";
 import type { AppStatus } from "@shared/types";
-import { useAdminApps } from "@web/api/admin";
+import { useAdminApp } from "@web/api/admin";
 import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
 import { ImageUpdates } from "@web/components/ImageUpdates";
@@ -52,14 +52,19 @@ function tabLinkClass({ isActive }: { isActive: boolean }): string {
 
 export function EditApp() {
   const { slug = "" } = useParams<{ slug: string }>();
-  const { data: apps, isPending } = useAdminApps();
-  const app = apps?.find((candidate) => candidate.slug === slug) ?? null;
+  // Resolves through the cheap single-app endpoint (`GET /api/apps/:id`, which accepts a
+  // slug too — see `loadAppByIdOrSlug`), not `useAdminApps()`'s whole-inventory rollup.
+  // The list query used to be made *active* on every edit page merely by being read here,
+  // so any invalidation of it — a job finishing, a metadata save on any tab — refetched
+  // up to sixty `docker compose config` spawns to update one chip. See the 1E final-fix
+  // brief, Important 3.
+  const { data: app, isPending } = useAdminApp(slug);
 
-  if (app === null) {
+  if (!app) {
     // `isPending` only: nothing cached yet, so a spinner is honest and temporary. Once
-    // the list has loaded and the slug still doesn't match, that's not a state that a
-    // wait will resolve — a typo'd URL or a deleted app must say so plainly rather than
-    // spin forever.
+    // the fetch has settled and there is still no app, that's not a state that a wait
+    // will resolve — a typo'd URL, a deleted app, or an app outside this admin's scope
+    // must say so plainly rather than spin forever.
     if (isPending) return <p className="p-6 text-sm text-slate-500">Loading…</p>;
     return (
       <div className="p-6">
