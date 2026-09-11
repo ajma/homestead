@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import type { Db } from "../db/client.js";
+import { retryOnBusy } from "../db/retry.js";
 import { checkResults, probes } from "../db/schema.js";
 import { applyTransition } from "./transition.js";
 import type { ProbeResult, ProbeRow } from "./types.js";
@@ -39,42 +40,47 @@ export async function persistResult(
     failureThreshold: opts.failureThreshold,
   });
 
-  await db.transaction(async (tx) => {
-    // The SAMPLE records what was OBSERVED, not the debounced status.
-    //
-    // Spec §3 calls `check_results` "every sample", and that is what makes 48 hours of
-    // raw data worth keeping: a probe flapping fail/recover/fail/recover never confirms
-    // a transition, so storing the held status would record it as uninterrupted `up` and
-    // uptime would read 100% for an app failing every other minute. The debounced view
-    // — the one the launcher shows — lives on the probe row below.
-    //
-    // A consequence worth knowing: a deploy's grace window shows `starting` on the probe
-    // row while the samples record the `down` that was actually observed, so a restart
-    // does count against uptime. That is honest — the app was unreachable — and the
-    // rollup has only up/degraded/down buckets, so there is nowhere to put `starting`.
-    await tx.insert(checkResults).values({
-      id: ulid(),
-      probeId: probe.id,
-      status: result.status,
-      faultClass: result.faultClass ?? null,
-      latencyMs: result.latencyMs ?? null,
-      detail: result.detail ?? null,
-      checkedAt: opts.now,
-    });
+  // A route's transaction (probe adoption is one) can win the same instant the scheduler
+  // opens this one — see `db/retry.ts`. A retry here is cheaper than losing the sample.
+  await retryOnBusy(() =>
+    db.transaction(async (tx) => {
+      // The SAMPLE records what was OBSERVED, not the debounced status.
+      //
+      // Spec §3 calls `check_results` "every sample", and that is what makes 48 hours of
+      // raw data worth keeping: a probe flapping fail/recover/fail/recover never confirms
+      // a transition, so storing the held status would record it as uninterrupted `up`
+      // and uptime would read 100% for an app failing every other minute. The debounced
+      // view — the one the launcher shows — lives on the probe row below.
+      //
+      // A consequence worth knowing: a deploy's grace window shows `starting` on the
+      // probe row while the samples record the `down` that was actually observed, so a
+      // restart does count against uptime. That is honest — the app was unreachable —
+      // and the rollup has only up/degraded/down buckets, so there is nowhere to put
+      // `starting`.
+      await tx.insert(checkResults).values({
+        id: ulid(),
+        probeId: probe.id,
+        status: result.status,
+        faultClass: result.faultClass ?? null,
+        latencyMs: result.latencyMs ?? null,
+        detail: result.detail ?? null,
+        checkedAt: opts.now,
+      });
 
-    await tx
-      .update(probes)
-      .set({
-        lastStatus: transition.status,
-        lastLatencyMs: result.latencyMs ?? null,
-        lastDetail: result.detail ?? null,
-        lastFaultClass: result.faultClass ?? null,
-        lastCheckedAt: opts.now,
-        statusSince: transition.statusSince,
-        consecutiveFailures: transition.consecutiveFailures,
-      })
-      .where(eq(probes.id, probe.id));
-  });
+      await tx
+        .update(probes)
+        .set({
+          lastStatus: transition.status,
+          lastLatencyMs: result.latencyMs ?? null,
+          lastDetail: result.detail ?? null,
+          lastFaultClass: result.faultClass ?? null,
+          lastCheckedAt: opts.now,
+          statusSince: transition.statusSince,
+          consecutiveFailures: transition.consecutiveFailures,
+        })
+        .where(eq(probes.id, probe.id));
+    }),
+  );
 
   return {
     probeId: probe.id,

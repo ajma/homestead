@@ -12,6 +12,7 @@ import type { AuthContext } from "../auth/context.js";
 import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
 import { LOCAL_HOST_ID } from "../bootstrap.js";
 import type { Db } from "../db/client.js";
+import { retryOnBusy } from "../db/retry.js";
 import { apps, probes } from "../db/schema.js";
 import type { ContainerSummary } from "../host/types.js";
 import { HashMismatchError } from "../host/types.js";
@@ -240,21 +241,27 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
         // transaction means a probe-insert failure rolls the app insert back with it, so
         // this directory lands in `failed` honestly instead of in `adopted` missing a
         // probe, or in `failed` while the row sits in the database regardless.
-        await db.transaction(async (tx) => {
-          await tx.insert(apps).values({
-            id,
-            hostId: LOCAL_HOST_ID,
-            slug,
-            displayName: directory,
-            directory,
-            composeFile: discovered.composeFile,
-            // From `docker compose config`, which already honours COMPOSE_PROJECT_NAME in
-            // the sibling .env. Deriving it from the directory name would be wrong.
-            projectName: resolved.resolved.projectName,
-            lastComposeHash: hash,
-          });
-          await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker" });
-        });
+        // The scheduler can open its own transaction (`persistResult`) the same instant
+        // this one starts — see `db/retry.ts`. Without the retry that race is a lost
+        // adoption and a 500, not merely a delayed one.
+        await retryOnBusy(() =>
+          db.transaction(async (tx) => {
+            await tx.insert(apps).values({
+              id,
+              hostId: LOCAL_HOST_ID,
+              slug,
+              displayName: directory,
+              directory,
+              composeFile: discovered.composeFile,
+              // From `docker compose config`, which already honours
+              // COMPOSE_PROJECT_NAME in the sibling .env. Deriving it from the
+              // directory name would be wrong.
+              projectName: resolved.resolved.projectName,
+              lastComposeHash: hash,
+            });
+            await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker" });
+          }),
+        );
       } catch (error) {
         // `apps_host_slug` and `apps_host_directory` are unique. A concurrent adopt can
         // still lose the race that `uniqueSlug` narrows, and an uncaught violation here
