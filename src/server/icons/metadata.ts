@@ -33,6 +33,7 @@ export class IconMetadata {
   private readonly fetchImpl: typeof fetch;
   private index: IconMeta[] = [];
   private slugs = new Set<string>();
+  private bySlug = new Map<string, IconMeta>();
 
   constructor(opts: { cacheDir: string; fetchImpl?: typeof fetch }) {
     this.cacheDir = opts.cacheDir;
@@ -63,8 +64,7 @@ export class IconMetadata {
     } catch {
       // No network and no usable cache. An empty index is a working launcher with
       // letter tiles; a throw here is a server that will not start.
-      this.index = [];
-      this.slugs = new Set();
+      this.setIndex([]);
     }
   }
 
@@ -92,22 +92,35 @@ export class IconMetadata {
     // guard alone lets a JSON array response fabricate a numeric-slug index that then
     // gets written to the disk cache and survives restarts.
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      this.index = [];
-      this.slugs = new Set();
+      this.setIndex([]);
       return;
     }
-    this.index = Object.entries(raw as Record<string, UpstreamEntry>).map(([slug, entry]) => ({
-      slug,
-      aliases: Array.isArray(entry?.aliases) ? entry.aliases : [],
-      categories: Array.isArray(entry?.categories) ? entry.categories : [],
-      variants: Array.isArray(entry?.base) ? entry.base : ["svg"],
-    }));
-    this.slugs = new Set(this.index.map((i) => i.slug));
+    this.setIndex(
+      Object.entries(raw as Record<string, UpstreamEntry>).map(([slug, entry]) => ({
+        slug,
+        aliases: Array.isArray(entry?.aliases) ? entry.aliases : [],
+        categories: Array.isArray(entry?.categories) ? entry.categories : [],
+        variants: Array.isArray(entry?.base) ? entry.base : ["svg"],
+      })),
+    );
+  }
+
+  private setIndex(entries: IconMeta[]): void {
+    this.index = entries;
+    this.slugs = new Set(entries.map((i) => i.slug));
+    this.bySlug = new Map(entries.map((i) => [i.slug, i]));
   }
 
   /** The SSRF guard: only a slug present in the index may ever become a fetch URL. */
   has(slug: string): boolean {
     return this.slugs.has(slug);
+  }
+
+  /** The full entry for a known slug — the source of truth `IconStore` checks a
+   * requested variant against, so an icon with no light/dark art never becomes an
+   * outbound request for one. */
+  get(slug: string): IconMeta | undefined {
+    return this.bySlug.get(slug);
   }
 
   search(q: string, limit = 20): IconMeta[] {

@@ -1,11 +1,20 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { ulid } from "ulid";
 import { readBounded } from "./bounded-read.js";
 import type { IconMetadata } from "./metadata.js";
 
 const CDN = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@main/svg";
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_ICON_BYTES = 512 * 1024;
+
+/**
+ * How long a failed download is remembered, so a repeated miss on the same slug+variant
+ * costs nothing instead of reaching the CDN again on every request. Short enough that a
+ * genuinely transient CDN failure recovers well within a user's session; in-memory only,
+ * so it never survives a restart.
+ */
+const NEGATIVE_CACHE_MS = 60_000;
 
 /** Belt and braces beside the index check: shape, then membership. */
 const SAFE_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -28,16 +37,31 @@ export class IconStore {
   private readonly cacheDir: string;
   private readonly metadata: IconMetadata;
   private readonly fetchImpl: typeof fetch;
+  private readonly now: () => number;
+  /** Slug+variant name (e.g. `jellyfin-dark.svg`) to the epoch ms it last failed at. */
+  private readonly failedAt = new Map<string, number>();
 
-  constructor(opts: { cacheDir: string; metadata: IconMetadata; fetchImpl?: typeof fetch }) {
+  constructor(opts: {
+    cacheDir: string;
+    metadata: IconMetadata;
+    fetchImpl?: typeof fetch;
+    now?: () => number;
+  }) {
     this.cacheDir = resolve(opts.cacheDir);
     this.metadata = opts.metadata;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.now = opts.now ?? Date.now;
   }
 
   async fetchIcon(slug: string, variant: "light" | "dark" | null): Promise<Buffer | null> {
     if (!SAFE_SLUG.test(slug)) return null;
-    if (!this.metadata.has(slug)) return null;
+    const icon = this.metadata.get(slug);
+    if (!icon) return null;
+    // A caller-supplied variant is only fetchable if the icon actually offers it.
+    // Without this, any indexed slug plus an unsupported `?variant=` is a guaranteed
+    // outbound miss — and a repeatable one, since nothing else stops a caller asking
+    // again.
+    if (variant !== null && !icon.variants.includes(variant)) return null;
 
     const name = variant ? `${slug}-${variant}.svg` : `${slug}.svg`;
     const path = join(this.cacheDir, name);
@@ -51,16 +75,39 @@ export class IconStore {
       // Not cached yet.
     }
 
+    if (this.isRecentFailure(name)) return null;
+
     const body = await this.download(`${CDN}/${name}`);
-    if (!body) return null;
+    if (!body) {
+      this.failedAt.set(name, this.now());
+      return null;
+    }
+    this.failedAt.delete(name);
 
     try {
       await mkdir(this.cacheDir, { recursive: true });
-      await writeFile(path, body);
+      // Written to a temporary name in the same directory, then renamed into place.
+      // `rename` is atomic on the same filesystem, so a process killed mid-write can
+      // never leave a truncated file at `path` for the next request to serve forever.
+      const tmpPath = `${path}.${process.pid}.${ulid()}.tmp`;
+      await writeFile(tmpPath, body);
+      await rename(tmpPath, path);
     } catch {
       // Serve it anyway; a failed cache write is not a failed request.
     }
     return body;
+  }
+
+  /** True when `key` failed within the negative-cache window, which is also when this
+   * prunes an expired entry rather than growing the map forever. */
+  private isRecentFailure(key: string): boolean {
+    const failedAt = this.failedAt.get(key);
+    if (failedAt === undefined) return false;
+    if (this.now() - failedAt >= NEGATIVE_CACHE_MS) {
+      this.failedAt.delete(key);
+      return false;
+    }
+    return true;
   }
 
   private async download(url: string): Promise<Buffer | null> {
