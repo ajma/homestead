@@ -105,11 +105,26 @@ export function useSseText(url: string | null): UseSseText {
       forceRender((n) => n + 1);
     };
 
-    const onDone = () => setDone(true);
+    // Both `done` and `error` are terminal: `logs.ts` and `jobs.ts` each send at most one
+    // of them, immediately followed by ending the response. A native `EventSource` has no
+    // way to know that — a server-ended response looks exactly like a dropped connection,
+    // which the spec says to retry after ~3s. Calling `close()` here, not just in the
+    // effect's cleanup, is what tells it there is nothing to retry. Without this, the
+    // stream reconnects every ~3s forever: the pane re-appends the same tail, and the NAS
+    // re-pays a project-name resolve, a `listContainers` and a `container.logs()` on every
+    // cycle. `JobOutput` used to escape this by accident, because `handleJobDone` unmounts
+    // it the moment `done` arrives — that is not a substitute for closing here, since the
+    // same stream loops identically on `follow=true` whenever the server ends the response
+    // for any other reason (a deploy recreating the container, most commonly).
+    const onDone = () => {
+      setDone(true);
+      source.close();
+    };
 
     const onError = (event: MessageEvent) => {
       setError(messageFrom(event.data));
       setDone(true);
+      source.close();
     };
 
     for (const type of TEXT_EVENTS) source.addEventListener(type, onText);

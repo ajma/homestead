@@ -146,10 +146,14 @@ describe("useSseText", () => {
     expect(result.current.text.includes("MARKER")).toBe(false);
   });
 
-  it("reset clears accumulated text, done and error without closing the stream", () => {
+  it("reset clears accumulated text, done and error", () => {
     const { result } = renderHook(() => useSseText("/api/apps/a1/containers/c1/logs"));
     act(() => {
       FakeEventSource.instances[0]?.emit("line", { text: "hi", stream: "stdout" });
+      // `done` now closes the source (see the Critical-fix tests below), so this stream
+      // is already closed by the time `reset` runs — that is not what this test is
+      // about. Reset's job is the three state fields, regardless of who closed the
+      // connection.
       FakeEventSource.instances[0]?.emit("done", {});
     });
     act(() => {
@@ -158,6 +162,106 @@ describe("useSseText", () => {
     expect(result.current.text).toBe("");
     expect(result.current.done).toBe(false);
     expect(result.current.error).toBeNull();
+  });
+
+  it("does not itself close a stream that has not finished", () => {
+    const { result } = renderHook(() => useSseText("/api/apps/a1/containers/c1/logs"));
+    act(() => {
+      FakeEventSource.instances[0]?.emit("line", { text: "hi", stream: "stdout" });
+    });
+    act(() => {
+      result.current.reset();
+    });
     expect(FakeEventSource.instances[0]?.closed).toBe(false);
+  });
+});
+
+/**
+ * `FakeEventSource` above — like every jsdom `EventSource` double in this codebase — has
+ * no reconnect behaviour, because jsdom has no `EventSource` at all to model one after.
+ * That is exactly why the Critical defect this file's fix addresses (a finished stream
+ * reconnecting forever, `use-sse-text.ts:108`) survived every test in the suite: the
+ * double is simpler than the real thing in precisely the dimension that matters, the same
+ * shape as the Phase 1E Task 1 `FakeHost`/`PathGuard` defect.
+ *
+ * Two ways to close that gap were on the table: drive a real loopback `http` server with
+ * a real `EventSource` (Node 24 has one behind `--experimental-eventsource`, unflagged in
+ * neither this Node version nor without a dependency on `undici` directly), or teach the
+ * fake the one behavioural dimension it is missing. The loopback route was measurably the
+ * reviewer's own tool for finding the bug, but running it as a permanent regression test
+ * here would mean either a flag this repo does not otherwise set, or a new dependency —
+ * both against the brief's constraints, and both add real timing/network flakiness to a
+ * suite that must run three times clean. So: teach the fake to reconnect instead.
+ * `ReconnectingFakeEventSource.serverEnds` models the one thing a real `EventSource` does
+ * that `FakeEventSource` cannot: if the hook has not called `close()` by the time the
+ * server "ends" the response, a real browser opens a new connection to the same URL after
+ * a delay — this fake does that immediately, since the delay itself is not what the bug
+ * is about. A hook that forgets to call `close()` on `done`/`error` shows up here as a
+ * second instance; one that calls it does not.
+ */
+class ReconnectingFakeEventSource {
+  static instances: ReconnectingFakeEventSource[] = [];
+
+  listeners = new Map<string, Array<(e: MessageEvent) => void>>();
+  closed = false;
+
+  constructor(readonly url: string) {
+    ReconnectingFakeEventSource.instances.push(this);
+  }
+  addEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  removeEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((l) => l !== fn),
+    );
+  }
+  close() {
+    this.closed = true;
+  }
+  private emit(type: string, data?: unknown) {
+    const init = data === undefined ? {} : { data: JSON.stringify(data) };
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn(new MessageEvent(type, init));
+    }
+  }
+  /** The server sends its terminal event(s), then ends the response. */
+  serverEnds(events: Array<[string, unknown?]>) {
+    for (const [type, data] of events) this.emit(type, data);
+    if (!this.closed) {
+      // The real behaviour this fake exists to add: an EventSource the caller did not
+      // close reconnects on its own after the server hangs up.
+      new ReconnectingFakeEventSource(this.url);
+    }
+  }
+}
+
+describe("useSseText — the reconnect loop a jsdom double cannot see", () => {
+  beforeEach(() => {
+    ReconnectingFakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", ReconnectingFakeEventSource);
+  });
+
+  it("closes the source on `done`, so a finished response does not reconnect", () => {
+    renderHook(() => useSseText("/api/apps/a1/containers/c1/logs"));
+    act(() => {
+      ReconnectingFakeEventSource.instances[0]?.serverEnds([["done", {}]]);
+    });
+    // A reconnect shows up as a second instance. Before the fix this is 2.
+    expect(ReconnectingFakeEventSource.instances.length).toBe(1);
+    expect(ReconnectingFakeEventSource.instances[0]?.closed).toBe(true);
+  });
+
+  it("closes the source on a terminal `error` too, for the same reason", () => {
+    renderHook(() => useSseText("/api/apps/a1/containers/c1/logs"));
+    act(() => {
+      ReconnectingFakeEventSource.instances[0]?.serverEnds([
+        ["error", { code: "stream_failed", message: "The stream ended unexpectedly." }],
+        ["done", {}],
+      ]);
+    });
+    expect(ReconnectingFakeEventSource.instances.length).toBe(1);
+    expect(ReconnectingFakeEventSource.instances[0]?.closed).toBe(true);
   });
 });
