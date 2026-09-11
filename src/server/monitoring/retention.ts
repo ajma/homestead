@@ -54,7 +54,8 @@ export async function runRetention(
       GROUP BY probe_id, hour_start
       HAVING NOT EXISTS (
         SELECT 1 FROM check_rollups r
-        WHERE r.probe_id = check_results.probe_id AND r.hour_start = hour_start
+        WHERE r.probe_id = check_results.probe_id
+          AND r.hour_start = check_results.checked_at - (check_results.checked_at % ${HOUR})
       )
     `);
     hoursRolled = Number(inserted.rowsAffected ?? 0);

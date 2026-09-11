@@ -87,6 +87,29 @@ describe("runRetention", () => {
     expect(await db.select().from(checkRollups)).toHaveLength(3);
   });
 
+  it("rolls every hour across separate invocations, not only the probe's first", async () => {
+    // C1 regression: `HAVING NOT EXISTS` correlated on the bare alias degrades to
+    // "this probe has no rollup row at all" once one exists, so every hour after the
+    // first is silently skipped. That only shows up ACROSS separate `runRetention`
+    // calls — a single call grouping several un-rolled hours at once (the "catches up"
+    // test above) passes either way, because there is no pre-existing rollup row yet.
+    const { db, probeId } = await seed();
+
+    await db.insert(checkResults).values([sample(probeId, T0 + 10, "up")]);
+    expect((await runRetention(db, T0 + HOUR + 60)).hoursRolled).toBe(1);
+
+    await db.insert(checkResults).values([sample(probeId, T0 + HOUR + 10, "up")]);
+    expect((await runRetention(db, T0 + 2 * HOUR + 60)).hoursRolled).toBe(1);
+
+    await db.insert(checkResults).values([sample(probeId, T0 + 2 * HOUR + 10, "up")]);
+    expect((await runRetention(db, T0 + 3 * HOUR + 60)).hoursRolled).toBe(1);
+
+    const hours = (await db.select().from(checkRollups))
+      .map((r) => r.hourStart)
+      .sort((a, b) => a - b);
+    expect(hours).toEqual([T0, T0 + HOUR, T0 + 2 * HOUR]);
+  });
+
   it("is idempotent by skipping rolled hours, not by failing on them", async () => {
     // Row counts alone cannot tell the two apart. With `HAVING NOT EXISTS` removed the
     // composite primary key rejects the duplicate and the catch swallows it, leaving

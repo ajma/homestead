@@ -143,7 +143,10 @@ describe("Scheduler.tick", () => {
       random: () => 0.5,
     });
     await scheduler.tick();
-    expect(peak).toBeLessThanOrEqual(8);
+    // Exactly 8, not merely bounded: `toBeLessThanOrEqual(8)` passes against an
+    // implementation that calls no runner at all (peak 0) or one that runs fully
+    // sequentially (peak 1). The true peak with 20 probes and a limit of 8 is 8.
+    expect(peak).toBe(8);
   });
 
   it("writes one sample per probe when many run at once", async () => {
@@ -232,6 +235,66 @@ describe("Scheduler.tick", () => {
     expect(ids).toHaveLength(6);
   });
 
+  it("reports a failed reschedule through onProbeError and lets every worker finish before tick() resolves", async () => {
+    // C2 regression. `reschedule` used to sit outside `runOne`'s try, so a rejection from
+    // it (SQLITE_BUSY, raised for real by a route holding a transaction open — no fault
+    // injection needed in production) escaped the per-probe catch, rejected
+    // `Promise.all` in `runAll` without waiting for the other workers, and `tick()`'s own
+    // catch swallowed it and returned 0 with zero reports. Six probes, the second
+    // `db.update` (i.e. the second probe's reschedule) throws.
+    const { db, host, ids } = await seed(6);
+    const failures: string[] = [];
+    const runCalls: string[] = [];
+    const slow: ProbeRunner = {
+      kind: "docker",
+      async run(probe) {
+        runCalls.push(probe.id);
+        // Slow enough that if a worker were abandoned rather than awaited, the tick
+        // would return well before this resolves.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { status: "up" };
+      },
+    };
+    const originalUpdate = db.update.bind(db);
+    let updateCalls = 0;
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+    (db as any).update = (...args: unknown[]) => {
+      updateCalls++;
+      if (updateCalls === 2) throw new Error("SQLITE_BUSY");
+      // biome-ignore lint/suspicious/noExplicitAny: forwarding to the real implementation
+      return (originalUpdate as any)(...args);
+    };
+
+    const scheduler = new Scheduler({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      runners: { docker: slow, http_internal: slow, http_external: slow },
+      onProbeError: (probeId) => failures.push(probeId),
+      now: () => NOW,
+      random: () => 0.5,
+    });
+
+    let result: number;
+    try {
+      result = await scheduler.tick();
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).update = originalUpdate;
+    }
+    const invocationsAtReturn = runCalls.length;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const invocationsAfterDelay = runCalls.length;
+
+    expect(result).toBe(6);
+    expect(failures).toEqual([ids[1]]);
+    // The property whose absence let this ship: nothing keeps running after tick()
+    // resolves.
+    expect(invocationsAfterDelay).toBe(invocationsAtReturn);
+    // And it is not vacuous — the other five probes' runners really did get called.
+    expect(invocationsAtReturn).toBe(5);
+  });
+
   it("reschedules a probe whose runner throws, and keeps going", async () => {
     // One broken probe must not stop the tick or wedge itself into running every 5s
     // forever.
@@ -283,6 +346,75 @@ describe("Scheduler.tick", () => {
     });
     await scheduler.tick();
     expect(seen).toBeNull();
+  });
+
+  it("refuses an overlapping tick while one is still in flight", async () => {
+    // The `ticking` guard had no test at all: deleting it left the whole suite green.
+    // `tick()` sets the flag synchronously, before its first `await`, so calling it twice
+    // back to back — with no `await` between the calls — deterministically exercises the
+    // guard rather than racing it: the second call's synchronous guard check is
+    // guaranteed to run before the first call's own first microtask.
+    const { db, host } = await seed(1);
+    let release: (() => void) | null = null;
+    const gated: ProbeRunner = {
+      kind: "docker",
+      async run() {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { status: "up" };
+      },
+    };
+    const scheduler = new Scheduler({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      runners: { docker: gated, http_internal: gated, http_external: gated },
+      now: () => NOW,
+      random: () => 0.5,
+    });
+
+    const first = scheduler.tick();
+    expect(await scheduler.tick()).toBe(0);
+
+    // Let the in-flight tick actually finish, so it does not leak into the next test.
+    while (release === null) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    release();
+    expect(await first).toBe(1);
+  });
+
+  it("does not let a hung listContainers call wedge the scheduler forever", async () => {
+    // I5: `listContainers()` had no timeout. A wedged Docker socket never resolved this
+    // call, `ticking` never reset, and every subsequent tick returned 0 forever with no
+    // report — the exact failure class this monitoring exists to catch, happening to
+    // monitoring itself.
+    const { db, host } = await seed(1);
+    host.listContainers = () => new Promise(() => {}); // never resolves
+    const failures: string[] = [];
+    const log: string[] = [];
+    const scheduler = new Scheduler({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      runners: {
+        docker: stubRunner("docker", { status: "down", faultClass: "network" }, log),
+        http_internal: stubRunner("http_internal", { status: "up" }, log),
+        http_external: stubRunner("http_external", { status: "up" }, log),
+      },
+      onProbeError: (id) => failures.push(id),
+      now: () => NOW,
+      random: () => 0.5,
+      listContainersTimeoutMs: 20,
+    });
+
+    expect(await scheduler.tick()).toBe(1);
+    expect(failures).toEqual(["<containers>"]);
+    expect(log).toHaveLength(1);
+    // The guard was released: a later tick is not permanently wedged behind this one.
+    const [probe] = await db.select().from(probes);
+    expect(probe?.nextRunAt).toBeGreaterThan(NOW);
   });
 
   it("stop() clears its timer", async () => {

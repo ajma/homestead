@@ -10,6 +10,27 @@ const TICK_MS = 5_000;
 const CONCURRENCY = 8;
 const JITTER_FRACTION = 0.1;
 const FAILURE_THRESHOLD = 2;
+/** Same figure `registry.ts` uses for its own requests. A wedged Docker socket must not
+ * wedge monitoring forever — see the `listContainers` call below. */
+const LIST_CONTAINERS_TIMEOUT_MS = 10_000;
+
+/** Races `promise` against a timer. Does not cancel `promise` — dockerode gives us
+ * nothing to cancel with — it only stops the tick from waiting on it forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 export class Scheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -32,6 +53,10 @@ export class Scheduler {
       onProbeError?: (probeId: string, error: unknown) => void;
       now?: () => number;
       random?: () => number;
+      /** Test-only override of `LIST_CONTAINERS_TIMEOUT_MS`, the same way `now`/`random`
+       * are overridden — an optional constructor field rather than waiting out 10 real
+       * seconds in the suite. */
+      listContainersTimeoutMs?: number;
     },
   ) {}
 
@@ -90,15 +115,43 @@ export class Scheduler {
         try {
           // No filter: the whole host in one call. `LocalHost` already asks Docker for
           // stopped containers too, which the rollup needs to report a service as down.
-          containers = await this.deps.host.listContainers();
-        } catch {
+          // Bounded: an unresponsive Docker socket has no timeout of its own, and this is
+          // the one await in a tick with nothing else protecting it — an unbounded hang
+          // here never releases the `ticking` guard, so every future tick returns 0
+          // forever, silently, with the launcher showing stale green statuses for exactly
+          // the failure this monitoring exists to catch.
+          containers = await withTimeout(
+            this.deps.host.listContainers(),
+            this.deps.listContainersTimeoutMs ?? LIST_CONTAINERS_TIMEOUT_MS,
+          );
+        } catch (error) {
           containers = null;
+          // Not silent: a hung or failing Docker socket is a systemic fault, not one
+          // probe's problem, but there is no probe id to attach it to, so it goes through
+          // the same channel under a sentinel id rather than a second reporting path.
+          try {
+            this.deps.onProbeError?.("<containers>", error);
+          } catch {
+            // The channel for reporting this is the one that just failed.
+          }
         }
       }
 
       await this.runAll(due, containers, now);
       return due.length;
-    } catch {
+    } catch (error) {
+      // The tick's own catch — a due-probe SELECT failing, or anything else escaping the
+      // per-probe try in `runOne`. This used to be `catch { return 0 }` with no report at
+      // all: the one silent catch in the file, and the exact failure class this phase has
+      // already shipped three times. `runAll` no longer lets a per-probe rejection reach
+      // here (see its `allSettled`), so reaching this catch means something outside any
+      // single probe's turn broke, which is worth knowing even more than a per-probe
+      // failure is.
+      try {
+        this.deps.onProbeError?.("<tick>", error);
+      } catch {
+        // The channel for reporting this is the one that just failed.
+      }
       return 0;
     } finally {
       this.ticking = false;
@@ -118,7 +171,16 @@ export class Scheduler {
         await this.runOne(probe, containers, now);
       }
     });
-    await Promise.all(workers);
+    // `allSettled`, not `all`: every `runOne` call already reports its own failure through
+    // `onProbeError` and never rejects (see its catch), so in principle nothing here ever
+    // rejects either. But `reschedule` used to sit outside that catch, and a promise that
+    // "shouldn't" reject rejecting anyway is exactly how C2 happened — `Promise.all` would
+    // abandon every other worker the instant one throws, `tick()`'s `finally` would then
+    // reset `ticking` while those workers keep writing, and a second tick could start
+    // overlapping them. `allSettled` makes that impossible structurally: a worker cannot
+    // outlive the tick that started it, regardless of what future code puts inside the
+    // loop above the try.
+    await Promise.allSettled(workers);
   }
 
   /**
@@ -164,11 +226,15 @@ export class Scheduler {
     containers: ContainerSummary[] | null,
     now: number,
   ): Promise<void> {
-    // Reschedule FIRST, in its own statement, so a probe whose runner throws does not
-    // stay due and get retried every 5 seconds forever.
-    await this.reschedule(probe, now);
-
     try {
+      // Reschedule FIRST, in its own statement, so a probe whose runner throws does not
+      // stay due and get retried every 5 seconds forever. Inside the try along with
+      // everything else below — a reschedule failure (`SQLITE_BUSY`, raised for real by a
+      // route holding a transaction open, no fault injection needed) is a per-probe
+      // failure like any other, reported through `onProbeError` rather than escaping to
+      // reject this worker in `runAll` and vanish into `tick`'s outer catch.
+      await this.reschedule(probe, now);
+
       // Through the queue too. See `serialise` for why: required for `:memory:`, free on
       // a file.
       const [app] = await this.serialise(() =>
