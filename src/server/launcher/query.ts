@@ -35,7 +35,11 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
       lastCheckedAt: probes.lastCheckedAt,
       enabled: probes.enabled,
     })
-    .from(probes);
+    .from(probes)
+    // Pinned so the in-memory join below sees a stable input order — `rollUpProbes`
+    // breaks a severity tie deterministically on its own, but an unordered select is
+    // still one more incidental thing for a future reader to have to reason past.
+    .orderBy(probes.id);
 
   const byApp = new Map<string, ProbeSnapshot[]>();
   for (const probe of allProbes) {

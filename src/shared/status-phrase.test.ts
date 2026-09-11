@@ -207,15 +207,27 @@ describe("rollUpProbes", () => {
       }
     });
 
-    it("breaks a severity tie by keeping the timestamp of whichever probe the scan met first", () => {
-      // Both probes are `down`, tied at severity 4. A stable scan order means the first
-      // one encountered wins; a later "optimisation" that reorders the scan should not be
-      // able to silently change which timestamp a tile shows.
-      const out = rollUpProbes([
-        probe({ kind: "docker", status: "down", faultClass: "app", statusSince: 111 }),
-        probe({ kind: "http_internal", status: "down", faultClass: "app", statusSince: 222 }),
-      ]);
-      expect(out.since).toBe(111);
+    it("breaks a severity tie by the older statusSince, regardless of row order", () => {
+      // Both probes are `down`, tied at severity 4. Whichever array position the caller
+      // supplies them in — unpinned, since the database select carries no ORDER BY — the
+      // longer-standing fault (the older statusSince) must be the one reported.
+      const docker = probe({ kind: "docker", status: "down", faultClass: "app", statusSince: 111 });
+      const http = probe({
+        kind: "http_internal",
+        status: "down",
+        faultClass: "app",
+        statusSince: 222,
+      });
+      expect(rollUpProbes([docker, http]).since).toBe(111);
+      expect(rollUpProbes([http, docker]).since).toBe(111);
+    });
+
+    it("breaks a tie on probeId when statusSince is also tied, for a total order", () => {
+      const a = probe({ probeId: "pa", kind: "docker", status: "down", statusSince: 500 });
+      const b = probe({ probeId: "pb", kind: "http_internal", status: "down", statusSince: 500 });
+      expect(rollUpProbes([a, b]).reason).toBe(rollUpProbes([b, a]).reason);
+      // `pa` sorts before `pb`, so the docker probe's phrase should win both ways.
+      expect(rollUpProbes([b, a]).reason).toBe("Containers not running");
     });
   });
 });

@@ -56,14 +56,37 @@ function phraseFor(worst: ProbeSnapshot, siblingIsUp: boolean): string {
  * running and reachable on the LAN, and painting the tile as down would be wrong for
  * every user standing in the house.
  */
+/**
+ * True when `candidate` should win a severity tie against `current`.
+ *
+ * Older `statusSince` first — the longer-standing fault is the one worth naming, not
+ * whichever row the caller happened to read first. `probeId` breaks a remaining tie for a
+ * total order, so two probes confirmed in the very same tick (identical `statusSince`)
+ * still resolve deterministically rather than by incidental array position.
+ */
+function isPreferredTie(candidate: ProbeSnapshot, current: ProbeSnapshot): boolean {
+  if (candidate.statusSince !== current.statusSince) {
+    if (candidate.statusSince === null) return false;
+    if (current.statusSince === null) return true;
+    return candidate.statusSince < current.statusSince;
+  }
+  return candidate.probeId < current.probeId;
+}
+
 export function rollUpProbes(probes: ProbeSnapshot[]): StatusReason {
   if (probes.length === 0) return { status: "unknown", reason: "Not checked yet", since: null };
 
   let worst = probes[0] as ProbeSnapshot;
   let worstIndex = 0;
-  for (let i = 0; i < probes.length; i++) {
+  for (let i = 1; i < probes.length; i++) {
     const probe = probes[i] as ProbeSnapshot;
-    if (SEVERITY[probe.status] > SEVERITY[worst.status]) {
+    const probeSeverity = SEVERITY[probe.status];
+    const worstSeverity = SEVERITY[worst.status];
+    // A severity tie is not resolved by keeping whichever row the caller happened to
+    // list first: nothing pins that order (see `query.ts`'s `ORDER BY`), and adoption
+    // inserting the docker probe first made the old "first wins" rule look deliberate
+    // when it was luck.
+    if (probeSeverity > worstSeverity || (probeSeverity === worstSeverity && isPreferredTie(probe, worst))) {
       worst = probe;
       worstIndex = i;
     }
