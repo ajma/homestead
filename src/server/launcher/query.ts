@@ -1,10 +1,10 @@
 import type { LauncherApp, ProbeSnapshot } from "@shared/launcher.js";
+import { rollUpProbes } from "@shared/status-phrase.js";
 import { and, eq, isNull } from "drizzle-orm";
 import type { AuthContext } from "../auth/context.js";
 import { visibleAppsWhere } from "../auth/context.js";
 import type { Db } from "../db/client.js";
 import { apps, probes } from "../db/schema.js";
-import { rollUpProbes } from "./status-phrase.js";
 
 /**
  * Two indexed selects and an in-memory join. No Docker call, no `docker compose config`
@@ -25,6 +25,7 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
   // query per tile, which is the shape this screen exists to avoid.
   const allProbes = await db
     .select({
+      id: probes.id,
       appId: probes.appId,
       kind: probes.kind,
       label: probes.label,
@@ -43,6 +44,7 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
     if (!probe.enabled) continue;
     const list = byApp.get(probe.appId) ?? [];
     list.push({
+      probeId: probe.id,
       kind: probe.kind,
       label: probe.label,
       status: probe.status,
@@ -55,7 +57,8 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
 
   return rows
     .map((row) => {
-      const { status, reason, since } = rollUpProbes(byApp.get(row.id) ?? []);
+      const appProbes = byApp.get(row.id) ?? [];
+      const { status, reason, since } = rollUpProbes(appProbes);
       // Every property explicit. Do not rewrite as a spread — that inverts the failure
       // mode so a new column leaks until someone remembers to exclude it.
       return {
@@ -70,6 +73,7 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
         status,
         reason,
         since,
+        probes: appProbes,
       };
     })
     .sort(

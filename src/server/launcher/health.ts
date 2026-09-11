@@ -1,8 +1,8 @@
 import type { AppHealth, DayBucket, HealthSignal } from "@shared/launcher.js";
+import { rollUpProbes } from "@shared/status-phrase.js";
 import { and, eq, gte, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { checkRollups, probes } from "../db/schema.js";
-import { rollUpProbes } from "./status-phrase.js";
 
 const DAY = 86_400;
 const WINDOW_DAYS = 30;
@@ -42,6 +42,7 @@ export async function appHealth(db: Db, appId: string, now: number): Promise<App
 
   const signals: HealthSignal[] = rows.map((row) => {
     const snapshot = {
+      probeId: row.id,
       kind: row.kind,
       label: row.label,
       status: row.lastStatus,

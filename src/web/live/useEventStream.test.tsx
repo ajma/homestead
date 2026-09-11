@@ -1,17 +1,27 @@
 // @vitest-environment jsdom
-import type { LauncherApp } from "@shared/launcher";
+
+import type { LauncherApp, ProbeSnapshot } from "@shared/launcher";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, waitFor } from "@testing-library/react";
 import { launcherKey } from "@web/api/launcher";
 import { useEventStream } from "@web/live/useEventStream";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // jsdom has no EventSource. This double records every instance so a test can both
-// dispatch events into the app and assert the connection was closed on unmount.
+// dispatch events into the app and assert the connection was closed on unmount. It also
+// tracks `readyState`, since a fatal (CLOSED) error and a retryable (CONNECTING) one must
+// be tell-able apart for the hook's own reconnect logic to be tested at all.
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
+
   listeners = new Map<string, Array<(e: MessageEvent) => void>>();
   closed = false;
+  readyState: number = FakeEventSource.CONNECTING;
+
   constructor(readonly url: string) {
     FakeEventSource.instances.push(this);
   }
@@ -22,12 +32,25 @@ class FakeEventSource {
   close() {
     this.closed = true;
   }
-  emit(type: string, data: unknown) {
+  // `data` is omitted for `open`/`error`, which carry none on a real EventSource.
+  emit(type: string, data?: unknown) {
+    const init = data === undefined ? {} : { data: JSON.stringify(data) };
     for (const fn of this.listeners.get(type) ?? []) {
-      fn(new MessageEvent(type, { data: JSON.stringify(data) }));
+      fn(new MessageEvent(type, init));
     }
   }
 }
+
+const probe = (over: Partial<ProbeSnapshot> = {}): ProbeSnapshot => ({
+  probeId: "docker1",
+  kind: "docker",
+  label: null,
+  status: "up",
+  faultClass: null,
+  statusSince: 1000,
+  lastCheckedAt: 1000,
+  ...over,
+});
 
 const tile = (over: Partial<LauncherApp> = {}): LauncherApp => ({
   id: "a1",
@@ -41,6 +64,7 @@ const tile = (over: Partial<LauncherApp> = {}): LauncherApp => ({
   status: "up",
   reason: "Healthy",
   since: 100,
+  probes: [],
   ...over,
 });
 
@@ -77,7 +101,9 @@ describe("useEventStream", () => {
 
   it("patches the cached tile in place instead of refetching", async () => {
     const client = new QueryClient();
-    client.setQueryData(launcherKey, [tile()]);
+    client.setQueryData(launcherKey, [
+      tile({ probes: [probe({ probeId: "p1", kind: "docker", status: "up" })] }),
+    ]);
     let fetches = 0;
     vi.stubGlobal(
       "fetch",
@@ -142,5 +168,216 @@ describe("useEventStream", () => {
     await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
     unmount();
     expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  });
+
+  it("does not let one recovering probe paint the tile up while a sibling is still down (Critical 1)", async () => {
+    // The old code wrote `payload.status` straight onto the tile. That made this exact
+    // sequence — the HTTP probe recovering while Docker was still down — jump the tile to
+    // `up` / "Healthy" and stay there, since `EventBus.publish` never re-announces an
+    // unchanged failure.
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [
+      tile({
+        status: "down",
+        reason: "Containers not running",
+        probes: [
+          probe({ probeId: "docker1", kind: "docker", status: "down", faultClass: "app" }),
+          probe({ probeId: "http1", kind: "http_internal", status: "down", faultClass: "app" }),
+        ],
+      }),
+    ]);
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    act(() => {
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "a1",
+        probeId: "http1",
+        status: "up",
+        faultClass: null,
+      });
+    });
+    const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
+    expect(after?.status).toBe("down");
+    expect(after?.reason).toBe("Containers not running");
+  });
+
+  it("reaches up/Healthy once every probe has actually recovered", async () => {
+    // Without this, the Critical 1 test above would be satisfied by a tile that simply
+    // never updates at all.
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [
+      tile({
+        status: "down",
+        reason: "Containers not running",
+        probes: [
+          probe({ probeId: "docker1", kind: "docker", status: "down", faultClass: "app" }),
+          probe({ probeId: "http1", kind: "http_internal", status: "down", faultClass: "app" }),
+        ],
+      }),
+    ]);
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    act(() => {
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "a1",
+        probeId: "docker1",
+        status: "up",
+        faultClass: null,
+      });
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "a1",
+        probeId: "http1",
+        status: "up",
+        faultClass: null,
+      });
+    });
+    const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
+    expect(after?.status).toBe("up");
+    expect(after?.reason).toBe("Healthy");
+  });
+
+  it("matches the server's phrase for a failing tunnel over an otherwise healthy app", async () => {
+    // The pair the review named: the old client's local `reasonFor` had no way to produce
+    // this phrase and instead reported `down` / "Containers not running".
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [
+      tile({
+        probes: [
+          probe({ probeId: "docker1", kind: "docker", status: "up" }),
+          probe({ probeId: "ext1", kind: "http_external", status: "up" }),
+        ],
+      }),
+    ]);
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    act(() => {
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "a1",
+        probeId: "ext1",
+        status: "down",
+        faultClass: "network",
+      });
+    });
+    const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
+    expect(after?.status).toBe("degraded");
+    expect(after?.reason).toBe("Tunnel unreachable — app is fine");
+  });
+
+  it("does not move `since` when a non-worst probe reports", async () => {
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [
+      tile({
+        status: "down",
+        reason: "Containers not running",
+        since: 1000,
+        probes: [
+          probe({
+            probeId: "docker1",
+            kind: "docker",
+            status: "down",
+            faultClass: "app",
+            statusSince: 1000,
+          }),
+          probe({
+            probeId: "http1",
+            kind: "http_internal",
+            status: "up",
+            statusSince: 900,
+          }),
+        ],
+      }),
+    ]);
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    act(() => {
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "a1",
+        probeId: "http1",
+        status: "degraded",
+        faultClass: "app",
+      });
+    });
+    const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
+    expect(after?.status).toBe("down");
+    expect(after?.since).toBe(1000);
+  });
+
+  it("invalidates the launcher query on a reconnect, but not on the very first open", async () => {
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [tile()]);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    const source = FakeEventSource.instances[0];
+
+    const invalidatedLauncher = () =>
+      invalidateSpy.mock.calls.some(([opts]) => opts?.queryKey === launcherKey);
+
+    act(() => {
+      source?.emit("open");
+    });
+    expect(invalidatedLauncher()).toBe(false);
+
+    act(() => {
+      source?.emit("open");
+    });
+    expect(invalidatedLauncher()).toBe(true);
+  });
+
+  it("opens a new EventSource after a fatal (CLOSED) error, once the backoff elapses", () => {
+    vi.useFakeTimers();
+    try {
+      const client = new QueryClient();
+      mount(client);
+      expect(FakeEventSource.instances.length).toBe(1);
+      const first = FakeEventSource.instances[0];
+      if (!first) throw new Error("no instance was created");
+
+      first.readyState = FakeEventSource.CLOSED;
+      act(() => {
+        first.emit("error");
+      });
+      // A retry that ignored the backoff entirely would show up here already.
+      expect(FakeEventSource.instances.length).toBe(1);
+
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(FakeEventSource.instances.length).toBe(2);
+      expect(FakeEventSource.instances[1]?.url).toBe("/api/events");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the pending reconnect timer on unmount, leaking no Timeout handle", () => {
+    const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+
+    const client = new QueryClient();
+    const { unmount } = mount(client);
+    const first = FakeEventSource.instances[0];
+    if (!first) throw new Error("no instance was created");
+
+    first.readyState = FakeEventSource.CLOSED;
+    act(() => {
+      first.emit("error");
+    });
+    unmount();
+
+    const after = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    expect(after).toBe(before);
+  });
+
+  it("keeps exactly one live connection when StrictMode double-invokes the effect", () => {
+    const client = new QueryClient();
+    render(
+      <StrictMode>
+        <QueryClientProvider client={client}>
+          <Harness />
+        </QueryClientProvider>
+      </StrictMode>,
+    );
+    const live = FakeEventSource.instances.filter((s) => !s.closed);
+    expect(live.length).toBe(1);
   });
 });

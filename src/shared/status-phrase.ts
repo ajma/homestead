@@ -1,5 +1,5 @@
-import type { ProbeSnapshot, StatusReason } from "@shared/launcher.js";
-import type { AppStatus } from "@shared/types.js";
+import type { ProbeSnapshot, StatusReason } from "./launcher.js";
+import type { AppStatus } from "./types.js";
 
 /**
  * Worst-wins ordering. `unknown` outranks `up` because a probe we have not heard from

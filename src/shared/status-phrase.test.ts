@@ -1,8 +1,9 @@
-import { rollUpProbes } from "@server/launcher/status-phrase";
 import type { ProbeSnapshot } from "@shared/launcher";
+import { rollUpProbes } from "@shared/status-phrase";
 import { describe, expect, it } from "vitest";
 
 const probe = (over: Partial<ProbeSnapshot>): ProbeSnapshot => ({
+  probeId: "p1",
   kind: "docker",
   label: null,
   status: "up",

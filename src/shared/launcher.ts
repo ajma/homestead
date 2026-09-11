@@ -1,7 +1,15 @@
 import type { AppStatus, FaultClass, ProbeKind } from "./types.js";
 
-/** One probe's current state, as the launcher sees it. Never carries `lastDetail`. */
+/**
+ * One probe's current state, as the launcher sees it. Never carries `lastDetail`.
+ *
+ * `probeId` is the probe's own row id, not derived from `kind` — an app can only have one
+ * probe of each kind today, but the id is what an SSE `status` event carries, and matching
+ * on it (rather than on `kind`, which the event does not even include) is what lets the
+ * client find the right entry in `LauncherApp.probes` to update.
+ */
 export type ProbeSnapshot = {
+  probeId: string;
   kind: ProbeKind;
   label: string | null;
   status: AppStatus;
@@ -30,6 +38,13 @@ export type LauncherApp = {
   status: AppStatus;
   reason: string;
   since: number | null;
+  /**
+   * Every enabled probe's current state. The client needs these to apply a single
+   * probe's SSE event and re-derive the app's status the way the server would — without
+   * them it can only overwrite, which made one probe recovering paint a tile green while
+   * another was still down.
+   */
+  probes: ProbeSnapshot[];
 };
 
 /** One probe's row in the health panel. Never carries raw probe detail. */
