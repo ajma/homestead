@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { LauncherApp } from "@shared/launcher";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { launcherKey } from "@web/api/launcher";
 import { Launcher } from "@web/routes/Launcher";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -99,7 +99,7 @@ describe("Launcher", () => {
 
   it("shows an error state instead of an empty grid when the fetch fails", async () => {
     // An empty grid and a broken server look identical to a user, and one of them is
-    // something they can act on.
+    // something they can act on. This is the case with nothing cached: `isLoadingError`.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(JSON.stringify({ error: "boom" }), { status: 500 })),
@@ -108,9 +108,50 @@ describe("Launcher", () => {
     await waitFor(() => expect(screen.getByText(/Could not load/)).toBeTruthy());
   });
 
-  it("opens the health panel for the tile whose chip was tapped", async () => {
-    mount(client([tile({ id: "a1", displayName: "Jellyfin" })]));
-    fireEvent.click(screen.getByRole("button", { name: /Show health details/ }));
-    await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+  it("keeps showing the cached grid, with a stale note, when a background refetch fails", async () => {
+    // The reconnect path makes this common, not exotic: the event stream invalidates
+    // this query on every reconnect, and the server closes streams every 15 minutes and
+    // on every user edit. TanStack Query keeps `data` across a failed refetch — the
+    // grid must survive that, unlike a genuine `isLoadingError` with nothing cached.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "boom" }), { status: 500 })),
+    );
+    mount(client([tile({ displayName: "Cached App" })]));
+
+    await waitFor(() => expect(screen.getByText(/couldn.t refresh/i)).toBeTruthy());
+    expect(screen.getByText("Cached App")).toBeTruthy();
+    expect(screen.queryByText(/Could not load your apps/)).toBeNull();
+  });
+
+  it("does not clear what the user was typing when a background refetch fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "boom" }), { status: 500 })),
+    );
+    mount(client([tile({ displayName: "Cached App" })]));
+
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "cach" } });
+    await waitFor(() => expect(screen.getByText(/couldn.t refresh/i)).toBeTruthy());
+    expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("cach");
+    expect(screen.getByText("Cached App")).toBeTruthy();
+  });
+
+  it("opens the health panel for the tile whose chip was tapped, not just any app", async () => {
+    // Mounting a single app cannot fail for the right reason: there is nothing else the
+    // panel could have opened. Two apps, and asserting on which one, closes that gap.
+    mount(
+      client([
+        tile({ id: "a1", displayName: "Jellyfin", category: "Media" }),
+        tile({ id: "a2", displayName: "Gitea", category: "Dev" }),
+      ]),
+    );
+
+    const giteaLink = screen.getByRole("link", { name: /Gitea/ });
+    const giteaCard = giteaLink.parentElement as HTMLElement;
+    fireEvent.click(within(giteaCard).getByRole("button", { name: /Show health details/ }));
+
+    await waitFor(() => expect(screen.getByRole("dialog", { name: /Gitea/ })).toBeTruthy());
+    expect(screen.queryByRole("dialog", { name: /Jellyfin/ })).toBeNull();
   });
 });

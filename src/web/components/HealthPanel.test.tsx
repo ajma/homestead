@@ -85,6 +85,61 @@ describe("HealthPanel", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("moves focus into the dialog when it opens", async () => {
+    mount();
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+  });
+
+  it("keeps Tab from escaping the dialog, wrapping from the last focusable element to the first", async () => {
+    mount();
+    const closeButton = await screen.findByRole("button", { name: "Close" });
+    // The close button is the only focusable descendant here, so it is both the first
+    // and the last stop — Tab from it must not walk out to whatever is behind the panel.
+    closeButton.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(closeButton);
+  });
+
+  it("keeps Shift+Tab from escaping the dialog, wrapping from the first focusable element to the last", async () => {
+    mount();
+    const closeButton = await screen.findByRole("button", { name: "Close" });
+    closeButton.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(closeButton);
+  });
+
+  it("restores focus to whatever opened it once the panel closes", async () => {
+    const opener = document.createElement("button");
+    opener.textContent = "Open health";
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { unmount } = render(
+      <QueryClientProvider client={client}>
+        <HealthPanel appId="a1" appName="Jellyfin" onClose={() => {}} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("dialog")));
+
+    unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it("closes when the close button is clicked", async () => {
+    const onClose = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <HealthPanel appId="a1" appName="Jellyfin" onClose={onClose} />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("does not close when a click inside the panel bubbles to the backdrop", async () => {
     const onClose = vi.fn();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

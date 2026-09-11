@@ -16,7 +16,7 @@ function groupByCategory(apps: LauncherApp[]): Array<[string, LauncherApp[]]> {
 }
 
 export function Launcher() {
-  const { data, isError, isPending } = useLauncherApps();
+  const { data, isLoadingError, isRefetchError, isPending } = useLauncherApps();
   const [query, setQuery] = useState("");
   const [openApp, setOpenApp] = useState<LauncherApp | null>(null);
 
@@ -35,7 +35,14 @@ export function Launcher() {
   // `isPending` is only true with nothing cached. With cached data we render it and let
   // the background refetch correct it — stale status beats a spinner.
   if (isPending) return <p className="p-6 text-sm text-slate-500">Loading apps…</p>;
-  if (isError) {
+  // `isLoadingError` means there is no data to fall back on — that's the only time an
+  // error screen is allowed to replace the grid. TanStack Query keeps the last good
+  // `data` across a failed *refetch* (`isRefetchError`), and the reconnect path makes
+  // that refetch common: the event stream invalidates this query on every reconnect,
+  // and the server closes streams every 15 minutes and on every user edit. Blanking a
+  // working launcher on one of those failures would throw away a populated grid — and
+  // whatever the user was mid-way through typing into search — for a transient blip.
+  if (isLoadingError) {
     return (
       <p className="p-6 text-sm text-rose-600 dark:text-rose-400">
         Could not load your apps. Homestead may be restarting.
@@ -53,6 +60,12 @@ export function Launcher() {
         aria-label="Search apps"
         className="mb-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-900"
       />
+
+      {isRefetchError && (
+        <p className="mb-4 text-xs text-amber-600 dark:text-amber-400">
+          Showing the last known status — Homestead couldn’t refresh just now.
+        </p>
+      )}
 
       {(data ?? []).length === 0 && (
         <p className="text-sm text-slate-500">No apps yet. An admin can adopt one from disk.</p>

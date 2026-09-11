@@ -3,6 +3,27 @@ import type { DayBucket } from "@shared/launcher";
 const WIDTH = 240;
 const HEIGHT = 32;
 
+// UTC, not the viewer's local zone: `dayStart` is a UTC day boundary, and formatting it
+// in a local zone could shift the printed date across midnight and mislabel the bar.
+const DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});
+
+/**
+ * The visual encoding (fill colour, bar height, hollow-vs-filled) distinguishes no-data
+ * from fully-down from up, but only for a sighted viewer. This gives a screen reader
+ * user the same distinction per bar, not just the 30-day aggregate.
+ */
+function dayLabel(day: DayBucket): string {
+  const date = DAY_FORMATTER.format(new Date(day.dayStart * 1000));
+  if (day.probeCount === 0) return `${date}: no data`;
+  const upPercent = Math.round(day.upRatio * 100);
+  if (upPercent === 0) return `${date}: down all day`;
+  return `${date}: ${upPercent}% up`;
+}
+
 /**
  * Hand-rolled SVG rather than a charting dependency: 30 bars is not worth 40 KB, and
  * the constraint for this phase is no new dependencies.
@@ -56,7 +77,9 @@ export function Sparkline({ history }: { history: DayBucket[] }) {
               fill="none"
               stroke="#94a3b8"
               strokeWidth={1}
-            />
+            >
+              <title>{dayLabel(day)}</title>
+            </rect>
           );
         }
 
@@ -73,7 +96,9 @@ export function Sparkline({ history }: { history: DayBucket[] }) {
             width={width}
             height={height}
             fill={fill}
-          />
+          >
+            <title>{dayLabel(day)}</title>
+          </rect>
         );
       })}
     </svg>

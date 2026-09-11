@@ -81,4 +81,20 @@ describe("Sparkline", () => {
     expect(none?.getAttribute("fill")).toBe("none");
     expect(up?.getAttribute("fill")).not.toBe("none");
   });
+
+  it("gives a no-data day and a fully-down day distinct accessible text, not just distinct colour", () => {
+    // The aggregate summary alone cannot tell a screen reader user these two apart —
+    // both average to 0% up. Each bar needs its own label.
+    const { container } = render(<Sparkline history={[noData(0), day(1, 0, 1)]} />);
+    const [none, down] = [...container.querySelectorAll("rect title")].map((t) => t.textContent);
+    expect(none).toMatch(/no data/);
+    expect(down).toMatch(/down all day/);
+    expect(none).not.toBe(down);
+  });
+
+  it("names an up day's per-bar label with its percentage, distinct from the no-data and down labels", () => {
+    const { container } = render(<Sparkline history={[day(0, 0.96, 0)]} />);
+    const [title] = [...container.querySelectorAll("rect title")].map((t) => t.textContent);
+    expect(title).toMatch(/96% up/);
+  });
 });
