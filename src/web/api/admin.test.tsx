@@ -1,7 +1,17 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
-import { adminAppsKey, containersKey, useAdminApps, useContainers, useScan } from "@web/api/admin";
+import {
+  adminAppKey,
+  adminAppsKey,
+  containersKey,
+  imagesKey,
+  jobsKey,
+  probesKey,
+  useAdminApps,
+  useContainers,
+  useScan,
+} from "@web/api/admin";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -63,5 +73,26 @@ describe("admin query hooks", () => {
     const { result } = renderHook(() => useAdminApps(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("/api/apps");
+  });
+});
+
+describe("cache key prefix relationships", () => {
+  // TanStack matches by prefix. These two assertions pin which invalidations fan out and
+  // which do not — the difference between refreshing one app's tabs and refetching every
+  // open app's containers because a different app was adopted.
+  const isPrefixOf = (a: readonly unknown[], b: readonly unknown[]) =>
+    a.length <= b.length && a.every((part, i) => part === b[i]);
+
+  it("does not let an app-list invalidation reach another app's subviews", () => {
+    expect(isPrefixOf(adminAppsKey, containersKey("a1"))).toBe(false);
+    expect(isPrefixOf(adminAppsKey, probesKey("a1"))).toBe(false);
+    expect(isPrefixOf(adminAppsKey, jobsKey("a1"))).toBe(false);
+    expect(isPrefixOf(adminAppsKey, imagesKey("a1"))).toBe(false);
+  });
+
+  it("does let a single app's invalidation reach that app's own subviews", () => {
+    // Deliberate: after a lifecycle action the containers really have changed.
+    expect(isPrefixOf(adminAppKey("a1"), containersKey("a1"))).toBe(true);
+    expect(isPrefixOf(adminAppKey("a1"), containersKey("a2"))).toBe(false);
   });
 });

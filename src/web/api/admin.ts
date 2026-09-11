@@ -18,7 +18,22 @@ import { apiFetch } from "@web/api/client";
  * launcher would start depending on Docker by accident, which is the single thing its
  * design exists to prevent.
  */
-export const adminAppsKey = ["admin", "apps"] as const;
+/**
+ * `"list"` rather than bare `["admin", "apps"]`, because TanStack's `invalidateQueries`
+ * matches by prefix unless told otherwise. `["admin", "apps"]` also matches
+ * `["admin", "apps", <id>, "containers"]` and every other per-app subview, so
+ * invalidating the list after adopting one app would force-refetch the containers, jobs,
+ * images and probes of every app whose page happens to be open — several Docker round
+ * trips for a change none of them saw.
+ */
+export const adminAppsKey = ["admin", "apps", "list"] as const;
+
+/**
+ * This one DOES prefix-match its own subviews, deliberately: `["admin", "apps", id]`
+ * covers `["admin", "apps", id, "containers"]` and friends. After a lifecycle action on
+ * an app, its containers really have changed, so one invalidation refreshing that app's
+ * tabs is the behaviour we want.
+ */
 export const adminAppKey = (id: string) => ["admin", "apps", id] as const;
 export const containersKey = (id: string) => ["admin", "apps", id, "containers"] as const;
 export const jobsKey = (id: string) => ["admin", "apps", id, "jobs"] as const;
