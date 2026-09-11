@@ -809,6 +809,11 @@ git commit -m "Serve launcher tiles from the denormalised probe columns, never f
 
 ### Task 4: `GET /api/launcher/:appId/health` — three signals and a sparkline
 
+> **Amended after Task 4's review.** `DayBucket` below shows the original count-based
+> shape; it was changed to per-probe-averaged ratios because pooling counts made a day
+> read as whichever probe polled fastest. See `task-4-fix-brief.md` in the SDD workspace.
+> Task 11's Sparkline code in this document already reflects the new shape.
+
 Spec §8: *"The status chip is a separate tap target opening a bottom sheet (mobile) or popover (desktop) with the three signals and a 30-day sparkline."*
 
 **Ruling 5 applies: this endpoint never returns `lastDetail`, for any role.** An HTTP probe's detail can carry response-body fragments, and a viewer is on this endpoint. Phase 1C's review confirmed `lastDetail` currently reaches no viewer payload; keep it that way.
@@ -855,8 +860,20 @@ export type HealthSignal = {
   latencyMs: number | null;
 };
 
-/** One day of the sparkline. `dayStart` is epoch seconds at UTC midnight. */
-export type DayBucket = { dayStart: number; up: number; degraded: number; down: number };
+/**
+ * One day of the sparkline. `dayStart` is epoch seconds at UTC midnight. Ratios in 0..1,
+ * each the mean across the app's probes of that probe's own share for the day — NOT
+ * pooled counts. See the Task 4 fix brief: pooling made a day read as whichever probe
+ * polled fastest. `probeCount` of 0 means no data, which a renderer must distinguish
+ * from a healthy day since the ratios are 0 in both cases.
+ */
+export type DayBucket = {
+  dayStart: number;
+  upRatio: number;
+  degradedRatio: number;
+  downRatio: number;
+  probeCount: number;
+};
 
 export type AppHealth = { appId: string; signals: HealthSignal[]; history: DayBucket[] };
 ```
@@ -2849,13 +2866,17 @@ import { render } from "@testing-library/react";
 import { Sparkline } from "@web/components/Sparkline";
 import { describe, expect, it } from "vitest";
 
-const day = (i: number, up: number, down: number): DayBucket => ({
-  dayStart: i * 86_400, up, degraded: 0, down,
+const day = (i: number, upRatio: number, downRatio: number): DayBucket => ({
+  dayStart: i * 86_400, upRatio, degradedRatio: 0, downRatio, probeCount: 1,
+});
+/** A day nobody measured. Ratios are 0 here too, which is exactly the trap. */
+const noData = (i: number): DayBucket => ({
+  dayStart: i * 86_400, upRatio: 0, degradedRatio: 0, downRatio: 0, probeCount: 0,
 });
 
 describe("Sparkline", () => {
   it("draws one bar per day", () => {
-    const history = Array.from({ length: 30 }, (_, i) => day(i, 24, 0));
+    const history = Array.from({ length: 30 }, (_, i) => day(i, 1, 0));
     const { container } = render(<Sparkline history={history} />);
     expect(container.querySelectorAll("rect").length).toBe(30);
   });
@@ -2866,21 +2887,29 @@ describe("Sparkline", () => {
   });
 
   it("survives a day with no checks without producing NaN coordinates", () => {
-    // A zero-total day is the normal case for a probe added last week, and NaN in a
+    // A no-data day is the normal case for a probe added last week, and NaN in a
     // `height` attribute silently renders nothing at all.
-    const history = [day(0, 0, 0), day(1, 10, 2)];
+    const history = [noData(0), day(1, 0.8, 0.2)];
     const { container } = render(<Sparkline history={history} />);
     expect(container.innerHTML).not.toContain("NaN");
   });
 
+  it("paints a day nobody measured differently from a day that was fully down", () => {
+    // Both have upRatio 0. Only `probeCount` tells them apart, and conflating them
+    // reports an outage for every day before a probe existed.
+    const { container } = render(<Sparkline history={[noData(0), day(1, 0, 1)]} />);
+    const [none, down] = [...container.querySelectorAll("rect")];
+    expect(none?.getAttribute("fill")).not.toBe(down?.getAttribute("fill"));
+  });
+
   it("gives a fully-down day a visibly different bar from a fully-up day", () => {
-    const { container } = render(<Sparkline history={[day(0, 24, 0), day(1, 0, 24)]} />);
+    const { container } = render(<Sparkline history={[day(0, 1, 0), day(1, 0, 1)]} />);
     const [first, second] = [...container.querySelectorAll("rect")];
     expect(first?.getAttribute("fill")).not.toBe(second?.getAttribute("fill"));
   });
 
   it("carries a text summary, since a bar chart alone is not accessible", () => {
-    const { container } = render(<Sparkline history={[day(0, 24, 0)]} />);
+    const { container } = render(<Sparkline history={[day(0, 1, 0)]} />);
     expect(container.querySelector("title")?.textContent).toMatch(/%/);
   });
 });
@@ -2909,13 +2938,13 @@ export function Sparkline({ history }: { history: DayBucket[] }) {
   if (history.length === 0) return null;
 
   const barWidth = WIDTH / history.length;
-  let totalUp = 0;
-  let totalChecks = 0;
-  for (const day of history) {
-    totalUp += day.up;
-    totalChecks += day.up + day.degraded + day.down;
-  }
-  const uptime = totalChecks === 0 ? null : Math.round((totalUp / totalChecks) * 100);
+  // Average the daily ratios over the days that have data. Weighting by sample count
+  // would reintroduce the bias the ratios exist to remove.
+  const withData = history.filter((day) => day.probeCount > 0);
+  const uptime =
+    withData.length === 0
+      ? null
+      : Math.round((withData.reduce((sum, day) => sum + day.upRatio, 0) / withData.length) * 100);
 
   return (
     <svg
@@ -2926,12 +2955,18 @@ export function Sparkline({ history }: { history: DayBucket[] }) {
     >
       <title>{uptime === null ? "No history yet" : `${uptime}% up over 30 days`}</title>
       {history.map((day, index) => {
-        const total = day.up + day.degraded + day.down;
-        // Guard the divide before it happens; NaN in a height attribute renders nothing
-        // and looks exactly like a working empty chart.
-        const downShare = total === 0 ? 0 : (day.degraded + day.down) / total;
+        // `probeCount === 0` is the no-data case and must stay visually distinct: the
+        // ratios are 0 there too, so testing the ratios alone would paint a day nobody
+        // measured the same as a day that was fully down.
+        const downShare = day.degradedRatio + day.downRatio;
         const fill =
-          total === 0 ? "#cbd5e1" : downShare > 0.5 ? "#f43f5e" : downShare > 0 ? "#f59e0b" : "#10b981";
+          day.probeCount === 0
+            ? "#cbd5e1"
+            : downShare > 0.5
+              ? "#f43f5e"
+              : downShare > 0
+                ? "#f59e0b"
+                : "#10b981";
         return (
           <rect
             key={day.dayStart}
