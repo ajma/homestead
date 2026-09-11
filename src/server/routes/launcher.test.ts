@@ -100,6 +100,20 @@ describe("GET /api/launcher", () => {
     const { app } = await seeded();
     expect((await app.inject({ method: "GET", url: "/api/launcher" })).statusCode).toBe(401);
   });
+
+  it("ignores a disabled probe rather than pinning the tile to its last status", async () => {
+    // A disabled probe is not evidence of anything — the comment on query.ts says so —
+    // but nothing bound that until now: deleting the filter left the whole suite green.
+    const { app, cookie, id } = await seeded();
+    await app.deps.db
+      .update(probes)
+      .set({ lastStatus: "down", lastFaultClass: "app", statusSince: 111, enabled: false })
+      .where(eq(probes.appId, id));
+    const [tile] = (
+      await app.inject({ method: "GET", url: "/api/launcher", headers: { cookie } })
+    ).json().apps;
+    expect(tile).toMatchObject({ status: "unknown", reason: "Not checked yet" });
+  });
 });
 
 describe("GET /api/launcher/:appId/health", () => {
@@ -138,6 +152,28 @@ describe("GET /api/launcher/:appId/health", () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error).toBe("not_found");
+  });
+
+  it("404s for an app hidden from the launcher, so the two routes agree on what 'hidden' means", async () => {
+    const { app, cookie, id } = await seeded();
+    await app.deps.db.update(apps).set({ showOnLauncher: false }).where(eq(apps.id, id));
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/launcher/${id}/health`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("404s for an archived app", async () => {
+    const { app, cookie, id } = await seeded();
+    await app.deps.db.update(apps).set({ archivedAt: 1 }).where(eq(apps.id, id));
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/launcher/${id}/health`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(404);
   });
 });
 

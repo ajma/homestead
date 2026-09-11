@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { inScope, requireCapability } from "../auth/context.js";
@@ -22,7 +22,13 @@ export async function launcherRoutes(app: FastifyInstance): Promise<void> {
     // an app they cannot see exists. This mirrors what the probe routes already do.
     if (!inScope(ctx, appId)) return reply.code(404).send({ error: "not_found" });
 
-    const [row] = await db.select({ id: apps.id }).from(apps).where(eq(apps.id, appId));
+    // Same filters `launcherApps` applies for the grid: a hidden or archived app is not
+    // on the launcher, and this route should not disagree about what "on the launcher"
+    // means just because it looks the app up directly by id instead of listing them all.
+    const [row] = await db
+      .select({ id: apps.id })
+      .from(apps)
+      .where(and(eq(apps.id, appId), eq(apps.showOnLauncher, true), isNull(apps.archivedAt)));
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     return appHealth(db, appId, Math.floor(Date.now() / 1000));
