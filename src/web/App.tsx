@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useSession } from "@web/auth/useSession";
+import { AdminApps } from "@web/routes/AdminApps";
 import { AppLayout } from "@web/routes/AppLayout";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
@@ -22,10 +23,7 @@ function Routed() {
     <Routes>
       <Route element={<AppLayout me={me} />}>
         <Route path="/" element={<Launcher />} />
-        <Route
-          path="/apps/*"
-          element={isAdmin ? <Placeholder title="Manage apps" /> : <Navigate to="/" replace />}
-        />
+        <Route path="/apps" element={isAdmin ? <AdminApps /> : <Navigate to="/" replace />} />
         <Route
           path="/settings/*"
           element={isAdmin ? <Placeholder title="Settings" /> : <Navigate to="/" replace />}
