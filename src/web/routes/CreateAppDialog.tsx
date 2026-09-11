@@ -13,29 +13,44 @@ import { useState } from "react";
 const DIRECTORY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
+ * `createBody`'s `directory` cap in `src/server/routes/apps.ts` — that zod schema is the
+ * source of truth, this is just a mirror so the client can complain (or, for a suggested
+ * slug, quietly fit within it) before a round trip.
+ */
+const DIRECTORY_MAX_LENGTH = 64;
+
+/**
  * Mirrors a display name into a directory suggestion: lowercase, runs of anything other
- * than a letter or digit collapsed to one hyphen, leading/trailing hyphens trimmed.
+ * than a letter or digit collapsed to one hyphen, leading/trailing hyphens trimmed, then
+ * truncated to `DIRECTORY_MAX_LENGTH`. Truncating here — rather than refusing the result —
+ * is deliberate: the user did not type this string, so silently fitting it is kinder than
+ * an error about text they never chose.
  */
 function slugify(name: string): string {
   return name
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(/^-+|-+$/g, "")
+    .slice(0, DIRECTORY_MAX_LENGTH);
 }
 
 /**
  * Maps `POST /api/apps`'s error slugs to sentences a user can act on. Anything
  * unrecognised still falls back to a generic line plus the slug itself, so a new server
  * error is diagnosable from the screen rather than silently swallowed.
+ *
+ * `ApiError` (thrown by `apiFetch` for any non-2xx response, per `src/web/api/client.ts`)
+ * is the rejected-request case: the server was reachable and said no. Anything else
+ * reaching the mutation's `onError` — a plain `fetch` rejection — means the request never
+ * got a response at all, which on a NAS is usually the box going away. Those need
+ * different words: one means "try again", the other means "change something".
  */
 function errorMessage(error: unknown): string {
-  if (
-    error instanceof ApiError &&
-    error.body !== null &&
-    typeof error.body === "object" &&
-    "error" in error.body
-  ) {
+  if (!(error instanceof ApiError)) {
+    return "Could not reach the server. Check the network and try again.";
+  }
+  if (error.body !== null && typeof error.body === "object" && "error" in error.body) {
     const slug = String((error.body as { error: unknown }).error);
     if (slug === "directory_exists") return "A folder with that name already exists.";
     return `Something went wrong creating the app (${slug}).`;
@@ -102,6 +117,10 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
   }
 
   function handleCreate() {
+    if (directory.length > DIRECTORY_MAX_LENGTH) {
+      setError(`Directory must be ${DIRECTORY_MAX_LENGTH} characters or fewer.`);
+      return;
+    }
     if (!DIRECTORY_PATTERN.test(directory)) {
       setError("Directory must be a single folder name.");
       return;
