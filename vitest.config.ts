@@ -9,5 +9,9 @@ export default defineConfig({
       "@web": fileURLToPath(new URL("./src/web", import.meta.url)),
     },
   },
-  test: { globals: true, environment: "node", include: ["src/**/*.test.ts"] },
+  test: {
+    globals: true,
+    environment: "node",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  },
 });
