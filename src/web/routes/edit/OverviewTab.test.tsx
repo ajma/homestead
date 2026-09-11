@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { launcherKey } from "@web/api/launcher";
 import type { EditAppContext } from "@web/routes/EditApp";
@@ -145,14 +145,17 @@ describe("OverviewTab", () => {
     expect((screen.getByLabelText(/Show on launcher/) as HTMLInputElement).checked).toBe(false);
   });
 
-  it("does not delete when the confirmation is cancelled", () => {
+  it("names the app in the delete confirmation and does not delete when cancelled", () => {
     ok(app);
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     mount();
 
     fireEvent.click(screen.getByRole("button", { name: /Delete app/ }));
 
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Jellyfin"));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/Jellyfin/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -161,15 +164,99 @@ describe("OverviewTab", () => {
       "fetch",
       vi.fn(async () => new Response(null, { status: 204 })),
     );
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     mount();
 
     fireEvent.click(screen.getByRole("button", { name: /Delete app/ }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(fetch).toHaveBeenCalled());
     const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
     expect(String(url)).toContain("/api/apps/a1");
     expect(init.method).toBe("DELETE");
     await waitFor(() => expect(screen.getByText("APPS LIST")).toBeTruthy());
+  });
+
+  it("clears the description to null rather than sending an empty string", async () => {
+    ok(app);
+    mount();
+
+    fireEvent.change(screen.getByLabelText(/Description/), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ description: null });
+  });
+
+  it("sends nothing when the description is edited and then reverted", () => {
+    ok(app);
+    mount();
+
+    fireEvent.change(screen.getByLabelText(/Description/), {
+      target: { value: "Temporary text" },
+    });
+    fireEvent.change(screen.getByLabelText(/Description/), { target: { value: "Media server" } });
+
+    expect(screen.getByRole("button", { name: /^Save$/ }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("clears the category to null rather than sending an empty string", async () => {
+    ok(app);
+    mount();
+
+    fireEvent.change(screen.getByLabelText(/Category/), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ category: null });
+  });
+
+  it("sends nothing when the category is edited and then reverted", () => {
+    ok(app);
+    mount();
+
+    fireEvent.change(screen.getByLabelText(/Category/), { target: { value: "Temporary" } });
+    fireEvent.change(screen.getByLabelText(/Category/), { target: { value: "Media" } });
+
+    expect(screen.getByRole("button", { name: /^Save$/ }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("clears the icon to null rather than leaving the field unset", async () => {
+    ok(app);
+    mount({ ...app, iconRef: "jellyfin" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Use a letter tile/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ iconRef: null });
+  });
+
+  it("sends nothing when the icon is cleared and then set back to the original", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("/api/icons/search")) {
+          return new Response(JSON.stringify({ icons: [{ slug: "jellyfin", aliases: [] }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(app), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    mount({ ...app, iconRef: "jellyfin" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Use a letter tile/ }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "jelly" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /^jellyfin$/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /^jellyfin$/ }));
+
+    expect(screen.getByRole("button", { name: /^Save$/ }).hasAttribute("disabled")).toBe(true);
   });
 });

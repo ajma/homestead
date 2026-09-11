@@ -2,6 +2,7 @@ import type { AdminApp } from "@shared/dto";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { apiFetch } from "@web/api/client";
+import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { IconPicker } from "@web/components/IconPicker";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { useState } from "react";
@@ -85,6 +86,7 @@ export function OverviewTab() {
   // removed).
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const patch = buildPatch(app, form);
   const dirty = Object.keys(patch).length > 0;
@@ -122,14 +124,7 @@ export function OverviewTab() {
     });
   }
 
-  function handleDelete() {
-    if (deleting) return;
-    // Destructive and unrecoverable — the route deletes the row outright, and unlike the
-    // compose file or containers, nothing about the app record survives on disk to adopt
-    // back. Naming it in the prompt is what keeps a housemate's rapid-fire clicking from
-    // taking out the wrong tile.
-    if (!window.confirm(`Delete ${app.displayName}? This cannot be undone.`)) return;
-
+  function handleDeleteConfirmed() {
     setDeleting(true);
     setDeleteError(null);
 
@@ -247,13 +242,24 @@ export function OverviewTab() {
         )}
         <button
           type="button"
-          onClick={handleDelete}
+          onClick={() => setConfirmingDelete(true)}
           disabled={deleting}
           className="mt-3 rounded-lg border border-rose-300 px-3 py-2 text-sm text-rose-700 disabled:opacity-50 dark:border-rose-800 dark:text-rose-400"
         >
           Delete app
         </button>
       </div>
+
+      {confirmingDelete && (
+        <ConfirmDialog
+          title="Delete app"
+          message={`Delete ${app.displayName}? This cannot be undone.`}
+          confirmLabel="Delete"
+          destructive
+          onConfirm={handleDeleteConfirmed}
+          onClose={() => setConfirmingDelete(false)}
+        />
+      )}
     </div>
   );
 }
