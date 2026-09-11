@@ -2,6 +2,7 @@ import type { LauncherApp } from "@shared/launcher";
 import { rollUpProbes } from "@shared/status-phrase";
 import type { AppStatus, FaultClass } from "@shared/types";
 import { useQueryClient } from "@tanstack/react-query";
+import { adminAppKey } from "@web/api/admin";
 import { healthKey, launcherKey } from "@web/api/launcher";
 import { recordPatch } from "@web/live/sse-patch-store";
 import { useEffect } from "react";
@@ -12,6 +13,8 @@ export type StatusEvent = {
   status: AppStatus;
   faultClass: FaultClass | null;
 };
+
+export type AppChangedEvent = { appId: string };
 
 /**
  * Backoff for a reconnect this hook initiates itself (see the `error` handler below).
@@ -124,6 +127,32 @@ export function useEventStream(): void {
       void queryClient.invalidateQueries({ queryKey: healthKey(payload.appId) });
     };
 
+    /**
+     * A probe was created, deleted, or had `enabled` flipped — not a status transition,
+     * which is why it arrives on its own event name rather than through `onStatus`.
+     *
+     * Invalidating rather than patching is deliberate, unlike `onStatus` above: the probe
+     * *set* changed, so the cached `ProbeSnapshot[]` this tile's roll-up was built from is
+     * no longer a sound basis for one — precisely the shape of bug this event exists to
+     * close (see `probes.ts` and `EventBus.publishAppChanged`). `adminAppKey` is
+     * invalidated too, so an open edit page's probes tab (fetched separately, under
+     * `probesKey`, which `adminAppKey` prefix-matches) refetches instead of showing a
+     * probe that was just deleted from another tab.
+     */
+    const onAppChanged = (event: MessageEvent) => {
+      let payload: AppChangedEvent;
+      try {
+        payload = JSON.parse(event.data as string) as AppChangedEvent;
+      } catch {
+        // A malformed frame is not a reason to drop a working stream.
+        return;
+      }
+      if (typeof payload?.appId !== "string") return;
+
+      void queryClient.invalidateQueries({ queryKey: launcherKey });
+      void queryClient.invalidateQueries({ queryKey: adminAppKey(payload.appId) });
+    };
+
     const onOpen = () => {
       backoff = INITIAL_BACKOFF_MS;
       if (!hasOpenedOnce) {
@@ -154,6 +183,7 @@ export function useEventStream(): void {
 
     function teardownSource() {
       source.removeEventListener("status", onStatus);
+      source.removeEventListener("app-changed", onAppChanged);
       source.removeEventListener("open", onOpen);
       source.removeEventListener("error", onError);
       source.close();
@@ -162,6 +192,7 @@ export function useEventStream(): void {
     function connect() {
       source = new EventSource("/api/events");
       source.addEventListener("status", onStatus);
+      source.addEventListener("app-changed", onAppChanged);
       source.addEventListener("open", onOpen);
       source.addEventListener("error", onError);
     }

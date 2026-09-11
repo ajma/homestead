@@ -27,6 +27,18 @@ async function withApp() {
   return { app, cookie, id: adopted.json().adopted[0].id as string };
 }
 
+/** `withApp` plus one http probe, for the tests below that need a probe to mutate. */
+async function withProbe() {
+  const { app, cookie, id: appId } = await withApp();
+  const created = await app.inject({
+    method: "POST",
+    url: `/api/apps/${appId}/probes`,
+    headers: { cookie },
+    payload: { kind: "http_internal", target: "http://localhost:8096" },
+  });
+  return { app, cookie, appId, probeId: created.json().id as string };
+}
+
 describe("probe routes", () => {
   it("creates a docker probe when an app is adopted", async () => {
     const { app, cookie, id } = await withApp();
@@ -211,6 +223,79 @@ describe("probe routes", () => {
       payload: { enabled: false },
     });
     expect(patched.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("tells open tabs when a probe is created", async () => {
+    // Same reason as disabling one below: the tile's cached probe set just changed.
+    const { app, cookie, id: appId } = await withApp();
+    const seen: string[] = [];
+    app.deps.events.subscribeAppChanged?.((id: string) => seen.push(id));
+    await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/probes`,
+      headers: { cookie },
+      payload: { kind: "http_internal", target: "http://localhost:8096" },
+    });
+    expect(seen).toEqual([appId]);
+    await app.close();
+  });
+
+  it("tells open tabs when a probe is disabled, or they keep showing its old status", async () => {
+    // Measured in Phase 1D: docker up plus http down reads down/"Containers not running".
+    // Disable the http probe and the server would now say up/"Healthy" while every open
+    // tab stays wrong until its stream happens to reconnect.
+    const { app, cookie, appId, probeId } = await withProbe();
+    const seen: string[] = [];
+    app.deps.events.subscribeAppChanged?.((id: string) => seen.push(id));
+    await app.inject({
+      method: "PATCH",
+      url: `/api/probes/${probeId}`,
+      headers: { cookie },
+      payload: { enabled: false },
+    });
+    expect(seen).toEqual([appId]);
+    await app.close();
+  });
+
+  it("tells open tabs when a probe is deleted", async () => {
+    const { app, cookie, appId, probeId } = await withProbe();
+    const seen: string[] = [];
+    app.deps.events.subscribeAppChanged?.((id: string) => seen.push(id));
+    await app.inject({ method: "DELETE", url: `/api/probes/${probeId}`, headers: { cookie } });
+    expect(seen).toEqual([appId]);
+    await app.close();
+  });
+
+  it("does not announce a probe edit that changes nothing a tile shows", async () => {
+    // A label change moves no status. Announcing it makes every open tab refetch the
+    // launcher for a cosmetic edit.
+    const { app, cookie, probeId } = await withProbe();
+    const seen: string[] = [];
+    app.deps.events.subscribeAppChanged?.((id: string) => seen.push(id));
+    await app.inject({
+      method: "PATCH",
+      url: `/api/probes/${probeId}`,
+      headers: { cookie },
+      payload: { label: "Renamed" },
+    });
+    expect(seen).toEqual([]);
+    await app.close();
+  });
+
+  it("does not announce a PATCH that sets enabled to the value it already had", async () => {
+    // Not required by the brief, but the fix is "a PATCH that changes enabled" — an
+    // idempotent enabled: true against an already-enabled probe changes no status either.
+    const { app, cookie, probeId } = await withProbe();
+    const seen: string[] = [];
+    app.deps.events.subscribeAppChanged?.((id: string) => seen.push(id));
+    await app.inject({
+      method: "PATCH",
+      url: `/api/probes/${probeId}`,
+      headers: { cookie },
+      payload: { enabled: true },
+    });
+    expect(seen).toEqual([]);
     await app.close();
   });
 });

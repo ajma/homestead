@@ -114,6 +114,32 @@ describe("/api/events", () => {
     await app.close();
   });
 
+  it("emits an app-changed frame to an admin", async () => {
+    // The probe-editing UI's server half (Task 11): a probe create/delete/enabled-PATCH
+    // calls `publishAppChanged`, and every open tab must hear about it the same way it
+    // hears about a transition — over this same stream, on its own event name.
+    const { app, cookie, id } = await withApp();
+    const res = await collect(app, cookie, () => app.deps.events.publishAppChanged(id));
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("event: app-changed");
+    expect(JSON.parse(res.body.match(/event: app-changed\ndata: (.*)/)?.[1] ?? "{}")).toEqual({
+      appId: id,
+    });
+    await app.close();
+  });
+
+  it("does not send a scoped viewer an app-changed frame for an app they cannot see", async () => {
+    // Same boundary as the status frame's scope test above: a bare id is still enough to
+    // tell a scoped viewer an app exists.
+    const { app, cookie, id } = await withApp();
+    const scoped = await createViewer(app, cookie, { scopeAllApps: false, appIds: [] });
+    const res = await collect(app, scoped.cookie, () => app.deps.events.publishAppChanged(id));
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("event: app-changed");
+    expect(res.body).not.toContain(id);
+    await app.close();
+  });
+
   it("refuses an anonymous client", async () => {
     const { app } = await withApp();
     expect((await app.inject({ method: "GET", url: "/api/events" })).statusCode).toBe(401);

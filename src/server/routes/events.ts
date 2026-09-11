@@ -34,6 +34,7 @@ type Subscription = {
  */
 export class EventBus {
   private readonly subscriptions = new Set<Subscription>();
+  private readonly appChangedListeners = new Set<(appId: string) => void>();
 
   /**
    * `maxStreamMs` defaults to `MAX_STREAM_MS`; a test overrides it the same way the
@@ -70,6 +71,37 @@ export class EventBus {
     for (const subscription of [...this.subscriptions]) {
       try {
         subscription.listener(transition);
+      } catch {
+        // One tab's failure is not another's.
+      }
+    }
+  }
+
+  /**
+   * A second, separate channel from `subscribe`'s transition stream — the same reason
+   * `onClose` is separate from it, above. A probe being created, deleted, or toggled is
+   * not a transition (it carries no `status`, no `faultClass`, and did not come from the
+   * scheduler), so folding it into `publish`'s payload would make every transition
+   * listener type-check for a shape that is not a transition, to serve one route's need
+   * to tell every open tab "the probe set under this app changed; your cached
+   * `ProbeSnapshot[]` is no longer a sound basis for a roll-up."
+   */
+  subscribeAppChanged(listener: (appId: string) => void): () => void {
+    this.appChangedListeners.add(listener);
+    return () => {
+      this.appChangedListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Called by `probes.ts` on create, on delete, and on a PATCH that actually flips
+   * `enabled` — never on a label-only edit, which moves no status and would make every
+   * open tab refetch the launcher for a cosmetic change.
+   */
+  publishAppChanged(appId: string): void {
+    for (const listener of [...this.appChangedListeners]) {
+      try {
+        listener(appId);
       } catch {
         // One tab's failure is not another's.
       }
@@ -156,6 +188,13 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
       () => done?.(),
     );
 
+    const unsubscribeAppChanged = events.subscribeAppChanged((appId) => {
+      // Same scope predicate as the status frame above, applied per event: a scoped
+      // viewer must not learn that an app they cannot see exists, even as a bare id.
+      if (!inScope(ctx, appId)) return;
+      sse.send("app-changed", { appId });
+    });
+
     void sse.closed.then(() => done?.());
 
     // The lifetime cap: the backstop for any path that changes what this user may see
@@ -169,6 +208,7 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
     } finally {
       clearTimeout(capTimer);
       unsubscribe();
+      unsubscribeAppChanged();
       sse.close();
     }
   });

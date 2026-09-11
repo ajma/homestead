@@ -3,6 +3,7 @@
 import type { LauncherApp, ProbeSnapshot } from "@shared/launcher";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, waitFor } from "@testing-library/react";
+import { adminAppKey } from "@web/api/admin";
 import { launcherKey } from "@web/api/launcher";
 import { useEventStream } from "@web/live/useEventStream";
 import { StrictMode } from "react";
@@ -366,6 +367,43 @@ describe("useEventStream", () => {
 
     const after = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
     expect(after).toBe(before);
+  });
+
+  it("invalidates the launcher and the admin app query on an app-changed frame", async () => {
+    // The probe-editing UI's server half (Task 11): a probe create/delete/enabled-PATCH
+    // publishes this frame so every open tab's stale `ProbeSnapshot[]` gets refetched
+    // rather than silently going on trusting a probe set that no longer exists.
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [tile()]);
+    client.setQueryData(adminAppKey("a1"), { id: "a1" });
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+    act(() => {
+      FakeEventSource.instances[0]?.emit("app-changed", { appId: "a1" });
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: launcherKey });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppKey("a1") });
+  });
+
+  it("survives a malformed app-changed frame without tearing down the stream", async () => {
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [tile()]);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    const source = FakeEventSource.instances[0];
+
+    act(() => {
+      for (const fn of source?.listeners.get("app-changed") ?? []) {
+        fn(new MessageEvent("app-changed", { data: "{not json" }));
+      }
+    });
+
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: launcherKey });
+    expect(source?.closed).toBe(false);
   });
 
   it("keeps exactly one live connection when StrictMode double-invokes the effect", () => {

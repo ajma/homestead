@@ -60,7 +60,7 @@ const patchBody = z.object({
 });
 
 export async function probeRoutes(app: FastifyInstance): Promise<void> {
-  const { db, composeConfig } = app.deps;
+  const { db, composeConfig, events } = app.deps;
 
   /** Loads a probe and checks the caller may see its app. 404 either way. */
   async function loadProbe(ctx: Parameters<typeof loadApp>[1], probeId: string) {
@@ -117,26 +117,42 @@ export async function probeRoutes(app: FastifyInstance): Promise<void> {
     const probeId = ulid();
     await db.insert(probes).values({ id: probeId, appId: id, ...body });
     const [created] = await db.select().from(probes).where(eq(probes.id, probeId));
+    // A new probe changes the set every open tab's cached `ProbeSnapshot[]` is built
+    // from — see `EventBus.publishAppChanged`.
+    events.publishAppChanged(id);
     return reply.code(201).send(created satisfies ProbeRow | undefined);
   });
 
   app.patch("/api/probes/:probeId", async (request, reply) => {
     const ctx = requireCapability(request, "app:config");
     const { probeId } = z.object({ probeId: z.string() }).parse(request.params);
-    if (!(await loadProbe(ctx, probeId))) return reply.code(404).send({ error: "not_found" });
+    const probe = await loadProbe(ctx, probeId);
+    if (!probe) return reply.code(404).send({ error: "not_found" });
     const body = patchBody.parse(request.body);
     if (Object.keys(body).length === 0) return reply.code(400).send({ error: "no_fields" });
 
     await db.update(probes).set(body).where(eq(probes.id, probeId));
     const [updated] = await db.select().from(probes).where(eq(probes.id, probeId));
+
+    // Only a PATCH that actually flips `enabled` moves what a tile shows. A label-only
+    // edit (or an `enabled` sent as the value it already was) announces nothing — every
+    // open tab refetching the launcher for a cosmetic change is exactly what the 1D
+    // carry-forward's fix must not become.
+    if (body.enabled !== undefined && body.enabled !== probe.enabled) {
+      events.publishAppChanged(probe.appId);
+    }
+
     return updated satisfies ProbeRow | undefined;
   });
 
   app.delete("/api/probes/:probeId", async (request, reply) => {
     const ctx = requireCapability(request, "app:config");
     const { probeId } = z.object({ probeId: z.string() }).parse(request.params);
-    if (!(await loadProbe(ctx, probeId))) return reply.code(404).send({ error: "not_found" });
+    const probe = await loadProbe(ctx, probeId);
+    if (!probe) return reply.code(404).send({ error: "not_found" });
     await db.delete(probes).where(eq(probes.id, probeId));
+    // Removing a probe changes the set the same way adding one does.
+    events.publishAppChanged(probe.appId);
     return reply.code(204).send();
   });
 }

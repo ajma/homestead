@@ -6,6 +6,7 @@ import { EditApp } from "@web/routes/EditApp";
 import { ContainersTab } from "@web/routes/edit/ContainersTab";
 import { LogsTab } from "@web/routes/edit/LogsTab";
 import { OverviewTab } from "@web/routes/edit/OverviewTab";
+import { ProbesTab } from "@web/routes/edit/ProbesPanel";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
 import { Placeholder } from "@web/routes/Placeholder";
@@ -33,6 +34,7 @@ function Routed() {
           <Route path="overview" element={<OverviewTab />} />
           <Route path="containers" element={<ContainersTab />} />
           <Route path="logs" element={<LogsTab />} />
+          <Route path="probes" element={<ProbesTab />} />
         </Route>
         <Route
           path="/settings/*"
