@@ -12,7 +12,11 @@ import { Login } from "@web/routes/Login";
 import { Placeholder } from "@web/routes/Placeholder";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
-const queryClient = new QueryClient({
+// Exported (not just module-private) so `App.test.tsx` can `queryClient.clear()` between
+// renders of the real `<App>` — the route guard is only meaningful end-to-end, through
+// the actual singleton, so the test cannot swap in a fresh `QueryClientProvider` of its
+// own the way a component test would.
+export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
 });
 

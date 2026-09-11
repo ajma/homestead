@@ -3,6 +3,7 @@ import type { AppStatus } from "@shared/types";
 import { useAdminApps } from "@web/api/admin";
 import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
+import { ImageUpdates } from "@web/components/ImageUpdates";
 import { StatusChip } from "@web/components/StatusChip";
 import { Link, NavLink, Outlet, useParams } from "react-router-dom";
 
@@ -112,8 +113,9 @@ export function EditApp() {
         <main className="min-w-0 flex-1">
           <Outlet context={{ app } satisfies EditAppContext} />
         </main>
-        <aside className="fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
+        <aside className="fixed inset-x-0 bottom-0 z-10 flex flex-col gap-4 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
           <ActionBar app={app} />
+          <ImageUpdates appId={app.id} />
         </aside>
       </div>
     </div>
