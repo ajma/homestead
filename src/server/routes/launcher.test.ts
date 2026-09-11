@@ -140,3 +140,35 @@ describe("GET /api/launcher/:appId/health", () => {
     expect(res.json().error).toBe("not_found");
   });
 });
+
+describe("launcher ordering", () => {
+  it("puts fully-tied apps in a stable, total order", async () => {
+    // Same category, same sortOrder, same displayName: the first three sort keys all
+    // tie, and the underlying select carries no ORDER BY. Without an id tiebreaker the
+    // grid can reshuffle between refreshes, which users notice and cannot reproduce.
+    const { app, cookie } = await seeded();
+    const [existing] = await app.deps.db.select().from(apps);
+    if (!existing) throw new Error("fixture did not adopt an app");
+
+    for (const suffix of ["b", "a", "c"]) {
+      await app.deps.db.insert(apps).values({
+        ...existing,
+        id: `tie-${suffix}`,
+        slug: `tie-${suffix}`,
+        directory: `tie-${suffix}`,
+        displayName: "Same Name",
+        category: "Tied",
+        sortOrder: 0,
+      });
+    }
+
+    const order = async () =>
+      (await app.inject({ method: "GET", url: "/api/launcher", headers: { cookie } }))
+        .json()
+        .apps.filter((a: { category: string | null }) => a.category === "Tied")
+        .map((a: { id: string }) => a.id);
+
+    expect(await order()).toEqual(["tie-a", "tie-b", "tie-c"]);
+    expect(await order()).toEqual(await order());
+  });
+});

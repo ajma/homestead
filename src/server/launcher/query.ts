@@ -76,6 +76,12 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
       (a, b) =>
         (a.category ?? "").localeCompare(b.category ?? "") ||
         a.sortOrder - b.sortOrder ||
-        a.displayName.localeCompare(b.displayName),
+        a.displayName.localeCompare(b.displayName) ||
+        // Total order, so the grid cannot reshuffle between refreshes. The first three
+        // keys can all tie — two apps in one category, both at sortOrder 0, both named
+        // "Media" — and the initial select carries no ORDER BY, so without this the
+        // position of tied tiles is whatever row order SQLite happens to return. A
+        // stable sort does not help: it preserves an input order that is itself unpinned.
+        a.id.localeCompare(b.id),
     );
 }
