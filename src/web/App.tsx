@@ -4,6 +4,7 @@ import { AdminApps } from "@web/routes/AdminApps";
 import { AppLayout } from "@web/routes/AppLayout";
 import { EditApp } from "@web/routes/EditApp";
 import { ContainersTab } from "@web/routes/edit/ContainersTab";
+import { LogsTab } from "@web/routes/edit/LogsTab";
 import { OverviewTab } from "@web/routes/edit/OverviewTab";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
@@ -31,7 +32,7 @@ function Routed() {
           <Route index element={<Navigate to="overview" replace />} />
           <Route path="overview" element={<OverviewTab />} />
           <Route path="containers" element={<ContainersTab />} />
-          <Route path="logs" element={<Placeholder title="Logs" />} />
+          <Route path="logs" element={<LogsTab />} />
         </Route>
         <Route
           path="/settings/*"
