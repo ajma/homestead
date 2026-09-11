@@ -91,22 +91,58 @@ describe("HealthPanel", () => {
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 
-  it("keeps Tab from escaping the dialog, wrapping from the last focusable element to the first", async () => {
+  // jsdom does not implement sequential focus navigation, so a synthetic Tab keydown never
+  // actually moves `document.activeElement` — with or without a trap. `event.defaultPrevented`
+  // is the one observable the handler produces that jsdom does not fake on its own, so these
+  // assert that instead. A second focusable element is added so "first" and "last" are
+  // distinguishable; with only the Close button, every case degenerates to the same node.
+  it("prevents Tab from leaving the dialog when focus is on the last focusable element", async () => {
     mount();
-    const closeButton = await screen.findByRole("button", { name: "Close" });
-    // The close button is the only focusable descendant here, so it is both the first
-    // and the last stop — Tab from it must not walk out to whatever is behind the panel.
+    const dialog = await screen.findByRole("dialog");
+    const closeButton = screen.getByRole("button", { name: "Close" });
+    const extra = document.createElement("button");
+    extra.textContent = "Extra";
+    dialog.insertBefore(extra, dialog.firstChild);
+
     closeButton.focus();
-    fireEvent.keyDown(document, { key: "Tab" });
-    expect(document.activeElement).toBe(closeButton);
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    document.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
   });
 
-  it("keeps Shift+Tab from escaping the dialog, wrapping from the first focusable element to the last", async () => {
+  it("prevents Shift+Tab from leaving the dialog when focus is on the first focusable element", async () => {
     mount();
-    const closeButton = await screen.findByRole("button", { name: "Close" });
-    closeButton.focus();
-    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(closeButton);
+    const dialog = await screen.findByRole("dialog");
+    const closeButton = screen.getByRole("button", { name: "Close" });
+    const extra = document.createElement("button");
+    extra.textContent = "Extra";
+    dialog.insertBefore(extra, dialog.firstChild);
+
+    extra.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "Tab",
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("does not prevent a Tab that stays inside the dialog's multi-element list", async () => {
+    mount();
+    const dialog = await screen.findByRole("dialog");
+    const closeButton = screen.getByRole("button", { name: "Close" });
+    const extra = document.createElement("button");
+    extra.textContent = "Extra";
+    dialog.insertBefore(extra, dialog.firstChild);
+
+    // `extra` is now first, `closeButton` is last. Tab from `extra` moves toward the
+    // middle of the list, not off either end, so the handler must let it through.
+    extra.focus();
+    const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    document.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it("restores focus to whatever opened it once the panel closes", async () => {
