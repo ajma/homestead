@@ -1,7 +1,7 @@
 import type { AdminApp } from "@shared/dto";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppKey, adminAppsKey } from "@web/api/admin";
-import { apiFetch } from "@web/api/client";
+import { ApiTimeoutError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { IconPicker } from "@web/components/IconPicker";
 import type { EditAppContext } from "@web/routes/EditApp";
@@ -114,12 +114,22 @@ export function OverviewTab() {
         // Not the launcher's `["launcher"]` key: the launcher has its own SSE path, and
         // coupling the two would make an admin edit here trigger a Docker-touching
         // refetch (`/api/apps` recomputes container status) on every viewer's screen.
+        //
+        // Both `adminAppKey(app.id)` and `adminAppKey(app.slug)`: `EditApp` resolves
+        // through `useAdminApp(slug)` (Important 3 of the 1E final-fix brief), so this
+        // page's own header is cached under the slug, a different key from the id one
+        // that prefix-matches the per-app subviews.
         queryClient.invalidateQueries({ queryKey: adminAppKey(app.id) });
+        queryClient.invalidateQueries({ queryKey: adminAppKey(app.slug) });
         queryClient.invalidateQueries({ queryKey: adminAppsKey });
       },
-      onError: () => {
+      onError: (saveError) => {
         setSaving(false);
-        setError("Could not save changes. Your edits are still here — try again.");
+        setError(
+          saveError instanceof ApiTimeoutError
+            ? "The server did not respond. It may still be working; check again in a moment."
+            : "Could not save changes. Your edits are still here — try again.",
+        );
       },
     });
   }
@@ -134,9 +144,13 @@ export function OverviewTab() {
         queryClient.invalidateQueries({ queryKey: adminAppsKey });
         navigate("/apps");
       },
-      onError: () => {
+      onError: (deleteErr) => {
         setDeleting(false);
-        setDeleteError("Could not delete this app.");
+        setDeleteError(
+          deleteErr instanceof ApiTimeoutError
+            ? "The server did not respond. It may still be working; check again in a moment."
+            : "Could not delete this app.",
+        );
       },
     });
   }

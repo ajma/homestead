@@ -3,7 +3,7 @@ import type { ImageStatusRow, JobRow } from "@shared/admin.js";
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { adminAppKey, adminAppsKey, containersKey, jobsKey } from "@web/api/admin";
+import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { ActionBar } from "@web/components/ActionBar";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -198,6 +198,56 @@ describe("ActionBar", () => {
     );
   });
 
+  it("disables Stop too while a job is running, not just the quick actions", async () => {
+    // Stop is rendered separately from `QUICK_ACTIONS` and carries its own `disabled`
+    // attribute in the markup — a coverage gap the whole-branch review found: mutating
+    // just Stop's `disabled={busy}` away left the suite green.
+    stubFetch({ up: [{ status: 202, body: { jobId: "j1" } }] });
+    mount();
+
+    fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true),
+    );
+  });
+
+  it("reports a timed-out action in words a person can act on, not the raw millisecond string", async () => {
+    // `ApiTimeoutError`'s own message ("API request timed out after 30000ms") used to
+    // reach the screen unmapped — Important 4 of the 1E final-fix brief. A timeout also
+    // means the action may have gone through, unlike a rejection, so the wording differs
+    // from `describeActionError`'s other branches too.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: string, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => {
+                reject(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            }),
+        ),
+      );
+      mount();
+
+      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+
+      expect(
+        screen.getByText(
+          "The server did not respond. It may still be working; check again in a moment.",
+        ),
+      ).toBeTruthy();
+      expect(screen.queryByText(/API request timed out/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a 409 from a double-click as already running, not a failure", async () => {
     const started = stubFetch({
       up: [
@@ -303,10 +353,17 @@ describe("ActionBar", () => {
       FakeEventSource.instances[0]?.emit("done", { status: "succeeded", exitCode: 0 });
     });
 
-    await waitFor(() => expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppsKey }));
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppKey(app.id) });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: containersKey(app.id) });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: jobsKey(app.id) });
+    // `adminAppKey(id)` prefix-matches containers/jobs/images/probes, so that alone
+    // covers the subview refetch; `adminAppKey(slug)` is the separate cache entry
+    // `EditApp`'s own header lives under, since it resolves through `useAdminApp(slug)`
+    // rather than the whole-inventory `adminAppsKey` (Important 3 of the 1E final-fix
+    // brief — invalidating that list from here was the refetch storm this test used to
+    // paper over).
+    await waitFor(() =>
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppKey(app.id) }),
+    );
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppKey(app.slug) });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: adminAppsKey });
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Pull" }).hasAttribute("disabled")).toBe(false),

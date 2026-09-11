@@ -1,14 +1,7 @@
 import type { AdminApp } from "@shared/dto";
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  adminAppKey,
-  adminAppsKey,
-  containersKey,
-  jobsKey,
-  useImages,
-  useJobs,
-} from "@web/api/admin";
-import { ApiError, apiFetch } from "@web/api/client";
+import { adminAppKey, useImages, useJobs } from "@web/api/admin";
+import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { JobOutput } from "@web/components/JobOutput";
 import { useEffect, useState } from "react";
@@ -33,8 +26,15 @@ const ALREADY_RUNNING_MESSAGE = "Another job is already running for this app.";
  * click that lands in the brief window before that disable has rendered. It reads as
  * "already running" — a fact, not a failure the user needs to retry past.
  */
+const TIMEOUT_MESSAGE =
+  "The server did not respond. It may still be working; check again in a moment.";
+
 function describeActionError(error: unknown): string {
   if (error instanceof ApiError && error.status === 409) return ALREADY_RUNNING_MESSAGE;
+  // A timeout is genuinely different from a rejection: `apiFetch` gave up waiting, not
+  // the server saying no, so the action itself may have gone through — "already running"
+  // and a raw "API request timed out after 30000ms" are both wrong words for that.
+  if (error instanceof ApiTimeoutError) return TIMEOUT_MESSAGE;
   return error instanceof Error ? error.message : "Could not start this action.";
 }
 
@@ -105,16 +105,22 @@ export function ActionBar({ app }: { app: AdminApp }) {
 
   function handleJobDone() {
     setActiveJobId(null);
-    // `adminAppKey` prefix-matches this app's containers, jobs, images and probes
-    // deliberately (see `src/web/api/admin.ts`), so invalidating it refreshes all of
-    // them; `containersKey` and `jobsKey` are named separately anyway, matching exactly
-    // what the brief calls out, rather than relying on the prefix relationship alone.
-    // `adminAppsKey` does NOT prefix-match — the list has its own key precisely so a
-    // per-app invalidation never forces every open app's tabs to refetch.
-    queryClient.invalidateQueries({ queryKey: adminAppsKey });
+    // `adminAppKey(app.id)` prefix-matches this app's containers, jobs, images and probes
+    // deliberately (see `src/web/api/admin.ts`), so this one invalidation refreshes all
+    // of them — a separate `containersKey`/`jobsKey` invalidation here was refetching
+    // `jobs` a second time for nothing (measured: a single Deploy produced two `GET
+    // .../jobs`).
+    //
+    // Deliberately NOT `adminAppsKey`, the whole-inventory rollup: `EditApp` used to read
+    // it, which kept it active on every edit page, so invalidating it here refetched up
+    // to sixty `docker compose config` spawns to update one row's chip. `EditApp` now
+    // resolves through `useAdminApp(slug)` instead, cached under `adminAppKey(slug)` —
+    // a second, separate entry from `adminAppKey(app.id)` above, since the id and the
+    // slug are different strings. Both need invalidating: the id one for the subview
+    // cascade, the slug one because that is what the header on THIS page is actually
+    // keyed by. See the 1E final-fix brief, Important 3.
     queryClient.invalidateQueries({ queryKey: adminAppKey(app.id) });
-    queryClient.invalidateQueries({ queryKey: containersKey(app.id) });
-    queryClient.invalidateQueries({ queryKey: jobsKey(app.id) });
+    queryClient.invalidateQueries({ queryKey: adminAppKey(app.slug) });
   }
 
   return (
