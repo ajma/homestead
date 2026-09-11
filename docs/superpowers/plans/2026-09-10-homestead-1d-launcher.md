@@ -3075,6 +3075,7 @@ import type { ProbeKind } from "@shared/types";
 import { useAppHealth } from "@web/api/launcher";
 import { Sparkline } from "@web/components/Sparkline";
 import { relativeTime } from "@web/lib/relative-time";
+import { useNow } from "@web/lib/use-now";
 import { useEffect } from "react";
 
 const KIND_LABEL: Record<ProbeKind, string> = {
@@ -3098,6 +3099,7 @@ export function HealthPanel({
   onClose: () => void;
 }) {
   const { data, isError, isPending } = useAppHealth(appId);
+  const now = useNow();
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -3138,9 +3140,10 @@ export function HealthPanel({
                   <span className="text-right text-slate-900 dark:text-slate-100">
                     {signal.reason}
                     {signal.since !== null && (
-                      <span className="ml-1 opacity-60">
-                        · {relativeTime(signal.since, Math.floor(Date.now() / 1000))}
-                      </span>
+                      // `useNow`, not `Date.now()`: nothing else re-renders this panel, so
+                      // an inline clock read freezes the moment the panel opens. Added in
+                      // Task 9's fix round; see `use-now.ts` for why the interval is shared.
+                      <span className="ml-1 opacity-60">· {relativeTime(signal.since, now)}</span>
                     )}
                   </span>
                 </li>
