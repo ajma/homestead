@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
+import type { AppStatus } from "@shared/types";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { StatusChip } from "@web/components/StatusChip";
 import { describe, expect, it, vi } from "vitest";
 
@@ -53,5 +54,49 @@ describe("StatusChip", () => {
     fireEvent.click(screen.getAllByRole("button")[1] as HTMLElement);
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(cardClicked).not.toHaveBeenCalled();
+  });
+
+  it("gives each status a distinct visible glyph, not just a distinct colour class", () => {
+    // A test that only compares colour classes is the test that let a dead sr-only
+    // span pass as "colour paired with shape" before. The glyph has to be the thing a
+    // sighted user actually sees.
+    const statuses: AppStatus[] = ["up", "degraded", "down", "starting", "unknown"];
+    const glyphs = new Set<string>();
+
+    for (const status of statuses) {
+      const { container, unmount } = render(
+        <StatusChip status={status} reason="reason" since={null} onOpen={() => {}} />,
+      );
+      const glyph = container.querySelector('[aria-hidden="true"]');
+      expect(glyph?.textContent).toBeTruthy();
+      glyphs.add(glyph?.textContent as string);
+      unmount();
+    }
+
+    expect(glyphs.size).toBe(statuses.length);
+  });
+
+  it("keeps its duration current on the shared clock, without any prop changing", () => {
+    vi.useFakeTimers();
+    try {
+      const since = Math.floor(Date.now() / 1000) - 60;
+      render(
+        <StatusChip
+          status="down"
+          reason="Containers not running"
+          since={since}
+          onOpen={() => {}}
+        />,
+      );
+      expect(screen.getByText(/1m/)).toBeTruthy();
+
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      expect(screen.getByText(/2m/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

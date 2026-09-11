@@ -1,17 +1,30 @@
 import type { AppStatus } from "@shared/types";
 import { relativeTime } from "@web/lib/relative-time";
+import { useNow } from "@web/lib/use-now";
 
 /**
- * Every status pairs a colour with a distinct glyph and with text. Colour alone fails
- * for a colour-blind user and for a screen reader, and this is the only signal on the
- * screen that matters.
+ * Every status pairs a colour with a distinct glyph shape, and with text. Colour alone
+ * fails for a colour-blind user; the glyph is the visible indicator itself (not a
+ * hidden echo of it), so it has to carry both.
  */
-const PRESENTATION: Record<AppStatus, { dot: string; glyph: string; text: string }> = {
-  up: { dot: "bg-emerald-500", glyph: "●", text: "text-slate-500 dark:text-slate-400" },
-  degraded: { dot: "bg-amber-500", glyph: "◐", text: "text-amber-700 dark:text-amber-400" },
-  down: { dot: "bg-rose-500", glyph: "▲", text: "text-rose-700 dark:text-rose-400" },
-  starting: { dot: "bg-sky-500", glyph: "◌", text: "text-sky-700 dark:text-sky-400" },
-  unknown: { dot: "bg-slate-400", glyph: "?", text: "text-slate-500 dark:text-slate-400" },
+const PRESENTATION: Record<AppStatus, { glyph: string; glyphColor: string; text: string }> = {
+  up: { glyph: "●", glyphColor: "text-emerald-500", text: "text-slate-500 dark:text-slate-400" },
+  degraded: {
+    glyph: "◐",
+    glyphColor: "text-amber-500 dark:text-amber-400",
+    text: "text-amber-700 dark:text-amber-400",
+  },
+  down: {
+    glyph: "▲",
+    glyphColor: "text-rose-500 dark:text-rose-400",
+    text: "text-rose-700 dark:text-rose-400",
+  },
+  starting: {
+    glyph: "◌",
+    glyphColor: "text-sky-500 dark:text-sky-400",
+    text: "text-sky-700 dark:text-sky-400",
+  },
+  unknown: { glyph: "?", glyphColor: "text-slate-400", text: "text-slate-500 dark:text-slate-400" },
 };
 
 export function StatusChip({
@@ -26,7 +39,8 @@ export function StatusChip({
   onOpen: () => void;
 }) {
   const style = PRESENTATION[status];
-  const age = since === null ? null : relativeTime(since, Math.floor(Date.now() / 1000));
+  const now = useNow();
+  const age = since === null ? null : relativeTime(since, now);
 
   return (
     <button
@@ -41,8 +55,12 @@ export function StatusChip({
       aria-label={`Status: ${status}. ${reason}. Show health details.`}
       className={`flex items-center gap-1.5 rounded-full px-2 py-1 text-xs ${style.text} hover:bg-slate-100 dark:hover:bg-slate-800`}
     >
-      <span className={`h-2 w-2 rounded-full ${style.dot}`} aria-hidden="true" />
-      <span className="sr-only">{style.glyph}</span>
+      <span
+        className={`inline-block w-4 shrink-0 text-center text-sm leading-none ${style.glyphColor}`}
+        aria-hidden="true"
+      >
+        {style.glyph}
+      </span>
       <span className="truncate">{reason}</span>
       {age !== null && <span className="opacity-60">· {age}</span>}
     </button>
