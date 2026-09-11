@@ -39,8 +39,12 @@ export async function containerRoutes(app: FastifyInstance): Promise<void> {
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     const found = await containersFor(row);
-    // An unreachable Docker renders as no containers here, deliberately.
-    return found.ok ? found.containers : [];
+    // Still 200 either way — a wedged socket must not take out the screen — but
+    // `dockerReachable` carries the distinction `found.ok` already drew, rather than
+    // discarding it here. Collapsing this to a bare array made "Docker can't see your
+    // stack" indistinguishable from "your stack has no containers", which sends an
+    // admin to restart something that was never actually down.
+    return { containers: found.ok ? found.containers : [], dockerReachable: found.ok };
   });
 
   app.get("/api/apps/:id/containers/:containerId", async (request, reply) => {

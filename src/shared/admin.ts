@@ -20,6 +20,16 @@ export type ContainerSummary = {
   labels: Record<string, string>;
 };
 
+/**
+ * `GET /api/apps/:id/containers`'s payload. `dockerReachable: false` and an empty
+ * `containers` list both render "nothing to show", but they are not the same fact:
+ * one means the stack has no containers, the other means Homestead cannot see Docker
+ * at all. Collapsing them into a bare array — as this endpoint used to — tells an
+ * admin their stack is stopped when it may well be running fine; this is the same
+ * `null`-versus-`[]` distinction `docker-runner.ts` makes for the probe engine.
+ */
+export type ContainersResponse = { containers: ContainerSummary[]; dockerReachable: boolean };
+
 /** One row of the `jobs` table: a single compose invocation's lifecycle. */
 export type JobRow = {
   id: string;

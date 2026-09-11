@@ -1,5 +1,5 @@
 import type {
-  ContainerSummary,
+  ContainersResponse,
   ImageStatusRow,
   JobRow,
   ProbeRow,
@@ -64,7 +64,7 @@ function perApp<T>(key: readonly unknown[], id: string | null, path: string, sta
 
 export function useContainers(id: string | null) {
   return useQuery(
-    perApp<ContainerSummary[]>(containersKey(id ?? ""), id, `/api/apps/${id}/containers`, 5_000),
+    perApp<ContainersResponse>(containersKey(id ?? ""), id, `/api/apps/${id}/containers`, 5_000),
   );
 }
 

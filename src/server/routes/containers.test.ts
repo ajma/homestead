@@ -67,8 +67,13 @@ describe("container detail", () => {
       headers: { cookie },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toHaveLength(1);
-    expect(res.json()[0]).toMatchObject({ id: "container-1", service: "web", state: "exited" });
+    expect(res.json().dockerReachable).toBe(true);
+    expect(res.json().containers).toHaveLength(1);
+    expect(res.json().containers[0]).toMatchObject({
+      id: "container-1",
+      service: "web",
+      state: "exited",
+    });
     await app.close();
   });
 
@@ -159,8 +164,11 @@ describe("container detail", () => {
     await app.close();
   });
 
-  it("stays 200 with an empty list when Docker is unreachable", async () => {
-    // Same rule as the app list: a wedged socket must not 500 the screen.
+  it("stays 200 with an empty list when Docker is unreachable, but says so", async () => {
+    // Same rule as the app list: a wedged socket must not 500 the screen. But unlike the
+    // app list, this caller needs to tell "Docker can't see your stack" apart from "your
+    // stack has no containers" — collapsing them would send an admin to restart
+    // something that was never actually down.
     const { app, cookie, id } = await withApp();
     app.deps.host.listContainers = async () => {
       throw new Error("connect ENOENT /var/run/docker.sock");
@@ -171,7 +179,7 @@ describe("container detail", () => {
       headers: { cookie },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual([]);
+    expect(res.json()).toEqual({ containers: [], dockerReachable: false });
     await app.close();
   });
 
