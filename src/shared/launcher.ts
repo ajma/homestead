@@ -31,3 +31,20 @@ export type LauncherApp = {
   reason: string;
   since: number | null;
 };
+
+/** One probe's row in the health panel. Never carries raw probe detail. */
+export type HealthSignal = {
+  probeId: string;
+  kind: ProbeKind;
+  label: string | null;
+  status: AppStatus;
+  reason: string;
+  since: number | null;
+  lastCheckedAt: number | null;
+  latencyMs: number | null;
+};
+
+/** One day of the sparkline. `dayStart` is epoch seconds at UTC midnight. */
+export type DayBucket = { dayStart: number; up: number; degraded: number; down: number };
+
+export type AppHealth = { appId: string; signals: HealthSignal[]; history: DayBucket[] };

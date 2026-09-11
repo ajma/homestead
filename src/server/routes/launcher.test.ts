@@ -1,6 +1,7 @@
 import { apps, probes } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
+import { ulid } from "ulid";
 import { describe, expect, it } from "vitest";
 
 async function seeded() {
@@ -98,5 +99,44 @@ describe("GET /api/launcher", () => {
   it("requires authentication", async () => {
     const { app } = await seeded();
     expect((await app.inject({ method: "GET", url: "/api/launcher" })).statusCode).toBe(401);
+  });
+});
+
+describe("GET /api/launcher/:appId/health", () => {
+  it("returns the signals for an app the caller can see", async () => {
+    const { app, cookie, id } = await seeded();
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/launcher/${id}/health`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().signals).toHaveLength(1);
+    expect(res.json().history).toHaveLength(30);
+  });
+
+  it("404s for an app outside the caller's scope, never 403", async () => {
+    // A 403 would confirm the app exists. For a scoped viewer that is the disclosure
+    // the scope exists to prevent.
+    const { app, cookie, id } = await seeded();
+    const scoped = await createViewer(app, cookie, { scopeAllApps: false, appIds: [] });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/launcher/${id}/health`,
+      headers: { cookie: scoped.cookie },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("not_found");
+  });
+
+  it("404s identically for an app that does not exist", async () => {
+    const { app, cookie } = await seeded();
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/launcher/${ulid()}/health`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("not_found");
   });
 });
