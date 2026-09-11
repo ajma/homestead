@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppsKey, useScan } from "@web/api/admin";
-import { ApiError, apiFetch } from "@web/api/client";
+import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { DialogShell } from "@web/components/DialogShell";
 import { useMemo, useState } from "react";
 
@@ -42,6 +42,7 @@ export function AdoptDialog({ onClose }: { onClose: () => void }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<AdoptResponse | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const mutation = useMutation({
     mutationFn: (directories: string[]) =>
@@ -90,6 +91,7 @@ export function AdoptDialog({ onClose }: { onClose: () => void }) {
     setSubmitting(new Set(directories));
     setSelected(new Set());
     setResult(null);
+    setSubmitError(null);
 
     mutation.mutate(directories, {
       onSuccess: (response) => {
@@ -113,7 +115,16 @@ export function AdoptDialog({ onClose }: { onClose: () => void }) {
           "failed" in error.body
         ) {
           setResult(error.body as AdoptResponse);
+          return;
         }
+        // Neither a success nor a shaped failure — a timeout or a network error, neither
+        // of which carries a per-directory breakdown. Previously silent: `result` stayed
+        // `null` and nothing told the user anything happened at all.
+        setSubmitError(
+          error instanceof ApiTimeoutError
+            ? "The server did not respond. It may still be working; check again in a moment."
+            : "Could not adopt these directories. Try again.",
+        );
       },
     });
   }
@@ -126,6 +137,10 @@ export function AdoptDialog({ onClose }: { onClose: () => void }) {
           <p className="text-sm text-rose-600 dark:text-rose-400">
             Could not scan for stacks on disk.
           </p>
+        )}
+
+        {submitError && (
+          <p className="mb-4 text-sm text-rose-600 dark:text-rose-400">{submitError}</p>
         )}
 
         {data && (

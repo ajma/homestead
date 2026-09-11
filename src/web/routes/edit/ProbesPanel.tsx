@@ -4,7 +4,7 @@ import { rollUpProbes } from "@shared/status-phrase";
 import type { ProbeKind } from "@shared/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { probesKey, useProbes } from "@web/api/admin";
-import { ApiError, apiFetch } from "@web/api/client";
+import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { StatusChip } from "@web/components/StatusChip";
 import type { EditAppContext } from "@web/routes/EditApp";
@@ -75,6 +75,12 @@ function slugFromError(error: unknown): string | null {
  * rather than inventing wording for errors this form cannot otherwise provoke.
  */
 function describeCreateError(error: unknown, kind: ProbeKind): string {
+  // Checked first: `error instanceof Error` below is also true for `ApiTimeoutError`, and
+  // its own message is a developer string ("API request timed out after 30000ms") rather
+  // than something a person can act on.
+  if (error instanceof ApiTimeoutError) {
+    return "The server did not respond. It may still be working; check again in a moment.";
+  }
   const slug = slugFromError(error);
   if (slug === "probe_exists") {
     return kind === "docker"

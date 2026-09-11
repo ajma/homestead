@@ -1,7 +1,7 @@
 import type { AdminApp } from "@shared/dto";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppsKey } from "@web/api/admin";
-import { ApiError, apiFetch } from "@web/api/client";
+import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { DialogShell } from "@web/components/DialogShell";
 import { useState } from "react";
 
@@ -47,6 +47,13 @@ function slugify(name: string): string {
  * different words: one means "try again", the other means "change something".
  */
 function errorMessage(error: unknown): string {
+  // Distinct from both branches below: `apiFetch` gave up waiting rather than the server
+  // answering no, so the create may have gone through anyway — "could not reach the
+  // server" is the wrong words for that, and the raw `ApiTimeoutError` message is a
+  // developer string with a millisecond literal in it.
+  if (error instanceof ApiTimeoutError) {
+    return "The server did not respond. It may still be working; check again in a moment.";
+  }
   if (!(error instanceof ApiError)) {
     return "Could not reach the server. Check the network and try again.";
   }
