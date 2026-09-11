@@ -134,6 +134,70 @@ describe("DialogShell", () => {
     expect(document.activeElement).toBe(opener);
   });
 
+  it("ignores Escape while closeDisabled is set", () => {
+    const onClose = vi.fn();
+    render(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={true}>
+        <Content />
+      </DialogShell>,
+    );
+
+    dispatchEscape();
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("ignores a backdrop click while closeDisabled is set", () => {
+    const onClose = vi.fn();
+    render(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={true}>
+        <Content />
+      </DialogShell>,
+    );
+
+    screen.getByRole("presentation").click();
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("disables the close button while closeDisabled is set", () => {
+    const onClose = vi.fn();
+    render(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={true}>
+        <Content />
+      </DialogShell>,
+    );
+
+    const closeButton = screen.getByRole("button", { name: "Close" });
+    expect(closeButton.hasAttribute("disabled")).toBe(true);
+    closeButton.click();
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("still closes on Escape, backdrop click and the close button once closeDisabled clears", () => {
+    // closeDisabled is a live gate, not a one-time latch — a dialog that starts pending
+    // and later settles must regain every dismissal path, not just the footer buttons
+    // ConfirmDialog itself manages.
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={true}>
+        <Content />
+      </DialogShell>,
+    );
+    dispatchEscape();
+    expect(onClose).not.toHaveBeenCalled();
+
+    rerender(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={false}>
+        <Content />
+      </DialogShell>,
+    );
+    dispatchEscape();
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("includes an element added after mount in the trap", () => {
     // `focusableElements` is called fresh inside the keydown handler rather than cached
     // at mount, so an element appearing mid-life — e.g. an error banner's link — must be

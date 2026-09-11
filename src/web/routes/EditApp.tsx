@@ -1,6 +1,7 @@
 import type { AdminApp } from "@shared/dto";
 import type { AppStatus } from "@shared/types";
 import { useAdminApps } from "@web/api/admin";
+import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
 import { StatusChip } from "@web/components/StatusChip";
 import { Link, NavLink, Outlet, useParams } from "react-router-dom";
@@ -99,21 +100,20 @@ export function EditApp() {
 
       {/*
        * One tree, Tailwind breakpoints only — no JS media query, which would re-render
-       * on every resize and could disagree with CSS right at the breakpoint. Below
-       * `lg`, the aside is hidden and the fixed bar below takes over; at `lg` and up,
-       * the fixed bar is hidden and the aside becomes a persistent rail.
+       * on every resize and could disagree with CSS right at the breakpoint, and one
+       * `ActionBar` instance rather than two: it opens a job-output SSE stream while a
+       * job runs, and rendering a second copy for the other layout would open a second
+       * stream nobody is looking at. Below `lg` its own classes make it a bar fixed to
+       * the bottom of the viewport; at `lg` and up they make it a static column
+       * alongside `main` instead.
        */}
       <div className="flex flex-col gap-4 p-4 lg:flex-row">
         <main className="min-w-0 flex-1">
           <Outlet context={{ app } satisfies EditAppContext} />
         </main>
-        <aside className="hidden shrink-0 lg:block lg:w-72">
-          {/* Action bar, image updates and metadata land in a later phase. */}
+        <aside className="fixed inset-x-0 bottom-0 z-10 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
+          <ActionBar app={app} />
         </aside>
-      </div>
-
-      <div className="fixed inset-x-0 bottom-0 border-t border-slate-200 bg-white p-3 lg:hidden dark:border-slate-800 dark:bg-slate-950">
-        {/* Mobile action bar lands in a later phase. */}
       </div>
     </div>
   );

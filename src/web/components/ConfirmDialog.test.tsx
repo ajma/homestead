@@ -123,6 +123,23 @@ describe("ConfirmDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
+  it("does not let Escape dismiss the dialog while onConfirm is pending", async () => {
+    // The gap DialogShell's closeDisabled prop closes: without it, Escape mid-request
+    // dismissed the dialog and lost whatever rejection (a 409 job_running, say) was about
+    // to render in its place.
+    const { promise, reject } = deferred<void>();
+    const { onClose } = mount({ onConfirm: () => promise });
+    const dialog = screen.getByRole("dialog");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onClose).not.toHaveBeenCalled();
+
+    reject(new Error("job_running"));
+    await waitFor(() => expect(screen.getByText("job_running")).toBeTruthy());
+  });
+
   it("still closes immediately for a synchronous onConfirm that returns void", () => {
     // Covered above by "runs the action and closes when confirmed" too — restated here
     // because the async widening is exactly the change that could have broken it.
