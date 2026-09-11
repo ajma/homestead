@@ -58,4 +58,27 @@ describe("Sparkline", () => {
     const { container } = render(<Sparkline history={[day(0, 1, 0)]} />);
     expect(container.querySelector("title")?.textContent).toMatch(/%/);
   });
+
+  it("varies bar height by severity, so status is not colour alone for a colour-blind viewer", () => {
+    const degradedDay: DayBucket = {
+      dayStart: 86_400,
+      upRatio: 0.5,
+      degradedRatio: 0.5,
+      downRatio: 0,
+      probeCount: 1,
+    };
+    const { container } = render(<Sparkline history={[day(0, 1, 0), degradedDay, day(2, 0, 1)]} />);
+    const [up, degraded, down] = [...container.querySelectorAll("rect")];
+    const heights = [up, degraded, down].map((rect) => Number(rect?.getAttribute("height")));
+    expect(new Set(heights).size).toBe(3);
+    expect(heights[0]).toBeGreaterThan(heights[1] as number);
+    expect(heights[1]).toBeGreaterThan(heights[2] as number);
+  });
+
+  it("renders a no-data day as hollow, a shape distinct from every filled day", () => {
+    const { container } = render(<Sparkline history={[noData(0), day(1, 1, 0)]} />);
+    const [none, up] = [...container.querySelectorAll("rect")];
+    expect(none?.getAttribute("fill")).toBe("none");
+    expect(up?.getAttribute("fill")).not.toBe("none");
+  });
 });

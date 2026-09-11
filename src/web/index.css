@@ -12,4 +12,9 @@ body {
   body {
     @apply bg-slate-950 text-slate-100;
   }
+
+  html {
+    background-color: #0f172a;
+    color-scheme: dark;
+  }
 }
