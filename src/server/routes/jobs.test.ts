@@ -1,4 +1,4 @@
-import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
+import { buildTestApp, createScopedAdmin, createViewer, signUpAdmin } from "@server/test-helpers";
 import { describe, expect, it } from "vitest";
 
 const CONFIG = JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx" } } });
@@ -142,6 +142,38 @@ describe("lifecycle routes", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ status: "succeeded", exitCode: 0, kind: "up" });
     expect(res.json().output).toContain("started");
+    await app.close();
+  });
+
+  it("scopes GET /api/jobs/:jobId to the caller's own apps, not just GET /api/apps/:id/jobs", async () => {
+    // Measured in the 1E final-fix brief: deleting `jobs.ts:60`'s scope check left all
+    // 885 tests green. A scoped admin can be created and correctly 404s here today —
+    // without the check, they could read any job's raw output, which carries compose
+    // stderr with filesystem paths and interpolated `.env` values.
+    const { app, cookie, id } = await withApp();
+    app.deps.host.composeResults.set("up -d", { exitCode: 0, stdout: "started\n", stderr: "" });
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/up`,
+      headers: { cookie },
+    });
+    const jobId = started.json().jobId as string;
+
+    const outOfScope = await createScopedAdmin(app, cookie, { appIds: [] });
+    const outOfScopeRes = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}`,
+      headers: { cookie: outOfScope.cookie },
+    });
+    expect(outOfScopeRes.statusCode).toBe(404);
+
+    const inScope = await createScopedAdmin(app, cookie, { appIds: [id] });
+    const inScopeRes = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}`,
+      headers: { cookie: inScope.cookie },
+    });
+    expect(inScopeRes.statusCode).toBe(200);
     await app.close();
   });
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { ImageStatusRow } from "@shared/admin.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { imagesKey } from "@web/api/admin";
 import { ImageUpdates } from "@web/components/ImageUpdates";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -128,6 +128,51 @@ describe("ImageUpdates", () => {
             (init as RequestInit | undefined)?.method === "POST",
         ),
     ).toBe(true);
+  });
+
+  it("keeps a manual check running past apiFetch's 30s default, honouring its own 120s override", async () => {
+    // The only substantive addition in 1E's final commit, and previously untested:
+    // `checkMutation` passes `{ timeoutMs: 120_000 }` because the server checks every
+    // service's image sequentially and can genuinely take minutes. If that override were
+    // ever dropped, `apiFetch`'s 30s default would apply instead, and this hanging
+    // request would already have failed by the first assertion below.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: string, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => {
+                reject(new DOMException("The operation was aborted.", "AbortError"));
+              });
+            }),
+        ),
+      );
+      mount([imageRow({ serviceName: "web", updateAvailable: false })]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Check now" }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByRole("button", { name: "Checking…" })).toBeTruthy();
+
+      // Past apiFetch's own 30s default: a check that lost its override would already
+      // have aborted and shown the failure message by now.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(screen.getByRole("button", { name: "Checking…" })).toBeTruthy();
+      expect(screen.queryByText("Could not check for updates.")).toBeNull();
+
+      // Now past the 120s override itself.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(90_000);
+      });
+      expect(screen.getByText("Could not check for updates.")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports a check failure without clearing the last known state", async () => {

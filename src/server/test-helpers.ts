@@ -391,3 +391,41 @@ export async function createViewer(
     cookie: String(signIn.headers["set-cookie"] ?? "").split(";")[0] ?? "",
   };
 }
+
+/**
+ * A second administrator with `scopeAllApps: false`. `role: "admin"` clears every
+ * capability check (`can`) the same as the first admin — only the scope predicate
+ * (`visibleAppsWhere` / `canForApp` / `loadApp`) stands between it and an app outside its
+ * allowlist. Exists for exactly that: proving a scope check binds even though the role
+ * itself has every capability, which `createViewer` cannot exercise since a viewer also
+ * fails on capability alone.
+ */
+export async function createScopedAdmin(
+  app: FastifyInstance,
+  adminCookie: string,
+  scope: { appIds: string[] },
+) {
+  const email = `scoped-admin-${Math.random().toString(36).slice(2)}@example.com`;
+  const created = await app.inject({
+    method: "POST",
+    url: "/api/users",
+    headers: { cookie: adminCookie },
+    payload: {
+      email,
+      password: TEST_PASSWORD,
+      name: "Scoped Admin",
+      role: "admin",
+      scopeAllApps: false,
+      appIds: scope.appIds,
+    },
+  });
+  const signIn = await app.inject({
+    method: "POST",
+    url: "/api/auth/sign-in/email",
+    payload: { email, password: TEST_PASSWORD },
+  });
+  return {
+    id: created.json().id as string,
+    cookie: String(signIn.headers["set-cookie"] ?? "").split(";")[0] ?? "",
+  };
+}

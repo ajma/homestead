@@ -65,6 +65,29 @@ describe("IconPicker", () => {
     expect(onChange).toHaveBeenCalledWith(null);
   });
 
+  it("cancels the previous debounce timer on each keystroke, searching only for the final value", async () => {
+    // If the effect's `clearTimeout` cleanup were ever dropped, each keystroke's own
+    // 250ms timer would still fire — three keystrokes inside that window would search
+    // three times (once per intermediate value) instead of once for the final one.
+    stub([]);
+    mount(null);
+    const input = screen.getByRole("searchbox");
+
+    fireEvent.change(input, { target: { value: "j" } });
+    await new Promise((r) => setTimeout(r, 100));
+    fireEvent.change(input, { target: { value: "je" } });
+    await new Promise((r) => setTimeout(r, 100));
+    fireEvent.change(input, { target: { value: "jel" } });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    // Give any (incorrectly) surviving earlier timers a chance to fire too.
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/icons/search?q=jel",
+    ]);
+  });
+
   it("says nothing matched rather than showing an empty box", async () => {
     stub([]);
     mount(null);
