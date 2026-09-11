@@ -123,6 +123,41 @@ export class IconMetadata {
     return this.bySlug.get(slug);
   }
 
+  /**
+   * A confident match between an adopted directory's name and a slug or alias, for
+   * spec §8's adoption-time icon suggestion.
+   *
+   * Deliberately not built on `search`: that method assumes the caller's query is the
+   * shorter, partial string (typing "jel" to find "jellyfin"), whereas a directory name
+   * is usually the *longer* one ("emby-server" against the alias "emby"). The prefix
+   * check here runs both directions for that reason. An exact hit always wins; among
+   * prefix hits, the longest matched name wins, so a coincidental short alias elsewhere
+   * in the catalogue cannot outrank a more specific one. A substring-only relationship —
+   * neither exact nor a prefix in either direction — is never confident enough to return.
+   */
+  matchDirectory(name: string): string | null {
+    const needle = name.toLowerCase();
+    if (needle === "") return null;
+
+    let exact: string | null = null;
+    let bestPrefix: { slug: string; length: number } | null = null;
+
+    for (const icon of this.index) {
+      for (const candidate of [icon.slug, ...icon.aliases]) {
+        const lower = candidate.toLowerCase();
+        if (lower === needle) {
+          exact = icon.slug;
+        } else if (
+          (needle.startsWith(lower) || lower.startsWith(needle)) &&
+          (!bestPrefix || lower.length > bestPrefix.length)
+        ) {
+          bestPrefix = { slug: icon.slug, length: lower.length };
+        }
+      }
+    }
+    return exact ?? bestPrefix?.slug ?? null;
+  }
+
   search(q: string, limit = 20): IconMeta[] {
     // A negative or fractional limit must never widen the result set. `slice(0, -1)`
     // means "all but the last element" — on the full 3,238-entry catalogue that is

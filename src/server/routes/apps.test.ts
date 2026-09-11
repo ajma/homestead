@@ -37,6 +37,72 @@ describe("app inventory API", () => {
     await app.close();
   });
 
+  it("pre-fills iconRef with a confident slug match on the directory name", async () => {
+    // Spec §8: the directory name is matched against slugs and aliases on adoption. The
+    // test fixture's icon index (see test-helpers.ts) knows "jellyfin".
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "jellyfin", services: {} }),
+      stderr: "",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["jellyfin"] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().adopted[0].iconRef).toBe("jellyfin");
+    await app.close();
+  });
+
+  it("pre-fills iconRef from a confident alias prefix match", async () => {
+    // The fixture's "jellyfin" entry carries the alias "emby". A directory named
+    // "emby-server" normalises to "embyserver", which the alias "emby" prefixes.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("emby-server/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "emby-server", services: {} }),
+      stderr: "",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["emby-server"] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().adopted[0].iconRef).toBe("jellyfin");
+    await app.close();
+  });
+
+  it("declines a weak substring-only match rather than guessing wrong", async () => {
+    // "myplexserver" only contains "plex" partway through — a substring match, not a
+    // prefix or exact one — and a wrong icon is worse than a letter tile.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("myplexserver/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "myplexserver", services: {} }),
+      stderr: "",
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["myplexserver"] },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().adopted[0].iconRef).toBeNull();
+    await app.close();
+  });
+
   it("refuses to adopt a directory with an invalid compose file", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);

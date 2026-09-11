@@ -16,6 +16,7 @@ import { retryOnBusy } from "../db/retry.js";
 import { apps, probes } from "../db/schema.js";
 import type { ContainerSummary } from "../host/types.js";
 import { HashMismatchError } from "../host/types.js";
+import type { IconMetadata } from "../icons/metadata.js";
 
 const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) });
 
@@ -65,6 +66,15 @@ function normaliseSlug(directory: string): string {
 }
 
 /**
+ * Spec §8: on adoption, the directory name is matched against slugs and aliases to
+ * pre-fill an icon suggestion. Never fails adoption: an empty or unreachable index
+ * simply yields no suggestion, via `IconMetadata.matchDirectory`'s own null return.
+ */
+function suggestIconRef(metadata: IconMetadata, directory: string): string | null {
+  return metadata.matchDirectory(directory);
+}
+
+/**
  * The single way any route loads an app by id. Composing `visibleAppsWhere` here rather
  * than at each call site is the point: a route that forgets it cannot be spotted by
  * reading that route, only by reading all of them and noticing one differs. Out of scope
@@ -79,7 +89,7 @@ export async function loadApp(db: Db, ctx: AuthContext, id: string) {
 }
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
-  const { db, host, composeConfig } = app.deps;
+  const { db, host, composeConfig, icons } = app.deps;
 
   /**
    * Resolves candidate compose content without touching the app's real file.
@@ -233,6 +243,8 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // transaction is open on the same connection is rejected outright against the
       // in-memory database the test suite runs on (see scheduler.ts's `serialise`).
       const slug = await uniqueSlug(directory);
+      // Never fails adoption: an empty or unreachable index simply yields no suggestion.
+      const iconRef = suggestIconRef(icons.metadata, directory);
       try {
         // The app row and its docker probe are inserted together. An adopted app with no
         // probe is invisible to monitoring until someone notices and adds one by hand, so
@@ -258,6 +270,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
               // directory name would be wrong.
               projectName: resolved.resolved.projectName,
               lastComposeHash: hash,
+              iconRef,
             });
             await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker" });
           }),

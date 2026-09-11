@@ -40,21 +40,43 @@ describe("sse-patch-store", () => {
   });
 
   it("re-applies a patch newer than the fetch's start", () => {
-    recordPatch("p1", { appId: "a1", status: "down", faultClass: "app", statusSince: 500, patchedAt: 1000 });
+    recordPatch("p1", {
+      appId: "a1",
+      status: "down",
+      faultClass: "app",
+      statusSince: 500,
+      patchedAt: 1000,
+    });
     const [patched] = applyPendingPatches([tile()], 500);
     expect(patched).toMatchObject({ status: "down", reason: "Containers not running" });
-    expect(patched?.probes[0]).toMatchObject({ status: "down", faultClass: "app", statusSince: 500 });
+    expect(patched?.probes[0]).toMatchObject({
+      status: "down",
+      faultClass: "app",
+      statusSince: 500,
+    });
   });
 
   it("leaves the fetched value alone when the patch predates the fetch", () => {
-    recordPatch("p1", { appId: "a1", status: "down", faultClass: "app", statusSince: 500, patchedAt: 100 });
+    recordPatch("p1", {
+      appId: "a1",
+      status: "down",
+      faultClass: "app",
+      statusSince: 500,
+      patchedAt: 100,
+    });
     const fetched = tile({ probes: [probe({ status: "up" })], status: "up", reason: "Healthy" });
     const [result] = applyPendingPatches([fetched], 1000);
     expect(result).toBe(fetched);
   });
 
   it("prunes a patch once a fetch that started after it has been merged", () => {
-    recordPatch("p1", { appId: "a1", status: "down", faultClass: "app", statusSince: 500, patchedAt: 100 });
+    recordPatch("p1", {
+      appId: "a1",
+      status: "down",
+      faultClass: "app",
+      statusSince: 500,
+      patchedAt: 100,
+    });
     applyPendingPatches([tile()], 1000);
     // A second, later fetch must not still be racing against the old patch.
     const second = tile({ probes: [probe({ status: "up" })], status: "up", reason: "Healthy" });
@@ -63,7 +85,13 @@ describe("sse-patch-store", () => {
   });
 
   it("only patches the matching app, not a same-probe-id collision on another one", () => {
-    recordPatch("p1", { appId: "other-app", status: "down", faultClass: "app", statusSince: 500, patchedAt: 1000 });
+    recordPatch("p1", {
+      appId: "other-app",
+      status: "down",
+      faultClass: "app",
+      statusSince: 500,
+      patchedAt: 1000,
+    });
     const apps = [tile()];
     expect(applyPendingPatches(apps, 500)).toBe(apps);
   });

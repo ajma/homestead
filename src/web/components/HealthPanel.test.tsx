@@ -113,7 +113,6 @@ describe("HealthPanel", () => {
   it("prevents Shift+Tab from leaving the dialog when focus is on the first focusable element", async () => {
     mount();
     const dialog = await screen.findByRole("dialog");
-    const closeButton = screen.getByRole("button", { name: "Close" });
     const extra = document.createElement("button");
     extra.textContent = "Extra";
     dialog.insertBefore(extra, dialog.firstChild);
@@ -132,7 +131,6 @@ describe("HealthPanel", () => {
   it("does not prevent a Tab that stays inside the dialog's multi-element list", async () => {
     mount();
     const dialog = await screen.findByRole("dialog");
-    const closeButton = screen.getByRole("button", { name: "Close" });
     const extra = document.createElement("button");
     extra.textContent = "Extra";
     dialog.insertBefore(extra, dialog.firstChild);

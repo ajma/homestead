@@ -86,7 +86,10 @@ export function rollUpProbes(probes: ProbeSnapshot[]): StatusReason {
     // list first: nothing pins that order (see `query.ts`'s `ORDER BY`), and adoption
     // inserting the docker probe first made the old "first wins" rule look deliberate
     // when it was luck.
-    if (probeSeverity > worstSeverity || (probeSeverity === worstSeverity && isPreferredTie(probe, worst))) {
+    if (
+      probeSeverity > worstSeverity ||
+      (probeSeverity === worstSeverity && isPreferredTie(probe, worst))
+    ) {
       worst = probe;
       worstIndex = i;
     }

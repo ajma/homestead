@@ -211,6 +211,35 @@ describe("IconMetadata", () => {
     expect(meta.has("0")).toBe(false);
   });
 
+  it("matches a directory name against a slug or alias for the adoption suggestion", async () => {
+    const meta = new IconMetadata({ cacheDir: dir(), fetchImpl: fetchOk(UPSTREAM, { n: 0 }) });
+    await meta.load();
+    expect(meta.matchDirectory("jellyfin")).toBe("jellyfin");
+    // "emby-server" is longer than the alias "emby" it should match — the direction
+    // `search` does not check, since a search box query is normally the shorter string.
+    expect(meta.matchDirectory("emby-server")).toBe("jellyfin");
+  });
+
+  it("declines a directory name that only substring-matches, not prefixes, a slug", async () => {
+    const meta = new IconMetadata({ cacheDir: dir(), fetchImpl: fetchOk(UPSTREAM, { n: 0 }) });
+    await meta.load();
+    // "myplexserver" contains "plex" partway through, but neither string prefixes the
+    // other — a wrong icon is worse than the letter-tile fallback.
+    expect(meta.matchDirectory("myplexserver")).toBeNull();
+  });
+
+  it("yields no suggestion against an empty index rather than throwing", async () => {
+    const meta = new IconMetadata({
+      cacheDir: dir(),
+      fetchImpl: (async () => {
+        throw new Error("ENETUNREACH");
+      }) as unknown as typeof fetch,
+    });
+    await meta.load();
+    expect(meta.size).toBe(0);
+    expect(meta.matchDirectory("jellyfin")).toBeNull();
+  });
+
   it("rejects a bare JSON string response", async () => {
     const meta = new IconMetadata({
       cacheDir: dir(),
