@@ -52,7 +52,7 @@ export function applyTransition(input: TransitionInput): TransitionOutput {
     // Not yet confirmed: hold whatever we were showing. A probe that has never reported
     // anything holds `unknown` rather than claiming `starting` — nothing is starting, we
     // simply have not confirmed a failure yet, and the launcher already renders unknown.
-    status = state.lastStatus === "unknown" ? "unknown" : state.lastStatus;
+    status = state.lastStatus;
   }
 
   const changed = status !== state.lastStatus;

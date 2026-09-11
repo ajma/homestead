@@ -355,12 +355,14 @@ describe("Scheduler.tick", () => {
     // guard rather than racing it: the second call's synchronous guard check is
     // guaranteed to run before the first call's own first microtask.
     const { db, host } = await seed(1);
-    let release: (() => void) | null = null;
+    // A box, not a bare `let`: TypeScript's narrowing does not see the reassignment
+    // inside the closure below and would otherwise narrow `release` to `null` forever.
+    const gate: { release: (() => void) | null } = { release: null };
     const gated: ProbeRunner = {
       kind: "docker",
       async run() {
         await new Promise<void>((resolve) => {
-          release = resolve;
+          gate.release = resolve;
         });
         return { status: "up" };
       },
@@ -378,10 +380,10 @@ describe("Scheduler.tick", () => {
     expect(await scheduler.tick()).toBe(0);
 
     // Let the in-flight tick actually finish, so it does not leak into the next test.
-    while (release === null) {
+    while (gate.release === null) {
       await new Promise((resolve) => setImmediate(resolve));
     }
-    release();
+    gate.release();
     expect(await first).toBe(1);
   });
 

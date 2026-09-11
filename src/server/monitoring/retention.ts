@@ -77,3 +77,53 @@ export async function runRetention(
   }
   return { hoursRolled };
 }
+
+/**
+ * Runs `runRetention` once immediately, then hourly.
+ *
+ * Once immediately — not only on the interval — because a NAS that reboots daily should
+ * not wait up to an hour after startup to prune and roll up: that is the startup
+ * catch-up the spec asks for, and `runRetention`'s own "every un-rolled hour, not just
+ * the previous one" behaviour is what makes catching up after real downtime safe.
+ *
+ * Mirrors `Scheduler.start`/`stop` on purpose: same shape, so the two timers a SIGTERM
+ * handler will eventually need to stop are symmetric, not a special case each.
+ */
+export class RetentionTimer {
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly deps: {
+      db: Db;
+      onError?: (error: unknown) => void;
+      now?: () => number;
+      /** Test-only override of the hourly interval, the same way `Scheduler`'s `now` and
+       * `random` are overridden — an optional constructor field rather than a test
+       * waiting out a real hour. */
+      intervalMs?: number;
+    },
+  ) {}
+
+  start(): void {
+    if (this.timer) return;
+    void runRetention(this.deps.db, this.now(), this.deps.onError);
+    this.timer = setInterval(
+      () => {
+        void runRetention(this.deps.db, this.now(), this.deps.onError);
+      },
+      this.deps.intervalMs ?? HOUR * 1000,
+    );
+    // Ref'd, matching `Scheduler.start()` — see its comment. `app.listen()` already keeps
+    // the process open, so unref-ing here would save nothing and would make `stop()`
+    // untestable via `process.getActiveResourcesInfo()`.
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Math.floor(Date.now() / 1000);
+  }
+}

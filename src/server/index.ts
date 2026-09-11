@@ -12,6 +12,7 @@ import { LocalHost } from "./host/local-host.js";
 import { PreflightError, runMountPreflight } from "./host/preflight.js";
 import { dockerRunner } from "./monitoring/docker-runner.js";
 import { createHttpRunners } from "./monitoring/http-runner.js";
+import { RetentionTimer } from "./monitoring/retention.js";
 import { Scheduler } from "./monitoring/scheduler.js";
 import { EventBus } from "./routes/events.js";
 
@@ -64,6 +65,14 @@ const scheduler = new Scheduler({
   },
 });
 scheduler.onTransition((transition) => events.publish(transition));
+const retention = new RetentionTimer({
+  db,
+  onError: (error) => {
+    // Not fatal: today's failed prune is tomorrow's disk-space problem, not a reason to
+    // take the timer down — same reasoning as the scheduler's onProbeError above.
+    console.error("[retention] failed:", error);
+  },
+});
 
 const app = await buildApp({
   config,
@@ -79,6 +88,15 @@ const app = await buildApp({
 });
 
 scheduler.start();
+retention.start();
+
+// Required shutdown order for the SIGTERM handler the Dockerfile task will add (out of
+// scope here — see the phase carry-forward): stop `scheduler` and `retention` first so
+// no new work starts, then `events.closeAll()` so every open `/api/events` stream ends —
+// `app.close()` measurably does not resolve while one is still open — and only then
+// `app.close()` itself. 1C's launcher streams are permanent for as long as a tab is
+// open, unlike 1B's job streams which ended with their job, so this ordering matters more
+// than it did when the handler was first deferred.
 
 // A single-process appliance on a NAS should log and keep serving rather than vanish.
 // The JobRunner.finish catch is the real fix for item 1; these are defence in depth so

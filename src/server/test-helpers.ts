@@ -254,6 +254,12 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
       http_internal: httpRunners.internal,
       http_external: httpRunners.external,
     },
+    // Tests must exercise the graph that ships. `index.ts` passes `onProbeError`; a test
+    // scheduler that swallows probe errors silently is a different graph than production,
+    // even though nothing here starts the scheduler's timer.
+    onProbeError: (probeId, error) => {
+      console.error(`[monitoring] probe ${probeId}:`, error);
+    },
   });
   scheduler.onTransition((transition) => events.publish(transition));
   const app = await buildApp({

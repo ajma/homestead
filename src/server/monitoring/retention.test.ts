@@ -1,6 +1,6 @@
 import { createDb, runMigrations } from "@server/db/client";
 import { apps, checkResults, checkRollups, hosts, probes } from "@server/db/schema";
-import { runRetention } from "@server/monitoring/retention";
+import { RetentionTimer, runRetention } from "@server/monitoring/retention";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import { describe, expect, it } from "vitest";
@@ -195,5 +195,84 @@ describe("runRetention", () => {
       // biome-ignore lint/suspicious/noExplicitAny: restore
       (db as any).insert = original;
     }
+  });
+});
+
+describe("RetentionTimer", () => {
+  it("runs once immediately on start(), not only on the interval", async () => {
+    // I3: nothing called runRetention in the shipped process at all. A NAS that reboots
+    // daily must not wait an hour after startup for its first prune.
+    const { db, probeId } = await seed();
+    await db.insert(checkResults).values([sample(probeId, T0 + 10, "up")]);
+
+    const timer = new RetentionTimer({ db, now: () => T0 + HOUR + 60, intervalMs: 60_000 });
+    try {
+      timer.start();
+      // `start()` fires the immediate run without awaiting it. Flush the microtask queue.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(await db.select().from(checkRollups)).toHaveLength(1);
+    } finally {
+      timer.stop();
+    }
+  });
+
+  it("schedules a further run on the interval", async () => {
+    const { db, probeId } = await seed();
+    let hour = T0;
+    await db.insert(checkResults).values([sample(probeId, T0 + 10, "up")]);
+
+    const timer = new RetentionTimer({ db, now: () => hour + HOUR + 60, intervalMs: 10 });
+    try {
+      timer.start();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(await db.select().from(checkRollups)).toHaveLength(1);
+
+      // Advance the clock and add another hour's sample; the interval, not a second
+      // start(), must pick it up.
+      hour = T0 + HOUR;
+      await db.insert(checkResults).values([sample(probeId, T0 + HOUR + 10, "up")]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(await db.select().from(checkRollups)).toHaveLength(2);
+    } finally {
+      timer.stop();
+    }
+  });
+
+  it("reports failures through onError instead of swallowing them silently", async () => {
+    const { db } = await seed();
+    const errors: unknown[] = [];
+    const original = db.run.bind(db);
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+    (db as any).run = () => {
+      throw new Error("SQLITE_IOERR");
+    };
+    const timer = new RetentionTimer({
+      db,
+      now: () => T0 + HOUR + 60,
+      intervalMs: 60_000,
+      onError: (error) => errors.push(error),
+    });
+    try {
+      timer.start();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(errors).toHaveLength(1);
+    } finally {
+      timer.stop();
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).run = original;
+    }
+  });
+
+  it("stop() clears its timer", async () => {
+    const { db } = await seed();
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const before = timers();
+    const timer = new RetentionTimer({ db, now: () => T0, intervalMs: 60_000 });
+    timer.start();
+    expect(timers()).toBeGreaterThan(before);
+    timer.stop();
+    expect(timers()).toBe(before);
   });
 });
