@@ -25,6 +25,7 @@ const schema = z.object({
     .string()
     .default("false")
     .transform((v) => v === "true"),
+  HOMESTEAD_ICON_CACHE_DIR: z.string().default("./data/icons"),
 });
 
 export type Config = {
@@ -41,6 +42,7 @@ export type Config = {
   accessAud: string | null;
   accessEnabled: boolean;
   skipMountPreflight: boolean;
+  iconCacheDir: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv): Config {
@@ -81,5 +83,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     accessAud,
     accessEnabled: accessTeamDomain !== null && accessAud !== null,
     skipMountPreflight: parsed.HOMESTEAD_SKIP_MOUNT_PREFLIGHT,
+    iconCacheDir: parsed.HOMESTEAD_ICON_CACHE_DIR,
   };
 }
