@@ -22,6 +22,14 @@ describe("icon routes", () => {
     );
   });
 
+  it("requires authentication, so an anonymous request cannot drive an outbound fetch", async () => {
+    // This is the route that reaches the internet — the one an anonymous caller reaching
+    // it would let them repeatedly drive an outbound CDN request from the NAS.
+    const app = await buildTestApp();
+    const res = await app.inject({ method: "GET", url: "/api/icons/jellyfin.svg" });
+    expect(res.statusCode).toBe(401);
+  });
+
   it("serves a known icon as SVG, cacheable but not immutable", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
