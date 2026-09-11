@@ -151,6 +151,10 @@ describe("/api/events", () => {
     await collect(app, cookie, () => app.deps.events.publish(transition(id)));
     // The bus must not retain a listener per closed tab.
     expect(app.deps.events.subscriberCount()).toBe(0);
+    // The route subscribes to both channels and unsubscribes both in the same `finally`
+    // — this is the other half of that pair, unverified until now. Task 11 added
+    // `appChangedListeners` with no equivalent check that it shrinks back to zero.
+    expect(app.deps.events.appChangedListenerCount()).toBe(0);
     await app.close();
   });
 
@@ -176,6 +180,8 @@ describe("/api/events", () => {
     const res = await app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
     expect(res.statusCode).toBe(200);
     expect(app.deps.events.subscriberCount()).toBe(0);
+    // The cap's `finally` unsubscribes both channels, not just the transition one.
+    expect(app.deps.events.appChangedListenerCount()).toBe(0);
     await app.close();
   });
 
@@ -213,6 +219,9 @@ describe("/api/events", () => {
     app.deps.events.closeForUser(userId);
     await Promise.all(streams);
     expect(app.deps.events.subscriberCount()).toBe(0);
+    // `closeForUser` runs the route's same `finally`, so both channels' listeners for
+    // this user's five streams must be gone, not just the transition ones.
+    expect(app.deps.events.appChangedListenerCount()).toBe(0);
 
     const sixth = app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
     await waitUntil(() => app.deps.events.subscriberCount() === 1);

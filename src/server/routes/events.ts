@@ -112,6 +112,17 @@ export class EventBus {
     return this.subscriptions.size;
   }
 
+  /**
+   * Mirrors `subscriberCount()` for the second channel. Without it nothing verifies that
+   * `appChangedListeners` shrinks back to zero on unsubscribe, `closeForUser`, or the
+   * lifetime cap — the exact kind of "architecturally sound and unverified" gap that has
+   * shipped as a leak in this project before, even though both channels unsubscribe in
+   * the same `finally` in the route below.
+   */
+  appChangedListenerCount(): number {
+    return this.appChangedListeners.size;
+  }
+
   /** How many open streams `userId` currently holds. The route checks this against
    * `MAX_STREAMS_PER_USER` before subscribing — reusing this Set rather than adding a
    * second registry that could drift from it. */

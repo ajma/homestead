@@ -35,8 +35,18 @@ export function ImageUpdates({ appId }: { appId: string }) {
   const [checkError, setCheckError] = useState<string | null>(null);
 
   const checkMutation = useMutation({
+    // `apiFetch`'s 30s default is too short here: the server checks every service's
+    // image sequentially (`ImageUpdateChecker.check`), and each one can spend up to
+    // `REQUEST_TIMEOUT_MS` (10s, registry.ts) three times over — a HEAD, a token
+    // exchange, and a retried HEAD — before giving up on that one registry. A handful of
+    // services can genuinely take minutes; 120s is a generous ceiling for a manual
+    // "Check now" rather than a number picked to paper over a hang.
     mutationFn: () =>
-      apiFetch<ImageStatusRow[]>(`/api/apps/${appId}/images/check`, { method: "POST" }),
+      apiFetch<ImageStatusRow[]>(
+        `/api/apps/${appId}/images/check`,
+        { method: "POST" },
+        { timeoutMs: 120_000 },
+      ),
   });
 
   function handleCheck() {

@@ -175,7 +175,7 @@ describe("DialogShell", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("still closes on Escape, backdrop click and the close button once closeDisabled clears", () => {
+  it("still closes on Escape once closeDisabled clears", () => {
     // closeDisabled is a live gate, not a one-time latch — a dialog that starts pending
     // and later settles must regain every dismissal path, not just the footer buttons
     // ConfirmDialog itself manages.
@@ -194,6 +194,46 @@ describe("DialogShell", () => {
       </DialogShell>,
     );
     dispatchEscape();
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("still closes on a backdrop click once closeDisabled clears", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={true}>
+        <Content />
+      </DialogShell>,
+    );
+    screen.getByRole("presentation").click();
+    expect(onClose).not.toHaveBeenCalled();
+
+    rerender(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={false}>
+        <Content />
+      </DialogShell>,
+    );
+    screen.getByRole("presentation").click();
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("still closes on the close button once closeDisabled clears", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={true}>
+        <Content />
+      </DialogShell>,
+    );
+    screen.getByRole("button", { name: "Close" }).click();
+    expect(onClose).not.toHaveBeenCalled();
+
+    rerender(
+      <DialogShell title="Test dialog" onClose={onClose} closeDisabled={false}>
+        <Content />
+      </DialogShell>,
+    );
+    screen.getByRole("button", { name: "Close" }).click();
 
     expect(onClose).toHaveBeenCalledTimes(1);
   });
