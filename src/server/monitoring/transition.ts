@@ -1,3 +1,5 @@
+import { inGraceWindow } from "../apps/grace.js";
+
 export type ProbeState = {
   lastStatus: "up" | "degraded" | "down" | "starting" | "unknown";
   consecutiveFailures: number;
@@ -38,7 +40,7 @@ export function applyTransition(input: TransitionInput): TransitionOutput {
   // `failureThreshold` intervals after the window closes.
   const consecutiveFailures = failed ? state.consecutiveFailures + 1 : 0;
 
-  const inGrace = graceUntil !== null && graceUntil > now;
+  const inGrace = inGraceWindow(graceUntil, now);
 
   let status: TransitionOutput["status"];
   if (!failed) {

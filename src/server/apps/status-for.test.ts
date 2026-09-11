@@ -88,4 +88,66 @@ describe("statusFor", () => {
     await statusFor(d, row, []);
     expect(d.host.listContainersCalls).toBe(before);
   });
+
+  /** Same shape as `row`, with a `graceUntil` the tests below control directly. */
+  function rowWithGrace(graceUntil: number | null) {
+    return {
+      id: "a1",
+      hostId: "local",
+      slug: "jellyfin",
+      displayName: "Jellyfin",
+      directory: "jellyfin",
+      composeFile: "compose.yaml",
+      projectName: "jellyfin",
+      graceUntil,
+    } as never;
+  }
+
+  it("reads starting, not down, while a deploy's grace window is still open", async () => {
+    // Measured in the 1E final-fix brief at the same instant: `applyTransition` (the
+    // probe pipeline) already says `starting` here via its own grace check; `statusFor`
+    // said `down` — the disagreement this test guards against.
+    const d = deps("media");
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const result = await statusFor(d, rowWithGrace(nowSeconds + 120));
+    expect(result).toEqual({ status: "starting", detail: "0/1 services up, 1 missing" });
+  });
+
+  it("reads down once the grace window has closed", async () => {
+    const d = deps("media");
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const result = await statusFor(d, rowWithGrace(nowSeconds - 1));
+    expect(result).toEqual({ status: "down", detail: "0/1 services up, 1 missing" });
+  });
+
+  it("does not report starting for a stack that is actually up, just because grace is open", async () => {
+    const d = deps("media");
+    d.host.containers = [
+      {
+        id: "c1",
+        names: ["media-web-1"],
+        image: "nginx",
+        state: "running",
+        status: "Up 2 hours",
+        project: "media",
+        service: "web",
+        labels: {},
+      },
+    ];
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const result = await statusFor(d, rowWithGrace(nowSeconds + 120));
+    expect(result.status).toBe("up");
+  });
+
+  it("does not let grace mask an unreadable compose configuration as starting", async () => {
+    const d = deps("media");
+    d.host.composeResults.set("config --format json", {
+      exitCode: 1,
+      stdout: "",
+      stderr: "broken",
+    });
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const result = await statusFor(d, rowWithGrace(nowSeconds + 120));
+    expect(result.status).toBe("unknown");
+  });
 });

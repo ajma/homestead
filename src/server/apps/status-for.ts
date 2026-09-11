@@ -1,6 +1,7 @@
 import type { apps } from "../db/schema.js";
 import type { ContainerSummary, Host } from "../host/types.js";
 import type { ComposeConfigCache } from "./compose-config.js";
+import { inGraceWindow } from "./grace.js";
 import type { AppStatusSummary } from "./serialize.js";
 import { rollUpStatus } from "./status.js";
 
@@ -55,7 +56,20 @@ export async function statusFor(
     }
     const found =
       containers ?? (await deps.host.listContainers({ project: resolved.resolved.projectName }));
-    return rollUpStatus(resolved.resolved.services, found);
+    const rolled = rollUpStatus(resolved.resolved.services, found);
+
+    // A deploy just wrote `graceUntil` (`job-runner.ts`) precisely so a stack mid-`docker
+    // compose up` does not read as failed while its containers are still coming up.
+    // `applyTransition` already honours this for the probe pipeline the launcher shows;
+    // without the same check here, this function's own callers — `/api/apps` and the
+    // edit header among them — disagreed with it for the whole ~2 minute window. `unknown`
+    // is excluded: that status means the compose file itself could not be resolved, a
+    // configuration problem grace has nothing to do with.
+    const stillFailing = rolled.status !== "up" && rolled.status !== "unknown";
+    if (stillFailing && inGraceWindow(row.graceUntil, Math.floor(Date.now() / 1000))) {
+      return { status: "starting", detail: rolled.detail };
+    }
+    return rolled;
   } catch (error) {
     // The compose root is an SMB share the user edits over SSH, so a renamed or moved
     // file is ordinary operation, not an exception worth a 500.
