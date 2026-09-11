@@ -6,6 +6,11 @@ const METADATA_URL = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@ma
 
 const FETCH_TIMEOUT_MS = 10_000;
 
+// The real file is 1.15 MB. Anything past this is not the catalogue — a hostile or
+// broken CDN response — and buffering it is how an index becomes a memory-exhaustion
+// vector on a NAS. Checked on the bytes actually received, not a spoofable header.
+const MAX_METADATA_BYTES = 4 * 1024 * 1024;
+
 export type IconMeta = {
   slug: string;
   aliases: string[];
@@ -68,7 +73,9 @@ export class IconMetadata {
     try {
       const response = await this.fetchImpl(METADATA_URL, { signal: controller.signal });
       if (!response.ok) return null;
-      return await response.json();
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_METADATA_BYTES) return null;
+      return JSON.parse(new TextDecoder().decode(buffer));
     } catch {
       return null;
     } finally {
@@ -77,7 +84,10 @@ export class IconMetadata {
   }
 
   private build(raw: unknown): void {
-    if (typeof raw !== "object" || raw === null) {
+    // Object.entries on an array yields [["0","a"],["1","b"], ...] — a plain-object
+    // guard alone lets a JSON array response fabricate a numeric-slug index that then
+    // gets written to the disk cache and survives restarts.
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       this.index = [];
       this.slugs = new Set();
       return;
@@ -97,8 +107,12 @@ export class IconMetadata {
   }
 
   search(q: string, limit = 20): IconMeta[] {
+    // A negative or fractional limit must never widen the result set. `slice(0, -1)`
+    // means "all but the last element" — on the full 3,238-entry catalogue that is
+    // almost everything. Clamp before either return path.
+    const boundedLimit = Math.max(0, Math.floor(limit));
     const needle = q.trim().toLowerCase();
-    if (needle === "") return this.index.slice(0, limit);
+    if (needle === "") return this.index.slice(0, boundedLimit);
 
     const scored: Array<{ icon: IconMeta; score: number }> = [];
     for (const icon of this.index) {
@@ -114,7 +128,7 @@ export class IconMetadata {
     }
     return scored
       .sort((a, b) => b.score - a.score || a.icon.slug.localeCompare(b.icon.slug))
-      .slice(0, limit)
+      .slice(0, boundedLimit)
       .map((s) => s.icon);
   }
 }
