@@ -3,6 +3,7 @@ import { rollUpProbes } from "@shared/status-phrase";
 import type { AppStatus, FaultClass } from "@shared/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { healthKey, launcherKey } from "@web/api/launcher";
+import { recordPatch } from "@web/live/sse-patch-store";
 import { useEffect } from "react";
 
 export type StatusEvent = {
@@ -65,6 +66,8 @@ export function useEventStream(): void {
       if (typeof payload?.appId !== "string") return;
 
       let sawUnknownProbe = false;
+      const nowMs = Date.now();
+      const statusSince = Math.floor(nowMs / 1000);
 
       queryClient.setQueryData<LauncherApp[]>(launcherKey, (current) => {
         if (!current) return current;
@@ -90,7 +93,7 @@ export function useEventStream(): void {
                   // `statusSince` they already had, so the app's own `since` — taken
                   // from whichever probe `rollUpProbes` finds worst — only moves when
                   // the worst probe itself changes, not whenever any probe reports.
-                  statusSince: Math.floor(Date.now() / 1000),
+                  statusSince,
                 }
               : probe,
           );
@@ -103,6 +106,17 @@ export function useEventStream(): void {
 
       if (sawUnknownProbe) {
         void queryClient.invalidateQueries({ queryKey: launcherKey });
+      } else {
+        // Record the patch so a launcher refetch already in flight — one whose server
+        // read predates this transition — cannot silently overwrite it when it resolves.
+        // See `sse-patch-store.ts`.
+        recordPatch(payload.probeId, {
+          appId: payload.appId,
+          status: payload.status,
+          faultClass: payload.faultClass,
+          statusSince,
+          patchedAt: nowMs,
+        });
       }
 
       // The open health panel, if any, is now stale. Invalidating one key is cheap and
