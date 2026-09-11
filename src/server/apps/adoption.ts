@@ -1,21 +1,11 @@
+import type { DiscoveredApp, OrphanStack, ScanResult } from "@shared/admin.js";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { apps } from "../db/schema.js";
 import type { Host } from "../host/types.js";
 import { parseEnv } from "./env-file.js";
 
-export type DiscoveredApp = {
-  directory: string;
-  composeFile: string;
-  projectName: string | null;
-  containerCount: number;
-  running: boolean;
-  adopted: boolean;
-};
-
-export type OrphanStack = { projectName: string; containerCount: number };
-
-export type ScanResult = { discovered: DiscoveredApp[]; orphans: OrphanStack[] };
+export type { DiscoveredApp, OrphanStack, ScanResult };
 
 /**
  * Compose's own project-name normalisation: lowercased, and anything outside

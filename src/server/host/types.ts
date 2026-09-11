@@ -1,15 +1,8 @@
-export type DiscoveredDir = { directory: string; composeFile: string };
+import type { ContainerSummary } from "@shared/admin.js";
 
-export type ContainerSummary = {
-  id: string;
-  names: string[];
-  image: string;
-  state: string;
-  status: string;
-  project: string | null;
-  service: string | null;
-  labels: Record<string, string>;
-};
+export type { ContainerSummary };
+
+export type DiscoveredDir = { directory: string; composeFile: string };
 
 export type FileRead = { content: string; hash: string };
 

@@ -1,3 +1,4 @@
+import type { JobRow } from "@shared/admin.js";
 import { desc, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -57,7 +58,9 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     if (!job?.appId) return reply.code(404).send({ error: "not_found" });
     // Scope is a property of the app, so it is checked against the app, not the job row.
     if (!(await loadApp(db, ctx, job.appId))) return reply.code(404).send({ error: "not_found" });
-    return job;
+    // `satisfies`, not a type annotation on the handler: a schema drift in `jobs` should
+    // fail here, against the shape `@web/api/admin`'s hooks actually consume.
+    return job satisfies JobRow;
   });
 
   app.get("/api/apps/:id/jobs", async (request, reply) => {
@@ -65,7 +68,13 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    return db.select().from(jobs).where(eq(jobs.appId, id)).orderBy(desc(jobs.createdAt)).limit(20);
+    const rows = await db
+      .select()
+      .from(jobs)
+      .where(eq(jobs.appId, id))
+      .orderBy(desc(jobs.createdAt))
+      .limit(20);
+    return rows satisfies JobRow[];
   });
 
   app.get("/api/jobs/:jobId/stream", async (request, reply) => {

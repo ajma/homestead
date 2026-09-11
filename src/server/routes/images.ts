@@ -1,3 +1,4 @@
+import type { ImageStatusRow } from "@shared/admin.js";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -13,7 +14,8 @@ export async function imageRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string() }).parse(request.params);
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    return db.select().from(imageStatus).where(eq(imageStatus.appId, id));
+    const rows = await db.select().from(imageStatus).where(eq(imageStatus.appId, id));
+    return rows satisfies ImageStatusRow[];
   });
 
   app.post("/api/apps/:id/images/check", async (request, reply) => {
@@ -22,6 +24,7 @@ export async function imageRoutes(app: FastifyInstance): Promise<void> {
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     await images.check(row);
-    return db.select().from(imageStatus).where(eq(imageStatus.appId, id));
+    const rows = await db.select().from(imageStatus).where(eq(imageStatus.appId, id));
+    return rows satisfies ImageStatusRow[];
   });
 }

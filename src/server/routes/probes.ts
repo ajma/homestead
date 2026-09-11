@@ -1,3 +1,4 @@
+import type { ProbeRow } from "@shared/admin.js";
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
@@ -72,7 +73,8 @@ export async function probeRoutes(app: FastifyInstance): Promise<void> {
     const ctx = requireCapability(request, "app:config");
     const { id } = z.object({ id: z.string() }).parse(request.params);
     if (!(await loadApp(db, ctx, id))) return reply.code(404).send({ error: "not_found" });
-    return db.select().from(probes).where(eq(probes.appId, id));
+    const rows = await db.select().from(probes).where(eq(probes.appId, id));
+    return rows satisfies ProbeRow[];
   });
 
   app.get("/api/apps/:id/probes/suggestions", async (request, reply) => {
@@ -115,7 +117,7 @@ export async function probeRoutes(app: FastifyInstance): Promise<void> {
     const probeId = ulid();
     await db.insert(probes).values({ id: probeId, appId: id, ...body });
     const [created] = await db.select().from(probes).where(eq(probes.id, probeId));
-    return reply.code(201).send(created);
+    return reply.code(201).send(created satisfies ProbeRow | undefined);
   });
 
   app.patch("/api/probes/:probeId", async (request, reply) => {
@@ -127,7 +129,7 @@ export async function probeRoutes(app: FastifyInstance): Promise<void> {
 
     await db.update(probes).set(body).where(eq(probes.id, probeId));
     const [updated] = await db.select().from(probes).where(eq(probes.id, probeId));
-    return updated;
+    return updated satisfies ProbeRow | undefined;
   });
 
   app.delete("/api/probes/:probeId", async (request, reply) => {

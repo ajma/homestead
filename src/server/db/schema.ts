@@ -128,7 +128,7 @@ export const probes = sqliteTable(
       .notNull()
       .default("unknown"),
     lastLatencyMs: integer("last_latency_ms"),
-    lastDetail: text("last_detail", { mode: "json" }),
+    lastDetail: text("last_detail", { mode: "json" }).$type<Record<string, unknown> | null>(),
     lastFaultClass: text("last_fault_class", { enum: ["app", "network", "config"] }),
     lastCheckedAt: integer("last_checked_at"),
     statusSince: integer("status_since"),
