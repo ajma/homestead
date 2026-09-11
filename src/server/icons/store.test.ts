@@ -87,6 +87,23 @@ describe("IconStore", () => {
     expect(await store.fetchIcon("jellyfin", null)).toBeNull();
   });
 
+  it("refuses an oversized download rather than buffering and serving it", async () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "icons-"));
+    const store = new IconStore({
+      cacheDir,
+      metadata: await loaded(cacheDir),
+      fetchImpl: (async () =>
+        new Response("a".repeat(600 * 1024), {
+          status: 200,
+          headers: { "content-type": "image/svg+xml" },
+        })) as unknown as typeof fetch,
+    });
+    expect(await store.fetchIcon("jellyfin", null)).toBeNull();
+    // A failed download must not leave a truncated file behind for the next request to
+    // serve as if it were the real icon.
+    expect(readdirSync(cacheDir).filter((name) => name.endsWith(".svg"))).toEqual([]);
+  });
+
   it("caches light and dark variants separately", async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), "icons-"));
     let calls = 0;

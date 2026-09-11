@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { readBounded } from "./bounded-read.js";
 import type { IconMetadata } from "./metadata.js";
 
 const CDN = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@main/svg";
@@ -68,11 +69,10 @@ export class IconStore {
     try {
       const response = await this.fetchImpl(url, { signal: controller.signal });
       if (!response.ok) return null;
-      const buffer = Buffer.from(await response.arrayBuffer());
-      // An icon is a few KB. Anything this large is not an icon, and buffering it is
-      // how a proxy becomes a memory-exhaustion vector.
-      if (buffer.byteLength > MAX_ICON_BYTES) return null;
-      return buffer;
+      // An icon is a few KB. Anything past MAX_ICON_BYTES is not an icon — a hostile or
+      // broken CDN response — and `readBounded` stops pulling the stream the moment the
+      // cap is crossed, rather than buffering the whole thing first and checking after.
+      return await readBounded(response, MAX_ICON_BYTES);
     } catch {
       return null;
     } finally {

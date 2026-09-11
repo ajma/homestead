@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readBounded } from "./bounded-read.js";
 
 /** Pinned so an upstream restructure cannot change behaviour without a code change. */
 const METADATA_URL = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@main/metadata.json";
@@ -73,9 +74,12 @@ export class IconMetadata {
     try {
       const response = await this.fetchImpl(METADATA_URL, { signal: controller.signal });
       if (!response.ok) return null;
-      const buffer = await response.arrayBuffer();
-      if (buffer.byteLength > MAX_METADATA_BYTES) return null;
-      return JSON.parse(new TextDecoder().decode(buffer));
+      // The real file is 1.15 MB; anything past MAX_METADATA_BYTES is treated as a
+      // failed fetch. `readBounded` stops pulling the stream the moment the cap is
+      // crossed, so a hostile or oversized response is never buffered in full first.
+      const buffer = await readBounded(response, MAX_METADATA_BYTES);
+      if (!buffer) return null;
+      return JSON.parse(buffer.toString("utf8"));
     } catch {
       return null;
     } finally {
