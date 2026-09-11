@@ -12,9 +12,11 @@ it("first test leaves a node behind", () => {
   expect(screen.getByText("alpha")).toBeTruthy();
 });
 
-it("second test does not see it, proving cleanup actually runs", () => {
-  // Without `afterEach(cleanup)` this passes for the wrong reason forever: the
-  // previous test's node is still mounted and `alpha` would still be found.
+it("second test does not see the first test's node, so some cleanup is running", () => {
+  // Deliberately does not claim *which* cleanup. Measured: removing the explicit
+  // `afterEach(cleanup)` from test-setup leaves this green, because RTL registers its
+  // own on import. This test guards the property — a stale DOM makes `getByText` match
+  // a node the previous test rendered — not any one implementation of it.
   renderWithQuery(<p>beta</p>);
   expect(screen.queryAllByText("alpha")).toHaveLength(0);
 });

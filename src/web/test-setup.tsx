@@ -11,9 +11,17 @@ import { afterEach } from "vitest";
  * server test file's runtime. Import-scoping is the same guarantee for the files that
  * need it and nothing for the files that do not.
  *
- * Cleanup itself is not optional: a leaked DOM between tests makes `getByText` match a
- * node the *previous* test rendered, which reads as a passing assertion about the wrong
- * thing.
+ * This call is a backstop, not the mechanism. Measured: removing it changes nothing,
+ * because `@testing-library/react` registers its own `afterEach(cleanup)` on import
+ * whenever a global `afterEach` exists — which `globals: true` provides. Verified by
+ * running with `RTL_SKIP_AUTO_CLEANUP=true`, which is the only condition under which
+ * this line does any work.
+ *
+ * It stays because the guarantee matters and RTL's version of it is conditional on a
+ * config flag that lives somewhere else: turn off `globals` and RTL's cleanup silently
+ * stops, with the symptom being `getByText` matching a node the *previous* test
+ * rendered — a passing assertion about the wrong thing. Cheap insurance against a
+ * change made for unrelated reasons.
  */
 afterEach(cleanup);
 
