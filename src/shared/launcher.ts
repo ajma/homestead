@@ -44,7 +44,23 @@ export type HealthSignal = {
   latencyMs: number | null;
 };
 
-/** One day of the sparkline. `dayStart` is epoch seconds at UTC midnight. */
-export type DayBucket = { dayStart: number; up: number; degraded: number; down: number };
+/**
+ * One day of the timeline. Ratios in 0..1, each the mean across the app's probes of
+ * that probe's own share for the day — NOT pooled counts.
+ *
+ * Pooling made the day read as whichever probe polled fastest: a 60s docker probe up all
+ * day beside a 300s HTTP probe down all day summed to 83% healthy for an app whose web
+ * interface was unreachable the whole time. Each probe now gets one vote.
+ *
+ * `probeCount` is how many probes reported at all that day. Zero means no data, which a
+ * renderer must distinguish from a healthy day — the ratios are all 0 in both cases.
+ */
+export type DayBucket = {
+  dayStart: number;
+  upRatio: number;
+  degradedRatio: number;
+  downRatio: number;
+  probeCount: number;
+};
 
 export type AppHealth = { appId: string; signals: HealthSignal[]; history: DayBucket[] };
