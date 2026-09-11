@@ -22,7 +22,7 @@ describe("icon routes", () => {
     );
   });
 
-  it("serves a known icon as SVG with a long cache header", async () => {
+  it("serves a known icon as SVG, cacheable but not immutable", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     const res = await app.inject({
@@ -32,7 +32,13 @@ describe("icon routes", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("image/svg+xml");
-    expect(res.headers["cache-control"]).toContain("max-age=");
+    expect(res.headers["cache-control"]).toContain("max-age=86400");
+    // A slug is addressed by name, not content: upstream can replace the file. With
+    // `immutable` a single wrong icon sticks in every viewer's browser for the whole
+    // max-age with no server-side lever, and "clear your site data" is not an
+    // instruction you can give a housemate.
+    expect(res.headers["cache-control"]).not.toContain("immutable");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   it("404s an unknown slug with an error slug", async () => {
@@ -45,6 +51,27 @@ describe("icon routes", () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error).toBe("not_found");
+    // Pin the 404 against a *working* store in the same test. On its own this case
+    // passes just as happily against a store that returns null for everything, which
+    // would also 404 the icons that do exist.
+    const known = await app.inject({
+      method: "GET",
+      url: "/api/icons/jellyfin.svg",
+      headers: { cookie },
+    });
+    expect(known.statusCode).toBe(200);
+  });
+
+  it("400s an unrecognised variant rather than reaching for a file", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/icons/jellyfin.svg?variant=blue",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBeTruthy();
   });
 
   it("rejects a traversal attempt in the slug", async () => {
@@ -58,6 +85,14 @@ describe("icon routes", () => {
       });
       expect(res.statusCode).toBe(404);
     }
+    // Same reason as the 404 test above: a store that refused everything would satisfy
+    // the loop without the guards existing at all.
+    const known = await app.inject({
+      method: "GET",
+      url: "/api/icons/jellyfin.svg",
+      headers: { cookie },
+    });
+    expect(known.statusCode).toBe(200);
   });
 
   it("bounds the search limit so a caller cannot ask for the whole 1.15 MB index", async () => {

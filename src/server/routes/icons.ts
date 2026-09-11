@@ -2,8 +2,20 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireAuth } from "../auth/context.js";
 
-/** A year. The slug is content-addressed by name and upstream icons do not churn. */
-const CACHE_CONTROL = "public, max-age=31536000, immutable";
+/**
+ * A day, and deliberately **not** `immutable`.
+ *
+ * A slug is addressed by name, not by content: upstream can replace `jellyfin.svg` under
+ * the same URL, and Homestead's own disk cache never expires either. With a year and
+ * `immutable` there was no recovery lever at all — one wrong or truncated icon and every
+ * viewer's browser holds it until they clear site data, which is not an instruction you
+ * can give a housemate.
+ *
+ * A day is still one request per browser per icon per day for a file served off the LAN,
+ * and it bounds the blast radius of a bad cache entry to something an admin can wait out.
+ * Purging the server's disk cache is still manual — see the phase carry-forward.
+ */
+const CACHE_CONTROL = "public, max-age=86400";
 
 export async function iconRoutes(app: FastifyInstance): Promise<void> {
   const { icons } = app.deps;
@@ -41,6 +53,9 @@ export async function iconRoutes(app: FastifyInstance): Promise<void> {
         // The proxy exists partly so a viewer's browser never contacts a CDN. Do not let
         // an SVG's own content reach back out.
         .header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'")
+        // The content-type above is hardcoded, never taken from upstream, so a sniffing
+        // browser is the only way this body gets interpreted as anything else.
+        .header("x-content-type-options", "nosniff")
         .send(body)
     );
   });
