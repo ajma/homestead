@@ -141,6 +141,58 @@ describe("persistResult", () => {
     expect(second).toMatchObject({ status: "down", faultClass: "app", changed: false });
   });
 
+  it("never publishes a fault-class move that only ever lived in an unconfirmed failure (up -> down(unconfirmed) -> up)", async () => {
+    // The raw observation's fault class can flicker while the debounced status never
+    // leaves `up` — that flicker is exactly the spam `changed` exists to suppress, since
+    // the launcher never showed anything but `up` to explain.
+    const { db, probe } = await seed();
+    const threshold2 = { ...opts, failureThreshold: 2 };
+    const first = await persistResult(db, probe, { status: "up" }, threshold2);
+    expect(first).toMatchObject({ status: "up" });
+
+    const [afterFirst] = await db.select().from(probes).where(eq(probes.id, probe.id));
+    const second = await persistResult(
+      db,
+      afterFirst as never,
+      { status: "down", faultClass: "network" },
+      threshold2,
+    );
+    expect(second).toMatchObject({ status: "up", changed: false });
+
+    const [afterSecond] = await db.select().from(probes).where(eq(probes.id, probe.id));
+    const third = await persistResult(db, afterSecond as never, { status: "up" }, threshold2);
+    expect(third).toMatchObject({ status: "up", changed: false });
+  });
+
+  it("publishes nothing for a fault class attached to a first failure held at unknown", async () => {
+    const { db, probe } = await seed();
+    const result = await persistResult(
+      db,
+      probe,
+      { status: "down", faultClass: "config" },
+      { ...opts, failureThreshold: 2 },
+    );
+    expect(result).toMatchObject({ status: "unknown", changed: false });
+  });
+
+  it("publishes nothing for a fault class that moves inside the grace window", async () => {
+    // `starting` is the grace window a deliberate restart opens: flapping — including a
+    // flapping fault class — is expected there and is the reason the window exists.
+    const { db, probe } = await seed();
+    const graceOpts = { now: NOW, graceUntil: NOW + 60_000, failureThreshold: 2 };
+    const first = await persistResult(db, probe, { status: "down", faultClass: "app" }, graceOpts);
+    expect(first).toMatchObject({ status: "starting" });
+
+    const [afterFirst] = await db.select().from(probes).where(eq(probes.id, probe.id));
+    const second = await persistResult(
+      db,
+      afterFirst as never,
+      { status: "down", faultClass: "network" },
+      graceOpts,
+    );
+    expect(second).toMatchObject({ status: "starting", changed: false });
+  });
+
   it("writes nothing at all when the transaction fails", async () => {
     // The denormalised copy is only trustworthy because it cannot separate from its
     // sample. A half-write would leave the launcher showing a status no sample supports.

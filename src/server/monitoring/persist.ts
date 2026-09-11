@@ -89,7 +89,17 @@ export async function persistResult(
   // though the status itself did not change. `changed` here is therefore "publish-worthy",
   // not "status changed" — the meaning `EventBus.publish` and the scheduler's listener
   // loop actually consume it for.
-  const faultClassChanged = (result.faultClass ?? null) !== (probe.lastFaultClass ?? null);
+  //
+  // Gated on the *debounced* status, not the raw observation: an unconfirmed failure can
+  // carry any fault class without ever being real, so comparing `result.faultClass`
+  // against `probe.lastFaultClass` on every sample publishes on flapping the debounce
+  // exists to hide (up -> down(network), unconfirmed -> up again would otherwise fire
+  // twice for a status that never left `up`). Only `down` and `degraded` are confirmed
+  // failures worth naming a cause for. `starting` is excluded deliberately — it is the
+  // grace window, where flapping is expected — and so are `up` and `unknown`.
+  const faultClassChanged =
+    (transition.status === "down" || transition.status === "degraded") &&
+    (result.faultClass ?? null) !== (probe.lastFaultClass ?? null);
 
   return {
     probeId: probe.id,
