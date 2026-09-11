@@ -173,6 +173,34 @@ describe("ContainersTab", () => {
     await waitFor(() => expect(screen.getByText("unless-stopped")).toBeTruthy());
   });
 
+  it("does not refetch a container's detail on re-expand within the staleTime window", async () => {
+    // Without a `staleTime`, `useQuery` defaults to 0 and treats the cached detail as
+    // stale the instant it lands — a collapse/re-expand would refire the Docker inspect
+    // even though nothing about the container could plausibly have changed yet.
+    stubList([container({ id: "c1" })]);
+    mount();
+
+    await waitFor(() => expect(screen.getByText(/c1/)).toBeTruthy());
+    const toggle = screen.getByRole("button", { name: /jellyfin-c1/ });
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText("unless-stopped")).toBeTruthy());
+    const detailCallsAfterFirstExpand = vi
+      .mocked(fetch)
+      .mock.calls.filter((call) => String(call[0]).includes("/containers/c1")).length;
+    expect(detailCallsAfterFirstExpand).toBe(1);
+
+    fireEvent.click(toggle);
+    expect(screen.queryByText("unless-stopped")).toBeNull();
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText("unless-stopped")).toBeTruthy());
+
+    expect(
+      vi.mocked(fetch).mock.calls.filter((call) => String(call[0]).includes("/containers/c1")),
+    ).toHaveLength(detailCallsAfterFirstExpand);
+  });
+
   it("collapsing a row stops showing its detail", async () => {
     stubList([container({ id: "c1" })]);
     mount();

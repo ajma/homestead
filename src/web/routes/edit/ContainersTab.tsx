@@ -54,6 +54,11 @@ function ContainerDetailPanel({ appId, containerId }: { appId: string; container
   const { data, isPending, isError } = useQuery({
     queryKey: [...containersKey(appId), containerId],
     queryFn: () => apiFetch<ContainerDetail>(`/api/apps/${appId}/containers/${containerId}`),
+    // Matches the 5s `staleTime` the sibling container list (`useContainers`, in
+    // `src/web/api/admin.ts`) uses — this panel is scoped to one row of that same list,
+    // so collapsing and re-expanding a row within the window should reuse the cached
+    // detail rather than firing a fresh Docker inspect.
+    staleTime: 5_000,
   });
 
   if (isPending) {
