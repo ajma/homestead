@@ -36,11 +36,39 @@ export function StatusChip({
   status: AppStatus;
   reason: string;
   since: number | null;
-  onOpen: () => void;
+  /**
+   * Omitted where there is no health panel to open — the admin inventory, for one.
+   * Rendering a `<button>` with an aria-label promising "Show health details" for a
+   * click that does nothing sends a keyboard user chasing an action that isn't there;
+   * a `<span>` with the same visuals says the same thing honestly.
+   */
+  onOpen?: () => void;
 }) {
   const style = PRESENTATION[status];
   const now = useNow();
   const age = since === null ? null : relativeTime(since, now);
+
+  const className = `flex items-center gap-1.5 rounded-full px-2 py-1 text-xs ${style.text} hover:bg-slate-100 dark:hover:bg-slate-800`;
+  const content = (
+    <>
+      <span
+        className={`inline-block w-4 shrink-0 text-center text-sm leading-none ${style.glyphColor}`}
+        aria-hidden="true"
+      >
+        {style.glyph}
+      </span>
+      <span className="truncate">{reason}</span>
+      {age !== null && <span className="opacity-60">· {age}</span>}
+    </>
+  );
+
+  if (onOpen === undefined) {
+    return (
+      <span role="status" aria-label={`Status: ${status}. ${reason}.`} className={className}>
+        {content}
+      </span>
+    );
+  }
 
   return (
     <button
@@ -53,16 +81,9 @@ export function StatusChip({
         onOpen();
       }}
       aria-label={`Status: ${status}. ${reason}. Show health details.`}
-      className={`flex items-center gap-1.5 rounded-full px-2 py-1 text-xs ${style.text} hover:bg-slate-100 dark:hover:bg-slate-800`}
+      className={className}
     >
-      <span
-        className={`inline-block w-4 shrink-0 text-center text-sm leading-none ${style.glyphColor}`}
-        aria-hidden="true"
-      >
-        {style.glyph}
-      </span>
-      <span className="truncate">{reason}</span>
-      {age !== null && <span className="opacity-60">· {age}</span>}
+      {content}
     </button>
   );
 }

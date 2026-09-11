@@ -1,3 +1,4 @@
+import type { AppStatus } from "@shared/types";
 import { useAdminApps } from "@web/api/admin";
 import { AppIcon } from "@web/components/AppIcon";
 import { StatusChip } from "@web/components/StatusChip";
@@ -7,11 +8,22 @@ import { AdoptDialog } from "@web/routes/AdoptDialog";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-function noop() {
-  // `StatusChip` always renders as a button (it is the launcher's health-panel
-  // trigger). There is no health panel on this screen, so the click is a no-op and the
-  // chip is inert rather than wrong — it still reports status honestly.
-}
+/**
+ * `statusDetail` is null exactly when `statusFor` reports `unknown` (zero expected
+ * services, or an unreadable compose file) — never when the app is actually healthy.
+ * `src/shared/status-phrase.ts` owns the full cause mapping, but that mapping runs over
+ * a `ProbeSnapshot` (`kind` + `faultClass`), neither of which an `AdminApp` row carries;
+ * only `status` is known here. So this is a smaller, status-only fallback rather than a
+ * bent version of that module. It shares its wording with `status-phrase.ts` for the
+ * two cases both cover (`unknown`, `starting`).
+ */
+const STATUS_FALLBACK: Record<AppStatus, string> = {
+  up: "Healthy",
+  starting: "Starting",
+  unknown: "Not checked yet",
+  degraded: "Degraded",
+  down: "Down",
+};
 
 export function AdminApps() {
   const { data, isError } = useAdminApps();
@@ -91,16 +103,17 @@ export function AdminApps() {
                   <td className="mt-2 block md:mt-0 md:table-cell md:px-4 md:py-3">
                     <StatusChip
                       status={app.status}
-                      reason={app.statusDetail ?? "Healthy"}
+                      reason={app.statusDetail ?? STATUS_FALLBACK[app.status]}
                       since={null}
-                      onOpen={noop}
                     />
                   </td>
                   <td className="mt-2 block truncate text-xs text-slate-500 md:mt-0 md:table-cell md:px-4 md:py-3 md:text-sm dark:text-slate-400">
                     {app.directory}
                   </td>
                   <td className="mt-2 block text-xs text-slate-500 md:mt-0 md:table-cell md:px-4 md:py-3 md:text-sm dark:text-slate-400">
-                    {relativeTime(app.adoptedAt, now)} ago
+                    {app.lastDeployAt === null
+                      ? "Never"
+                      : `${relativeTime(app.lastDeployAt, now)} ago`}
                   </td>
                 </tr>
               ))}

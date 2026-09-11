@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
 import { normaliseProjectName, scanForApps } from "../apps/adoption.js";
+import { deployTimestamps } from "../apps/deploy-timestamps.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { scaffoldCompose } from "../apps/scaffold.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
@@ -316,7 +317,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // generated here. Composing the scope predicate would return nothing for a scoped
       // principal, so a successful adoption would report an empty `adopted` list.
       const [row] = await db.select().from(apps).where(eq(apps.id, id));
-      if (row) adopted.push(toAdminApp(row, await statusFor({ host, composeConfig }, row)));
+      // `lastDeployAt` is null, not looked up: this row was inserted in the transaction
+      // just above, in this same request, so no job can exist for it yet.
+      if (row) adopted.push(toAdminApp(row, await statusFor({ host, composeConfig }, row), null));
       await audit(db, ctx, {
         action: "app.adopted",
         targetType: "app",
@@ -419,13 +422,26 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
     const [row] = await db.select().from(apps).where(eq(apps.id, id));
     if (!row) return reply.code(500).send({ error: "created_but_missing" });
-    return reply.code(201).send(toAdminApp(row, await statusFor({ host, composeConfig }, row)));
+    // Just inserted above, in this request — no job can exist for it yet.
+    return reply
+      .code(201)
+      .send(toAdminApp(row, await statusFor({ host, composeConfig }, row), null));
   });
 
   app.get("/api/apps", async (request) => {
     const ctx = requireCapability(request, "app:read");
     const rows = await db.select().from(apps).where(visibleAppsWhere(ctx));
     const detailed = can(ctx, "app:config");
+
+    // One grouped query for the whole page's deploy history, same reasoning as the
+    // Docker call below — the per-row alternative is one query per app on the screen
+    // that lists every app. Viewers never see `lastDeployAt`, so they never pay for it.
+    const deployMap = detailed
+      ? await deployTimestamps(
+          db,
+          rows.map((row) => row.id),
+        )
+      : new Map<string, number>();
 
     // One Docker call for the whole page, partitioned by project. The per-row
     // alternative was a round trip per app on the screen that lists them all.
@@ -456,7 +472,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
         chunk.map(async (row) => {
           if (!dockerReachable) {
             const status = { status: "unknown" as const, detail: "Docker is unreachable" };
-            return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
+            return detailed
+              ? toAdminApp(row, status, deployMap.get(row.id) ?? null)
+              : toViewerApp(row, status);
           }
           const project = await currentProjectName({ host, composeConfig }, row);
           const status = await statusFor(
@@ -464,7 +482,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
             row,
             byProject.get(project) ?? [],
           );
-          return detailed ? toAdminApp(row, status) : toViewerApp(row, status);
+          return detailed
+            ? toAdminApp(row, status, deployMap.get(row.id) ?? null)
+            : toViewerApp(row, status);
         }),
       );
       results.push(...chunkResults);
@@ -479,7 +499,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
     const status = await statusFor({ host, composeConfig }, row);
-    return can(ctx, "app:config") ? toAdminApp(row, status) : toViewerApp(row, status);
+    if (!can(ctx, "app:config")) return toViewerApp(row, status);
+    const deployMap = await deployTimestamps(db, [row.id]);
+    return toAdminApp(row, status, deployMap.get(row.id) ?? null);
   });
 
   app.patch("/api/apps/:id", async (request, reply) => {
@@ -511,7 +533,9 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     });
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    return toAdminApp(row, await statusFor({ host, composeConfig }, row));
+    const status = await statusFor({ host, composeConfig }, row);
+    const deployMap = await deployTimestamps(db, [row.id]);
+    return toAdminApp(row, status, deployMap.get(row.id) ?? null);
   });
 
   app.delete("/api/apps/:id", async (request, reply) => {

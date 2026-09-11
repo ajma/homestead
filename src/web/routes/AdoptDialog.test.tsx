@@ -112,7 +112,7 @@ describe("AdoptDialog", () => {
     // directory the user asked for and did not get.
     stubScan({
       adopted: [{ id: "a1", directory: "jellyfin" }],
-      failed: [{ directory: "gitea", error: "compose_invalid" }],
+      failed: [{ directory: "gitea", message: "compose_invalid" }],
     });
     const onClose = vi.fn();
     mount(onClose);

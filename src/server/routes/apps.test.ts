@@ -1,5 +1,23 @@
+import { jobs } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
-import { describe, expect, it } from "vitest";
+import { ulid } from "ulid";
+import { describe, expect, it, vi } from "vitest";
+
+async function adoptOne(app: Awaited<ReturnType<typeof buildTestApp>>, cookie: string) {
+  app.deps.host.files.set("a/compose.yaml", "services: {}\n");
+  app.deps.host.composeResults.set("config --format json", {
+    exitCode: 0,
+    stdout: JSON.stringify({ name: "a", services: {} }),
+    stderr: "",
+  });
+  const res = await app.inject({
+    method: "POST",
+    url: "/api/apps/adopt",
+    headers: { cookie },
+    payload: { directories: ["a"] },
+  });
+  return res.json().adopted[0].id as string;
+}
 
 describe("app inventory API", () => {
   it("refuses the scan to a viewer", async () => {
@@ -380,6 +398,116 @@ describe("app inventory API", () => {
     expect(res.json()).toHaveLength(3);
     expect(app.deps.host.listContainersCalls).toBe(1);
     await app.close();
+  });
+
+  describe("lastDeployAt", () => {
+    it("shows the finish time of a succeeded deploy", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "succeeded", finishedAt: 12_345 });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].lastDeployAt).toBe(12_345);
+      await app.close();
+    });
+
+    it("says 'never' (null) when the only job is a pull", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "pull", status: "succeeded", finishedAt: 12_345 });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].lastDeployAt).toBeNull();
+      await app.close();
+    });
+
+    it("says 'never' (null) when the only up job failed", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "failed", finishedAt: 12_345 });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].lastDeployAt).toBeNull();
+      await app.close();
+    });
+
+    it("shows the later of two succeeded deploys", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "succeeded", finishedAt: 100 });
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "restart", status: "succeeded", finishedAt: 200 });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].lastDeployAt).toBe(200);
+      await app.close();
+    });
+
+    it("is null for an app with no jobs at all", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      await adoptOne(app, cookie);
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].lastDeployAt).toBeNull();
+      await app.close();
+    });
+
+    it("costs one grouped query for the whole list, not one per app", async () => {
+      // The absolute count includes fixed overhead (session lookup, capability checks,
+      // the `apps` select itself) that has nothing to do with deploy timestamps, so the
+      // binding assertion is that the count does not grow with the number of apps on the
+      // page — a per-row lookup would add one `select` per adopted app, a grouped query
+      // adds exactly one regardless of how many rows it covers.
+      async function selectsForList(app: Awaited<ReturnType<typeof buildTestApp>>, cookie: string) {
+        const selectSpy = vi.spyOn(app.deps.db, "select");
+        await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+        const calls = selectSpy.mock.calls.length;
+        selectSpy.mockRestore();
+        return calls;
+      }
+
+      const oneApp = await buildTestApp();
+      const { cookie: oneCookie } = await signUpAdmin(oneApp);
+      await adoptOne(oneApp, oneCookie);
+      const selectsForOne = await selectsForList(oneApp, oneCookie);
+      await oneApp.close();
+
+      const threeApps = await buildTestApp();
+      const { cookie: threeCookie } = await signUpAdmin(threeApps);
+      for (const dir of ["a", "b", "c"]) {
+        threeApps.deps.host.files.set(`${dir}/compose.yaml`, "services: {}\n");
+      }
+      threeApps.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "p", services: {} }),
+        stderr: "",
+      });
+      const adopted = await threeApps.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie: threeCookie },
+        payload: { directories: ["a", "b", "c"] },
+      });
+      expect(adopted.json().adopted).toHaveLength(3);
+      const selectsForThree = await selectsForList(threeApps, threeCookie);
+      await threeApps.close();
+
+      expect(selectsForThree).toBe(selectsForOne);
+    });
   });
 
   it("never shows a viewer the raw output of docker compose config", async () => {

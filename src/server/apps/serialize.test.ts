@@ -64,7 +64,7 @@ describe("app serializers", () => {
 
   it("serialises the whole row for an admin", () => {
     // Full shape, not spot-checks: a missing admin field would otherwise pass.
-    expect(toAdminApp(row, status)).toEqual({
+    expect(toAdminApp(row, status, 1700003600)).toEqual({
       id: "app-1",
       slug: "jellyfin",
       displayName: "Jellyfin",
@@ -85,7 +85,12 @@ describe("app serializers", () => {
       graceUntil: null,
       adoptedAt: 1700000000,
       archivedAt: null,
+      lastDeployAt: 1700003600,
     });
+  });
+
+  it("passes null through when there is no deploy to report", () => {
+    expect(toAdminApp(row, status, null).lastDeployAt).toBeNull();
   });
 
   // A new column must not silently reach viewers. This is the guard that makes the

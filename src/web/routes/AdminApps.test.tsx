@@ -28,6 +28,7 @@ const app = (over: Partial<AdminApp> = {}): AdminApp => ({
   graceUntil: null,
   adoptedAt: 1_800_000_000,
   archivedAt: null,
+  lastDeployAt: null,
   ...over,
 });
 
@@ -70,10 +71,14 @@ describe("AdminApps", () => {
     );
   });
 
-  it("renders cached rows immediately rather than a spinner", async () => {
+  it("renders cached rows immediately rather than a spinner", () => {
     mount([app({ displayName: "Cached" })]);
+    // Deliberately synchronous and unawaited: the property under test is that the row
+    // is there in the very first render, straight from the cache, before any fetch
+    // could possibly have resolved. `queryByText(/Loading/)` would pass here whether or
+    // not cache-first rendering worked — nothing in this component ever renders that
+    // word — so it asserted nothing. See the binding-check report for a demonstration.
     expect(screen.getByText("Cached")).toBeTruthy();
-    expect(screen.queryByText(/Loading/)).toBeNull();
   });
 
   it("keeps showing cached rows when a background refetch fails", async () => {
@@ -126,5 +131,29 @@ describe("AdminApps", () => {
   it("shows when an app is hidden from the launcher", async () => {
     mount([app({ showOnLauncher: false })]);
     expect(screen.getByText(/Hidden/)).toBeTruthy();
+  });
+
+  it("says 'Never' under Last deploy for an app that has never been deployed", async () => {
+    mount([app({ lastDeployAt: null })]);
+    expect(screen.getByText("Never")).toBeTruthy();
+  });
+
+  it("shows the age of the most recent deploy when there is one", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mount([app({ lastDeployAt: now - 60 })]);
+    expect(screen.getByText(/1m ago/)).toBeTruthy();
+  });
+
+  it("does not claim a zero-services app is healthy", async () => {
+    // `statusDetail` is null exactly when `statusFor` reports `unknown` — a probe that
+    // never ran is not evidence of health, and the fallback must not say otherwise.
+    mount([app({ status: "unknown", statusDetail: null })]);
+    expect(screen.queryByText("Healthy")).toBeNull();
+    expect(screen.getByText("Not checked yet")).toBeTruthy();
+  });
+
+  it("gives every row's status chip no button role, since there is no health panel here", async () => {
+    mount([app()]);
+    expect(screen.queryByRole("button", { name: /Show health details/ })).toBeNull();
   });
 });

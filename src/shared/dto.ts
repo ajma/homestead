@@ -30,4 +30,5 @@ export type AdminApp = ViewerApp & {
   graceUntil: number | null;
   adoptedAt: number;
   archivedAt: number | null;
+  lastDeployAt: number | null;
 };

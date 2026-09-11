@@ -59,7 +59,17 @@ export function toViewerApp(row: AppRowLike, status: AppStatusSummary): ViewerAp
   };
 }
 
-export function toAdminApp(row: AppRowLike, status: AppStatusSummary): AdminApp {
+/**
+ * `lastDeployAt` is a caller-supplied parameter rather than a property read off `row`:
+ * it comes from a grouped query over `jobs`, not from the `apps` row itself, and every
+ * caller has to look it up (or explicitly decide a fresh row has none) rather than get
+ * it silently defaulted to null.
+ */
+export function toAdminApp(
+  row: AppRowLike,
+  status: AppStatusSummary,
+  lastDeployAt: number | null,
+): AdminApp {
   return {
     ...toViewerApp(row, status),
     // Raw tool output, which `toViewerApp` deliberately never sees.
@@ -75,5 +85,6 @@ export function toAdminApp(row: AppRowLike, status: AppStatusSummary): AdminApp 
     graceUntil: row.graceUntil,
     adoptedAt: row.adoptedAt,
     archivedAt: row.archivedAt,
+    lastDeployAt,
   };
 }

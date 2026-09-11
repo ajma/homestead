@@ -76,6 +76,20 @@ describe("StatusChip", () => {
     expect(glyphs.size).toBe(statuses.length);
   });
 
+  it("renders a button that calls onOpen when a handler is given", () => {
+    const onOpen = vi.fn();
+    render(<StatusChip status="up" reason="Healthy" since={null} onOpen={onOpen} />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders no button and no 'Show health details' promise when onOpen is omitted", () => {
+    render(<StatusChip status="up" reason="Healthy" since={null} />);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByText(/Show health details/)).toBeNull();
+    expect(screen.getByText("Healthy")).toBeTruthy();
+  });
+
   it("keeps its duration current on the shared clock, without any prop changing", () => {
     vi.useFakeTimers();
     try {

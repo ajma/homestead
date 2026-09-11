@@ -7,19 +7,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 type AdoptedApp = { id: string; directory: string };
 
 /**
- * One row of `POST /api/apps/adopt`'s `failed` array.
- *
- * The live route (`src/server/routes/apps.ts`) names this field `message`. `error` is
- * kept here too because it costs nothing and a future rename on either side should not
- * silently turn into "unknown error" for every row.
+ * One row of `POST /api/apps/adopt`'s `failed` array — matches what the live route
+ * (`src/server/routes/apps.ts`) actually sends. An earlier draft of this file expected
+ * `error`, which the route never sends; a `?? "unknown error"` fallback covered the
+ * mismatch instead of surfacing it, so every row silently rendered "unknown error".
  */
-type AdoptFailure = { directory: string; error?: string; message?: string };
+type AdoptFailure = { directory: string; message: string };
 
 type AdoptResponse = { adopted: AdoptedApp[]; failed: AdoptFailure[] };
-
-function failureReason(failure: AdoptFailure): string {
-  return failure.error ?? failure.message ?? "unknown error";
-}
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -229,7 +224,7 @@ export function AdoptDialog({ onClose }: { onClose: () => void }) {
                   <ul className="flex flex-col gap-1 text-rose-700 dark:text-rose-300">
                     {result.failed.map((failure) => (
                       <li key={failure.directory}>
-                        {failure.directory}: {failureReason(failure)}
+                        {failure.directory}: {failure.message}
                       </li>
                     ))}
                   </ul>
