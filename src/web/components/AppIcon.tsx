@@ -51,10 +51,18 @@ export function AppIcon({
 
   return (
     <img
-      // The server picks the theme variant; `prefers-color-scheme` is not readable from
-      // a URL, so the variant query is set by the browser's media query below.
+      // Always Homestead's own proxy, never the CDN. Hotlinking would tell a public CDN
+      // exactly which self-hosted services this household runs, from every viewer's
+      // network. The route also accepts `?variant=light|dark`, which nothing sends yet:
+      // a CSS media query cannot set an attribute, so following `prefers-color-scheme`
+      // needs `matchMedia` and is deliberately out of scope for this phase.
       src={`/api/icons/${iconRef}.svg`}
-      alt={displayName}
+      // Decorative. The display name is rendered as text right beside this in every
+      // caller, and a non-empty `alt` makes a screen reader announce "Jellyfin, image,
+      // Jellyfin". The letter-tile branch above is `aria-hidden` for the same reason.
+      alt=""
+      aria-hidden="true"
+      data-icon-slug={iconRef}
       loading="lazy"
       onError={() => setFailed(true)}
       className={`${box} shrink-0 rounded-xl object-contain`}

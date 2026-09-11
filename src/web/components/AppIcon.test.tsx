@@ -11,17 +11,30 @@ describe("AppIcon", () => {
 
   it("loads the icon through Homestead's own proxy, never a CDN", () => {
     // The privacy property: a viewer's browser must not tell jsDelivr what runs here.
-    render(<AppIcon iconRef="jellyfin" displayName="Jellyfin" />);
-    const img = screen.getByRole("img", { name: "Jellyfin" }) as HTMLImageElement;
-    expect(img.getAttribute("src")).toBe("/api/icons/jellyfin.svg");
-    expect(img.getAttribute("src")).not.toContain("jsdelivr");
+    const { container } = render(<AppIcon iconRef="jellyfin" displayName="Jellyfin" />);
+    const img = container.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("/api/icons/jellyfin.svg");
+    expect(img?.getAttribute("src")).not.toContain("jsdelivr");
+  });
+
+  it("is decorative, since the display name is rendered as text beside it", () => {
+    // Queried by tag rather than by role: an empty `alt` is what makes it decorative, and
+    // that is exactly what removes it from the accessibility tree. A non-empty alt here
+    // makes a screen reader announce "Jellyfin, image, Jellyfin".
+    const { container } = render(<AppIcon iconRef="jellyfin" displayName="Jellyfin" />);
+    const img = container.querySelector("img");
+    expect(img?.getAttribute("alt")).toBe("");
+    expect(img?.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.queryByRole("img")).toBeNull();
   });
 
   it("falls back to the letter tile when the image fails to load", () => {
-    render(<AppIcon iconRef="broken" displayName="Plex" />);
-    fireEvent.error(screen.getByRole("img", { name: "Plex" }));
+    const { container } = render(<AppIcon iconRef="broken" displayName="Plex" />);
+    const img = container.querySelector("img");
+    if (!img) throw new Error("expected an img before the error");
+    fireEvent.error(img);
     expect(screen.getByText("P")).toBeTruthy();
-    expect(screen.queryByRole("img")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
   });
 
   it("uses the first letter of a name that starts with a digit or symbol", () => {
