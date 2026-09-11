@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useSession } from "@web/auth/useSession";
 import { AppLayout } from "@web/routes/AppLayout";
+import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
 import { Placeholder } from "@web/routes/Placeholder";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
@@ -20,7 +21,7 @@ function Routed() {
   return (
     <Routes>
       <Route element={<AppLayout me={me} />}>
-        <Route path="/" element={<Placeholder title="Launcher" />} />
+        <Route path="/" element={<Launcher />} />
         <Route
           path="/apps/*"
           element={isAdmin ? <Placeholder title="Manage apps" /> : <Navigate to="/" replace />}
