@@ -3,8 +3,9 @@ import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
-import { scanForApps } from "../apps/adoption.js";
+import { normaliseProjectName, scanForApps } from "../apps/adoption.js";
 import { maskEnv, parseEnv } from "../apps/env-file.js";
+import { scaffoldCompose } from "../apps/scaffold.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { currentProjectName, statusFor } from "../apps/status-for.js";
 import { audit } from "../audit.js";
@@ -19,6 +20,21 @@ import { HashMismatchError } from "../host/types.js";
 import type { IconMetadata } from "../icons/metadata.js";
 
 const adoptBody = z.object({ directories: z.array(z.string().min(1)).min(1) });
+
+const createBody = z.object({
+  displayName: z.string().min(1).max(100),
+  // A single path segment. Anything with a separator, a dot segment, or a leading slash
+  // is refused here as well as by the host's confinement check — two layers, because the
+  // regex is the kind of thing a later change loosens.
+  directory: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "directory must be a single path segment"),
+  description: z.string().max(500).nullable().optional(),
+  iconRef: z.string().max(64).nullable().optional(),
+  category: z.string().max(64).nullable().optional(),
+});
 
 const launchUrlSchema = z
   .union([
@@ -303,6 +319,64 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(anyConflict ? 409 : 422).send({ error: "adopt_failed", adopted, failed });
     }
     return reply.code(201).send({ adopted, failed });
+  });
+
+  app.post("/api/apps", async (request, reply) => {
+    const ctx = requireCapability(request, "app:config");
+    const body = createBody.parse(request.body);
+
+    // Existence check before any write. Overwriting a compose file because someone reused
+    // a directory name is unrecoverable from inside Homestead.
+    const existing = await db
+      .select({ id: apps.id })
+      .from(apps)
+      .where(and(eq(apps.hostId, LOCAL_HOST_ID), eq(apps.directory, body.directory)));
+    if (existing.length > 0) return reply.code(409).send({ error: "directory_exists" });
+    try {
+      await host.readTextFile(`${body.directory}/compose.yaml`);
+      return reply.code(409).send({ error: "directory_exists" });
+    } catch {
+      // Not there, which is what we want.
+    }
+
+    // Write the file first. A row pointing at a directory that does not exist is worse
+    // than a directory with no row: the row is visible in the UI and every action on it
+    // fails, while a stray directory is picked up by the next scan as adoptable.
+    await host.writeTextFile(
+      `${body.directory}/compose.yaml`,
+      scaffoldCompose(body.displayName),
+      null,
+    );
+
+    const id = ulid();
+    const slug = await uniqueSlug(body.directory);
+    await db.transaction(async (tx) => {
+      await tx.insert(apps).values({
+        id,
+        hostId: LOCAL_HOST_ID,
+        slug,
+        displayName: body.displayName,
+        description: body.description ?? null,
+        iconRef: body.iconRef ?? null,
+        category: body.category ?? null,
+        directory: body.directory,
+        composeFile: "compose.yaml",
+        projectName: normaliseProjectName(body.directory),
+      });
+      await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker", enabled: true });
+    });
+
+    await audit(db, ctx, {
+      action: "app.created",
+      targetType: "app",
+      targetId: id,
+      detail: { directory: body.directory },
+      ip: request.ip,
+    });
+
+    const [row] = await db.select().from(apps).where(eq(apps.id, id));
+    if (!row) return reply.code(500).send({ error: "created_but_missing" });
+    return reply.code(201).send(toAdminApp(row, await statusFor({ host, composeConfig }, row)));
   });
 
   app.get("/api/apps", async (request) => {

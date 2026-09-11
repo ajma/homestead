@@ -27,7 +27,7 @@ export type ScanResult = { discovered: DiscoveredApp[]; orphans: OrphanStack[] }
  * containers appear separately as an orphan. One real directory produces two wrong
  * rows.
  */
-function normaliseProjectName(directory: string): string {
+export function normaliseProjectName(directory: string): string {
   return directory
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "")
