@@ -558,6 +558,14 @@ export type LauncherApp = {
   status: AppStatus;
   reason: string;
   since: number | null;
+  /**
+   * Every enabled probe's current state. The client needs these to apply a single
+   * probe's SSE event and re-derive the app's status the way the server would. Without
+   * them it can only overwrite, which made one probe recovering paint a tile green
+   * while another was still down. Added after Task 7's review; see
+   * `task-7-fix-brief.md`.
+   */
+  probes: ProbeSnapshot[];
 };
 ```
 
@@ -1943,7 +1951,7 @@ class FakeEventSource {
 const tile = (over: Partial<LauncherApp> = {}): LauncherApp => ({
   id: "a1", slug: "jellyfin", displayName: "Jellyfin", description: null, iconRef: null,
   category: "Media", launchUrl: null, sortOrder: 0, status: "up", reason: "Healthy",
-  since: 100, ...over,
+  since: 100, probes: [], ...over,
 });
 
 function Harness() {
@@ -2459,7 +2467,7 @@ import { describe, expect, it, vi } from "vitest";
 const tile = (over: Partial<LauncherApp> = {}): LauncherApp => ({
   id: "a1", slug: "jellyfin", displayName: "Jellyfin", description: "Media server",
   iconRef: "jellyfin", category: "Media", launchUrl: "http://nas:8096", sortOrder: 0,
-  status: "up", reason: "Healthy", since: null, ...over,
+  status: "up", reason: "Healthy", since: null, probes: [], ...over,
 });
 
 describe("AppCard", () => {
@@ -2626,7 +2634,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const tile = (over: Partial<LauncherApp> = {}): LauncherApp => ({
   id: "a1", slug: "jellyfin", displayName: "Jellyfin", description: "Media server",
   iconRef: null, category: "Media", launchUrl: "http://nas:8096", sortOrder: 0,
-  status: "up", reason: "Healthy", since: null, ...over,
+  status: "up", reason: "Healthy", since: null, probes: [], ...over,
 });
 
 function mount(client: QueryClient) {
