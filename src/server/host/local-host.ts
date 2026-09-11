@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import Docker from "dockerode";
@@ -70,6 +70,29 @@ export class LocalHost implements Host {
       }
     }
     return found.sort((a, b) => a.directory.localeCompare(b.directory));
+  }
+
+  /**
+   * Creates an app's directory under the compose root. Idempotent.
+   *
+   * `resolveForWrite` is the confinement check reused here rather than duplicated: its
+   * "parent must exist" rule is trivially satisfied for a brand-new top-level directory,
+   * because the parent IS the compose root, which always exists. That rule only ever
+   * bites when something tries to write a FILE whose own directory does not exist yet —
+   * which is exactly the bug this method exists to fix, by running first and making that
+   * directory exist. `resolveForWrite` also runs the guard's `assertAddressesChild`
+   * check and its symlink/traversal checks, so a nested or escaping path (e.g. "a/../b")
+   * is rejected here without a second, competing implementation of path confinement.
+   *
+   * `recursive: true` is deliberate, not a shortcut someone should "harden" away. It
+   * makes this call idempotent: a create can fail AFTER this step — the compose write,
+   * or the row insert — and a retry with the same directory name must not then die on
+   * `EEXIST`. It cannot be used to create a nested path, because `resolveForWrite` has
+   * already rejected anything that is not a direct child of the root.
+   */
+  async createAppDirectory(directory: string): Promise<void> {
+    const abs = await this.guard.resolveForWrite(directory);
+    await mkdir(abs, { recursive: true });
   }
 
   async readTextFile(rel: string): Promise<FileRead> {

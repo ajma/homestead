@@ -92,6 +92,96 @@ describe("POST /api/apps", () => {
     expect(probes.json()[0]).toMatchObject({ kind: "docker", enabled: true });
   });
 
+  it("survives two concurrent creates for different directories", async () => {
+    // The adopt route wraps its transaction in `retryOnBusy`; before this fix, create did
+    // not. Two ordinary, non-conflicting creates fired together must both succeed rather
+    // than one losing a database-internal race that has nothing to do with either
+    // directory.
+    const { app, cookie } = await ready();
+    const [a, b] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/api/apps",
+        headers: { cookie },
+        payload: { displayName: "Jellyfin", directory: "jellyfin" },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/apps",
+        headers: { cookie },
+        payload: { displayName: "Immich", directory: "immich" },
+      }),
+    ]);
+    expect([a.statusCode, b.statusCode]).toEqual([201, 201]);
+  });
+
+  it("survives a competing transaction opening on the shared connection mid-create", async () => {
+    // libSQL's `:memory:` client has exactly one physical connection (see `db/retry.ts`):
+    // two `db.transaction()` calls at once always collide, and in production this is the
+    // scheduler's own probe-persistence transaction landing at the same moment a create
+    // is in flight, not another instance of this same route. Reproduced directly rather
+    // than by racing two HTTP requests against each other: two injected requests rarely
+    // land close enough in wall-clock time in this in-process harness to force a genuine
+    // collision, whereas firing a bystander transaction at the exact instant this route
+    // opens its own reproduces the ONE scenario `retryOnBusy` exists for, deterministically.
+    //
+    // Measured: without `retryOnBusy` around this route's transaction, this test fails
+    // every time with a raw 500 (`LibsqlError: TRANSACTION_ACTIVE`), not intermittently.
+    const { app, cookie } = await ready();
+    const originalTransaction = app.deps.db.transaction.bind(app.deps.db);
+    let triggered = false;
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over db.transaction
+    (app.deps.db as any).transaction = (fn: any) => {
+      if (!triggered) {
+        triggered = true;
+        // Fire-and-forget, deliberately not awaited: a bystander transaction opening on
+        // the shared connection at the exact instant the create route opens its own.
+        void originalTransaction(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        });
+      }
+      return originalTransaction(fn);
+    };
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/apps",
+        headers: { cookie },
+        payload: { displayName: "Jellyfin", directory: "jellyfin" },
+      });
+      expect(res.statusCode).toBe(201);
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (app.deps.db as any).transaction = originalTransaction;
+    }
+  });
+
+  it("resolves two concurrent creates of the SAME directory into one 201 and one clean 409", async () => {
+    // Not a 500, and not a raw SQL message: `apps_host_directory` is unique, but the
+    // constraint is never what actually fires here — `writeTextFile`'s own hash guard is
+    // a single-writer gate that only lets one of the two racing writes land, and the
+    // loser must come back as the ordinary "already exists" response, not a crash.
+    const { app, cookie } = await ready();
+    const [a, b] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/api/apps",
+        headers: { cookie },
+        payload: { displayName: "Jellyfin", directory: "jellyfin" },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/apps",
+        headers: { cookie },
+        payload: { displayName: "Jellyfin Two", directory: "jellyfin" },
+      }),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([201, 409]);
+    const loser = a.statusCode === 409 ? a : b;
+    expect(loser.json().error).toBe("directory_exists");
+  });
+
   it("is forbidden to a viewer", async () => {
     const { app, cookie } = await ready();
     const viewer = await createViewer(app, cookie);

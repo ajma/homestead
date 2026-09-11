@@ -102,6 +102,16 @@ export class FakeHost implements Host {
     this.releaseComposeGate = null;
   }
 
+  /**
+   * No-op: this `Map`-backed fake has no real filesystem, so there is no directory to
+   * create — `writeTextFile` below just sets a key regardless of what "directory" it is
+   * nested under. That is precisely why this fake cannot see the bug `createAppDirectory`
+   * exists to fix on `LocalHost` (the parent directory must exist before a write can
+   * resolve into it): nothing here models a parent needing to exist at all. See
+   * `apps-create-local.test.ts`, which drives a real `LocalHost` for that reason.
+   */
+  async createAppDirectory(_directory: string): Promise<void> {}
+
   async listAppDirectories(): Promise<DiscoveredDir[]> {
     const directories = new Set<string>();
     for (const path of this.files.keys()) {

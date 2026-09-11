@@ -66,6 +66,8 @@ export type JobHandle = {
 export interface Host {
   readonly id: string;
   listAppDirectories(): Promise<DiscoveredDir[]>;
+  /** Creates an app's directory under the compose root. Idempotent. */
+  createAppDirectory(directory: string): Promise<void>;
   readTextFile(rel: string): Promise<FileRead>;
   writeTextFile(
     rel: string,

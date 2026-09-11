@@ -1,3 +1,4 @@
+import { LibsqlError } from "@libsql/client";
 import type { AdminApp, ViewerApp } from "@shared/dto";
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
@@ -75,6 +76,15 @@ const composeWriteBody = z.object({
   content: z.string(),
   expectedHash: z.string().nullable(),
 });
+
+/**
+ * True for a UNIQUE constraint violation — `apps_host_directory` or `apps_host_slug` —
+ * as opposed to `SQLITE_BUSY`/`TRANSACTION_ACTIVE`, which `retryOnBusy` already handles,
+ * or anything else, which is a genuine failure a 500 should report honestly.
+ */
+function isUniqueConstraintViolation(error: unknown): boolean {
+  return error instanceof LibsqlError && error.code === "SQLITE_CONSTRAINT";
+}
 
 /** A URL-safe slug: lowercase, anything outside `[a-z0-9-]` dropped. */
 function normaliseSlug(directory: string): string {
@@ -339,32 +349,65 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // Not there, which is what we want.
     }
 
+    // The directory itself must exist before anything can be written into it.
+    // `LocalHost.writeTextFile` resolves through a guard that requires a write's PARENT
+    // to already exist — true for every other write in this file, which all target a
+    // directory adoption already found, but never true for a brand-new app until
+    // something creates it. Idempotent, so a retry after a later failure in this handler
+    // does not die on the directory already being there.
+    await host.createAppDirectory(body.directory);
+
     // Write the file first. A row pointing at a directory that does not exist is worse
     // than a directory with no row: the row is visible in the UI and every action on it
     // fails, while a stray directory is picked up by the next scan as adoptable.
-    await host.writeTextFile(
-      `${body.directory}/compose.yaml`,
-      scaffoldCompose(body.displayName),
-      null,
-    );
+    try {
+      await host.writeTextFile(
+        `${body.directory}/compose.yaml`,
+        scaffoldCompose(body.displayName),
+        null,
+      );
+    } catch (error) {
+      if (error instanceof HashMismatchError) {
+        // A concurrent create for the same directory won the race to write first.
+        return reply.code(409).send({ error: "directory_exists" });
+      }
+      throw error;
+    }
 
     const id = ulid();
     const slug = await uniqueSlug(body.directory);
-    await db.transaction(async (tx) => {
-      await tx.insert(apps).values({
-        id,
-        hostId: LOCAL_HOST_ID,
-        slug,
-        displayName: body.displayName,
-        description: body.description ?? null,
-        iconRef: body.iconRef ?? null,
-        category: body.category ?? null,
-        directory: body.directory,
-        composeFile: "compose.yaml",
-        projectName: normaliseProjectName(body.directory),
-      });
-      await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker", enabled: true });
-    });
+    try {
+      // The scheduler can open its own transaction (`persistResult`) the same instant
+      // this one starts — see `db/retry.ts`. Without the retry that race is a lost
+      // create and a raw 500, not merely a delayed one. Same reasoning as adopt's.
+      await retryOnBusy(() =>
+        db.transaction(async (tx) => {
+          await tx.insert(apps).values({
+            id,
+            hostId: LOCAL_HOST_ID,
+            slug,
+            displayName: body.displayName,
+            description: body.description ?? null,
+            iconRef: body.iconRef ?? null,
+            category: body.category ?? null,
+            directory: body.directory,
+            composeFile: "compose.yaml",
+            projectName: normaliseProjectName(body.directory),
+          });
+          await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker", enabled: true });
+        }),
+      );
+    } catch (error) {
+      // `apps_host_directory` is unique, but measured: it is never what actually fires
+      // for two concurrent creates of the SAME directory, because the write above is
+      // already a single-writer gate (`writeTextFile`'s hash check) that only lets one of
+      // them past. This catch is the backstop for a file-backed database, where two
+      // connections can race the constraint itself rather than the in-process write.
+      if (isUniqueConstraintViolation(error)) {
+        return reply.code(409).send({ error: "directory_exists" });
+      }
+      throw error;
+    }
 
     await audit(db, ctx, {
       action: "app.created",
