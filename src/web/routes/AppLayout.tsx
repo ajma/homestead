@@ -1,9 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@web/api/client";
 import type { Me } from "@web/auth/useSession";
+import { useEventStream } from "@web/live/useEventStream";
 import { NavLink, Outlet } from "react-router-dom";
 
 export function AppLayout({ me }: { me: Me }) {
+  useEventStream();
   const queryClient = useQueryClient();
   const isAdmin = me.role === "admin";
 
