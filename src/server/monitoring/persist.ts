@@ -82,11 +82,20 @@ export async function persistResult(
     }),
   );
 
+  // `transition.changed` alone drives `statusSince` above and is left untouched. But a
+  // fault class can move — the docker probe going from "containers not running" (app) to
+  // "Docker is unreachable" (network) — with the debounced status staying `down` the
+  // whole time. That is a different machine to go and look at, so it has to publish even
+  // though the status itself did not change. `changed` here is therefore "publish-worthy",
+  // not "status changed" — the meaning `EventBus.publish` and the scheduler's listener
+  // loop actually consume it for.
+  const faultClassChanged = (result.faultClass ?? null) !== (probe.lastFaultClass ?? null);
+
   return {
     probeId: probe.id,
     appId: probe.appId,
     status: transition.status,
     faultClass: result.faultClass ?? null,
-    changed: transition.changed,
+    changed: transition.changed || faultClassChanged,
   };
 }

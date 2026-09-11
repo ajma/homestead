@@ -102,6 +102,45 @@ describe("persistResult", () => {
     expect(updated?.lastFaultClass).toBe("network");
   });
 
+  it("publishes when only the fault class moves, even though status stays down", async () => {
+    // Containers already stopped (down/app), then the Docker socket wedges (down/network).
+    // The status never changes, but the tile is now naming the wrong machine to fix, so
+    // this has to be treated as a change for publication purposes.
+    const { db, probe } = await seed();
+    await persistResult(
+      db,
+      probe,
+      { status: "down", faultClass: "app" },
+      { ...opts, failureThreshold: 1 },
+    );
+    const [afterFirst] = await db.select().from(probes).where(eq(probes.id, probe.id));
+    const second = await persistResult(
+      db,
+      afterFirst as never,
+      { status: "down", faultClass: "network" },
+      { ...opts, failureThreshold: 1 },
+    );
+    expect(second).toMatchObject({ status: "down", faultClass: "network", changed: true });
+  });
+
+  it("still reports no change for an identical re-observation of the same fault class", async () => {
+    const { db, probe } = await seed();
+    await persistResult(
+      db,
+      probe,
+      { status: "down", faultClass: "app" },
+      { ...opts, failureThreshold: 1 },
+    );
+    const [afterFirst] = await db.select().from(probes).where(eq(probes.id, probe.id));
+    const second = await persistResult(
+      db,
+      afterFirst as never,
+      { status: "down", faultClass: "app" },
+      { ...opts, failureThreshold: 1 },
+    );
+    expect(second).toMatchObject({ status: "down", faultClass: "app", changed: false });
+  });
+
   it("writes nothing at all when the transaction fails", async () => {
     // The denormalised copy is only trustworthy because it cannot separate from its
     // sample. A half-write would leave the launcher showing a status no sample supports.
