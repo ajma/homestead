@@ -1,8 +1,9 @@
+import type { AdminApp, ViewerApp } from "@shared/dto";
 import type { LauncherApp } from "@shared/launcher";
 import { rollUpProbes } from "@shared/status-phrase";
 import type { AppStatus, FaultClass } from "@shared/types";
 import { useQueryClient } from "@tanstack/react-query";
-import { adminAppKey } from "@web/api/admin";
+import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { healthKey, launcherKey } from "@web/api/launcher";
 import { recordPatch } from "@web/live/sse-patch-store";
 import { useEffect } from "react";
@@ -68,6 +69,7 @@ export function useEventStream(): void {
       }
       if (typeof payload?.appId !== "string") return;
 
+      let matchedTile = false;
       let sawUnknownProbe = false;
       const nowMs = Date.now();
       const statusSince = Math.floor(nowMs / 1000);
@@ -77,6 +79,7 @@ export function useEventStream(): void {
         let changed = false;
         const next = current.map((tile) => {
           if (tile.id !== payload.appId) return tile;
+          matchedTile = true;
           const index = tile.probes.findIndex((p) => p.probeId === payload.probeId);
           if (index === -1) {
             // Reported below, outside setQueryData: a probe the tile doesn't know about
@@ -107,7 +110,38 @@ export function useEventStream(): void {
         return changed ? next : current;
       });
 
-      if (sawUnknownProbe) {
+      // The inventory's own cache, patched directly rather than invalidated — the same
+      // reasoning `sse-patch-store.ts` explains for the launcher, applied to
+      // `adminAppsKey` (Important 2 of the 1E final-fix brief). Unlike a launcher tile,
+      // an `AdminApp`/`ViewerApp` row carries one scalar `status`, not a `probes` array
+      // to roll up — there is nothing here to combine this probe's verdict with a
+      // sibling probe's, so a multi-probe app's row shows THIS probe's status, not
+      // necessarily the worst of all of them. That is the debounced status, not the live
+      // Docker rollup `GET /api/apps` computes; the two agree once Important 1 (grace)
+      // is fixed, in the case that actually matters — an app that just started a deploy.
+      // `statusDetail` is cleared rather than left stale: the row's specific reason text
+      // (e.g. "0/1 services up, 1 missing") would otherwise describe the status this
+      // patch just overwrote, and the fallback wording in `AdminApps.tsx`/`EditApp.tsx`
+      // covers a null detail already.
+      queryClient.setQueryData<Array<AdminApp | ViewerApp>>(adminAppsKey, (current) => {
+        if (!current) return current;
+        let changed = false;
+        const next = current.map((row) => {
+          if (row.id !== payload.appId) return row;
+          changed = true;
+          return { ...row, status: payload.status, statusDetail: null };
+        });
+        return changed ? next : current;
+      });
+
+      if (!matchedTile) {
+        // An app the launcher's cache does not know about at all yet — most commonly one
+        // created in another tab (`POST /api/apps` is new in 1E) whose first probe result
+        // just published. This cannot loop: invalidating only triggers one refetch of the
+        // launcher query, which does not itself dispatch a `status` event back into this
+        // handler. See the 1D carry-forward item 2 / the 1E final-fix brief, Important 6.
+        void queryClient.invalidateQueries({ queryKey: launcherKey });
+      } else if (sawUnknownProbe) {
         void queryClient.invalidateQueries({ queryKey: launcherKey });
       } else {
         // Record the patch so a launcher refetch already in flight — one whose server

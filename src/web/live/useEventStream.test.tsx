@@ -3,7 +3,7 @@
 import type { LauncherApp, ProbeSnapshot } from "@shared/launcher";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, waitFor } from "@testing-library/react";
-import { adminAppKey } from "@web/api/admin";
+import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { launcherKey } from "@web/api/launcher";
 import { useEventStream } from "@web/live/useEventStream";
 import { StrictMode } from "react";
@@ -146,6 +146,68 @@ describe("useEventStream", () => {
       });
     });
     expect(client.getQueryData<LauncherApp[]>(launcherKey)).toEqual([tile()]);
+  });
+
+  it("invalidates the launcher for a status frame naming an app the cache has never heard of", async () => {
+    // Item 2 of the 1D carry-forward's "Do these in 1E" list, dropped from the 1E plan
+    // and re-found by the whole-branch review as Important 6: an app created in another
+    // tab publishes its first probe result before this tab's launcher cache has ever
+    // fetched it, so no tile's `id` matches at all — not merely a tile with an unknown
+    // *probe*, which the sibling test above (and `sawUnknownProbe`) already covers.
+    // Previously neither the patch nor an invalidation fired, and the tile never
+    // appeared here until a reconnect forced one (`MAX_STREAM_MS`, 15 minutes).
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [tile()]);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+    act(() => {
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "not-mine",
+        probeId: "p9",
+        status: "down",
+        faultClass: "app",
+      });
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: launcherKey });
+  });
+
+  it("patches the cached inventory row too, not just the launcher tile", async () => {
+    // Important 2 of the 1E final-fix brief: neither the inventory (`AdminApps`) nor the
+    // edit header (`EditApp`) had any live path at all before this — a launcher tile
+    // would flip red while the row beside it in `/apps` stayed green indefinitely.
+    const client = new QueryClient();
+    client.setQueryData(launcherKey, [
+      tile({ probes: [probe({ probeId: "p1", kind: "docker", status: "up" })] }),
+    ]);
+    client.setQueryData(adminAppsKey, [
+      { id: "a1", slug: "jellyfin", status: "up", statusDetail: "1/1 services up" },
+      { id: "a2", slug: "other", status: "up", statusDetail: "1/1 services up" },
+    ]);
+    mount(client);
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+    act(() => {
+      FakeEventSource.instances[0]?.emit("status", {
+        appId: "a1",
+        probeId: "p1",
+        status: "down",
+        faultClass: "app",
+      });
+    });
+
+    const rows =
+      client.getQueryData<Array<{ id: string; status: string; statusDetail: unknown }>>(
+        adminAppsKey,
+      );
+    expect(rows?.find((row) => row.id === "a1")).toMatchObject({
+      status: "down",
+      statusDetail: null,
+    });
+    // The sibling app's row is untouched.
+    expect(rows?.find((row) => row.id === "a2")).toMatchObject({ status: "up" });
   });
 
   it("survives a malformed payload without tearing down the stream", async () => {
