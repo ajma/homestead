@@ -36,6 +36,16 @@ const transition = (
   ...over,
 });
 
+/** Polls until `predicate` is true, bounded so a regression fails the test rather than
+ * hanging the suite. Fixed sleeps flake under the load of a full parallel test run. */
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 /** Opens the stream, emits, then closes it so `inject` can settle. */
 async function collect(
   app: Awaited<ReturnType<typeof withApp>>["app"],
@@ -135,6 +145,50 @@ describe("/api/events", () => {
     const res = await app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
     expect(res.statusCode).toBe(200);
     expect(app.deps.events.subscriberCount()).toBe(0);
+    await app.close();
+  });
+
+  it("refuses a 6th concurrent stream from the same user", async () => {
+    // I6: nothing capped concurrent `/api/events` streams per user. Measured before this:
+    // one viewer opened 40 of 40 attempted streams, leaving 80 live timers.
+    const { app, cookie } = await withApp();
+    const streams = Array.from({ length: 5 }, () =>
+      app.inject({ method: "GET", url: "/api/events", headers: { cookie } }),
+    );
+    await waitUntil(() => app.deps.events.subscriberCount() === 5);
+
+    const sixth = await app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
+    expect(sixth.statusCode).toBe(429);
+    expect(sixth.json()).toMatchObject({ error: "too_many_streams" });
+    // Refused, not queued or silently dropped: the other five are untouched.
+    expect(app.deps.events.subscriberCount()).toBe(5);
+
+    app.deps.scheduler.stop();
+    app.deps.events.closeAll();
+    await Promise.all(streams);
+    await app.close();
+  });
+
+  it("lets a 6th stream through once one of the first five closes", async () => {
+    const { app, cookie } = await withApp();
+    const me = await app.inject({ method: "GET", url: "/api/me", headers: { cookie } });
+    const userId = me.json().id as string;
+
+    const streams = Array.from({ length: 5 }, () =>
+      app.inject({ method: "GET", url: "/api/events", headers: { cookie } }),
+    );
+    await waitUntil(() => app.deps.events.subscriberCount() === 5);
+
+    app.deps.events.closeForUser(userId);
+    await Promise.all(streams);
+    expect(app.deps.events.subscriberCount()).toBe(0);
+
+    const sixth = app.inject({ method: "GET", url: "/api/events", headers: { cookie } });
+    await waitUntil(() => app.deps.events.subscriberCount() === 1);
+
+    app.deps.scheduler.stop();
+    app.deps.events.closeAll();
+    await sixth;
     await app.close();
   });
 
