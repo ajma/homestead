@@ -13,6 +13,22 @@ const DEBOUNCE_MS = 600;
 type ValidateResponse = { valid: true } | { valid: false; message: string };
 
 /**
+ * `apiFetch` only guarantees valid JSON, not this shape — nothing upstream checks a 200's
+ * body against `ValidateResponse` before it reaches this hook. Without this guard,
+ * `{ unexpected: "shape" }` makes `response.valid` `undefined`, which is falsy, which used
+ * to run the same branch as a genuine `{ valid: false }` and overwrite whatever verdict was
+ * already on screen with `undefined`. A malformed body is transport-adjacent noise — the
+ * server did not render a verdict, which is exactly the "we don't know" case a thrown error
+ * already means here — so it must be handled identically: leave `message` untouched.
+ */
+function isValidateResponse(value: unknown): value is ValidateResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (record.valid === true) return true;
+  return record.valid === false && typeof record.message === "string";
+}
+
+/**
  * Lint layer two: a debounced round trip to `docker compose config`, for the semantic
  * questions layer one (`yaml-lint.ts`, schema-only and instant) cannot answer — an
  * undefined `depends_on` target, a `.env` variable nothing sets. Unlike layer one this
@@ -33,11 +49,23 @@ type ValidateResponse = { valid: true } | { valid: false; message: string };
  * means the server never rendered a verdict, which is different from — and must never be
  * rendered as — "your file is wrong". Leaving the last real answer in place also means a
  * flaky connection cannot flip a known-bad state into a false "looks fine", which would
- * be the more dangerous of the two directions to get wrong.
+ * be the more dangerous of the two directions to get wrong. A 200 whose body does not
+ * actually match `ValidateResponse` (see `isValidateResponse`) is treated exactly the
+ * same way, for the same reason: it is not a verdict either.
+ *
+ * This hook stays a dumb debounced fetcher — it has no opinion on *when* a round trip is
+ * worth sending, only on how to sequence and apply the ones it's told to send. `enabled`
+ * is the caller's answer to "worth it right now": `ComposeTab` turns it off while layer
+ * one already knows the document is syntactically broken, and while the text hasn't been
+ * touched since it loaded, since `docker compose config` will predictably fail or is
+ * redundant either way and each attempt is a real subprocess on the NAS. Turning it off
+ * only stops new debounce timers from starting; it never touches `message`, so the last
+ * real verdict stays on screen instead of being blanked while checks are paused.
  */
 export function useServerValidate(
   appId: string,
   text: string,
+  enabled = true,
 ): { checking: boolean; message: string | null } {
   const [checking, setChecking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -55,17 +83,20 @@ export function useServerValidate(
   );
 
   useEffect(() => {
+    if (!enabled) return;
+
     const timer = setTimeout(() => {
       const seq = ++seqRef.current;
       setChecking(true);
 
-      apiFetch<ValidateResponse>(`/api/apps/${appId}/compose/validate`, {
+      apiFetch<unknown>(`/api/apps/${appId}/compose/validate`, {
         method: "POST",
         body: JSON.stringify({ content: text }),
       }).then(
         (response) => {
           if (!mountedRef.current || seq !== seqRef.current) return;
           setChecking(false);
+          if (!isValidateResponse(response)) return;
           setMessage(response.valid ? null : response.message);
         },
         () => {
@@ -78,7 +109,7 @@ export function useServerValidate(
     }, DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [appId, text]);
+  }, [appId, text, enabled]);
 
   return { checking, message };
 }

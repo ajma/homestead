@@ -203,7 +203,17 @@ export function ComposeTab() {
   }, [desktop, getEnvKeys]);
 
   const diagnostics = useMemo(() => lintYaml(text, composeSchema), [text]);
-  const { message: serverMessage } = useServerValidate(appId, text);
+
+  // Layer one already knows the document is syntactically broken — `docker compose
+  // config` would certainly fail too, at the cost of a real subprocess on the NAS, on
+  // every debounce tick while someone is mid-edit. And validating text nobody has typed
+  // yet (fresh off the initial load) buys nothing: it's a spawn spent confirming a file
+  // that hasn't changed since the last time anyone (if ever) checked it. Both live here,
+  // not in the hook, because both require knowing about layer one and about `dirty` —
+  // the hook stays a dumb debounced fetcher that only does what it's told.
+  const hasSyntaxError = diagnostics.some((diagnostic) => diagnostic.severity === "error");
+  const serverCheckEnabled = dirty && !hasSyntaxError;
+  const { message: serverMessage } = useServerValidate(appId, text, serverCheckEnabled);
 
   if (!loaded) {
     if (composeQuery.isPending) {
@@ -272,6 +282,17 @@ export function ComposeTab() {
       {serverMessage && (
         <p className="rounded-2xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300">
           {serverMessage}
+        </p>
+      )}
+
+      {/* The server round trip is skipped (not just pending) here — say so, so silence
+          doesn't read as a passing check, and so a verdict still shown above is clearly
+          not about the text on screen right now. */}
+      {!serverCheckEnabled && (
+        <p className="text-xs italic text-slate-500 dark:text-slate-400">
+          {hasSyntaxError
+            ? "Server check paused until the YAML syntax error is fixed. Any message above may be stale."
+            : "Server check not running yet — it starts once you edit the file."}
         </p>
       )}
 

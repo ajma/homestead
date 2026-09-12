@@ -160,6 +160,24 @@ function puts(): RequestInit[] {
     .map(([, init]) => init as RequestInit);
 }
 
+function validateCalls(): number {
+  return vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/compose/validate"))
+    .length;
+}
+
+/**
+ * Real time, not fake timers: this file never stubs the clock (see the module doc on
+ * `use-server-validate.test.tsx` for why fake timers get their own file when a hook needs
+ * to control them precisely). 800ms clears the hook's 600ms debounce with margin. Wrapped
+ * in `act` so any state update the debounce's `setTimeout` produces is flushed before the
+ * next assertion reads the DOM or a mock's call list.
+ */
+async function settle(ms = 800) {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -340,5 +358,55 @@ describe("ComposeTab", () => {
     await waitFor(() =>
       expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith("/env"))).toBe(true),
     );
+  });
+
+  describe("gating the server round trip", () => {
+    it("does not validate on mount before any edit has been made", async () => {
+      mockApi();
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+      // Opening the tab to read the file costs nothing extra: the text on screen is
+      // exactly what was loaded, so there is nothing new for `docker compose config` to
+      // say about it.
+      await settle();
+      expect(validateCalls()).toBe(0);
+      expect(
+        screen.getByText("Server check not running yet — it starts once you edit the file."),
+      ).toBeTruthy();
+    });
+
+    it("does not validate while layer one already reports a YAML syntax error", async () => {
+      mockApi();
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+      // A bare scalar line where a mapping key is expected — the same shape of mistake
+      // `yaml-lint.test.ts` uses to prove layer one reports a syntax error. `docker
+      // compose config` would certainly fail on this too; sending it anyway would just be
+      // paying for a subprocess to confirm what layer one already knows.
+      typeInto(findView(container), "bogus nginx\n");
+
+      await settle();
+      expect(validateCalls()).toBe(0);
+      expect(
+        screen.getByText(
+          "Server check paused until the YAML syntax error is fixed. Any message above may be stale.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("still validates a document that is both modified and syntactically valid", async () => {
+      // The gate must actually gate rather than disable the round trip outright — a
+      // dirty, syntax-clean document is exactly the case the server check exists for.
+      mockApi();
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+      typeInto(findView(container), "\n# a harmless note\n");
+
+      await settle();
+      expect(validateCalls()).toBeGreaterThan(0);
+    });
   });
 });

@@ -286,6 +286,111 @@ describe("useServerValidate", () => {
     unmount();
   });
 
+  describe("a response that does not actually match ValidateResponse", () => {
+    // A malformed 200 is transport-adjacent noise, not a verdict — see the hook's own
+    // docstring and `isValidateResponse`. Each case here must be handled exactly like a
+    // rejected fetch: `checking` goes back to false, but whatever verdict was already on
+    // screen must survive untouched. Without the runtime shape check, `{}` and
+    // `{ unexpected: "shape" }` make `response.valid` `undefined` (falsy), which used to
+    // run the same branch as a genuine `{ valid: false }` and call `setMessage(undefined)`,
+    // silently erasing the previous verdict.
+    const cases: Array<[string, unknown]> = [
+      ["an empty object", {}],
+      ["an object with an unexpected shape", { unexpected: "shape" }],
+      ["valid as a string rather than a boolean", { valid: "yes" }],
+      ["valid: false with no message at all", { valid: false }],
+      ["a body that is not an object at all", "just a string"],
+    ];
+
+    it.each(cases)("leaves the previous verdict alone for %s", async (_label, malformedBody) => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockResolvedValueOnce(jsonResponse({ valid: false, message: "bad compose" }));
+
+      const { result, rerender, unmount } = renderHook(
+        ({ text }) => useServerValidate("app1", text),
+        { initialProps: { text: "first" } },
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(result.current.message).toBe("bad compose");
+
+      fetchMock.mockResolvedValueOnce(jsonResponse(malformedBody));
+      rerender({ text: "second" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.message).toBe("bad compose");
+      expect(result.current.checking).toBe(false);
+      unmount();
+    });
+  });
+
+  it("keeps checking true when a stale rejection lands while a newer request is still in flight", async () => {
+    // The sequence guard in the *rejection* callback (`seq !== seqRef.current`) exists to
+    // stop an older in-flight request, failing after a newer one is already pending, from
+    // flipping `checking` back to false while the newer one is still running — which would
+    // tell the user the check is done when it isn't. Removing that guard leaves every other
+    // test in this file green, since none of them reject an old request while a newer one
+    // is still outstanding.
+    vi.useFakeTimers();
+    const rejectors: Array<(error: unknown) => void> = [];
+    const resolvers: Array<(response: Response) => void> = [];
+    const fetchSpy = vi.fn(
+      () =>
+        new Promise<Response>((resolve, reject) => {
+          resolvers.push(resolve);
+          rejectors.push(reject);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { result, rerender, unmount } = renderHook(
+      ({ text }) => useServerValidate("app1", text),
+      { initialProps: { text: "first" } },
+    );
+
+    // First request goes out and is left hanging.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // A second, newer request goes out before the first ever answers.
+    rerender({ text: "second" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result.current.checking).toBe(true);
+
+    const rejectOlder = must(rejectors[0], "the first request never registered a rejector");
+    const resolveNewer = must(resolvers[1], "the second request never resolved");
+
+    // The older request now fails. It must be discarded, including its effect on
+    // `checking`: the newer request is still the one running, so `checking` must stay
+    // true.
+    await act(async () => {
+      rejectOlder(new TypeError("Failed to fetch"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.checking).toBe(true);
+
+    // The newer request then lands normally, and is still the one that gets to decide
+    // the outcome.
+    await act(async () => {
+      resolveNewer(jsonResponse({ valid: false, message: "second problem" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.checking).toBe(false);
+    expect(result.current.message).toBe("second problem");
+    unmount();
+  });
+
   it("does not update state from a response that lands after unmount", async () => {
     vi.useFakeTimers();
     let resolveFetch: ((response: Response) => void) | undefined;
