@@ -3,6 +3,7 @@ import { ComposeConfigCache } from "./apps/compose-config.js";
 import { ImageUpdateChecker } from "./apps/image-updates.js";
 import { JobRunner } from "./apps/job-runner.js";
 import { createRegistryClient } from "./apps/registry.js";
+import { sweepStrandedJobs } from "./apps/sweep.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost, LOCAL_HOST_ID } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -30,6 +31,11 @@ if (!config.skipMountPreflight) {
 
 const { db } = await createDb(config.dbPath);
 await runMigrations(db);
+
+// Before anything can start a new job. A `running` row at this point is from a previous
+// life of this process — see `sweepStrandedJobs`.
+const swept = await sweepStrandedJobs(db, Math.floor(Date.now() / 1000));
+if (swept > 0) console.warn(`[startup] Marked ${swept} interrupted job(s) as failed.`);
 
 await ensureLocalHost(db, config);
 
