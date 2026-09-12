@@ -2,7 +2,7 @@
 import type { AdminApp } from "@shared/dto";
 import type { HostCheck, SetupState } from "@shared/setup.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ManagedUser } from "@web/api/users";
 import { SetupWizard } from "@web/routes/setup/SetupWizard";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -168,11 +168,13 @@ describe("SetupWizard", () => {
   });
 
   it("does not double-fire a step's completion from a second click while the first is still in flight", async () => {
-    // `StepPlaceholder`'s Skip button deliberately does not disable itself on `pending`
-    // — it stands in for a step author who forgot. The wizard's own guard in
-    // `markComplete` has to hold regardless, which is what this proves: the underlying
-    // `.../complete` POST fires once, not twice, even though nothing in the DOM stopped
-    // the second click from reaching the handler.
+    // `StepImport`'s real Skip button disables itself once `pending` is true
+    // (`disabled={pending || busy}`), and by the time this test's second `fireEvent.click`
+    // runs, RTL has already flushed the first click's `setPending(true)` — so the button
+    // is disabled in the DOM and jsdom refuses to dispatch the second click at all. That
+    // proves Skip disables itself; it proves nothing about `markComplete`'s own
+    // `pendingRef` guard, since the click never reaches the handler a second time either
+    // way. The test below drives both clicks past that masking.
     const completeCalls: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -195,6 +197,48 @@ describe("SetupWizard", () => {
 
     await waitFor(() => expect(completeCalls.length).toBeGreaterThan(0));
     // Give any errant second dispatch a chance to land before asserting its absence.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(completeCalls).toHaveLength(1);
+  });
+
+  it("guards markComplete itself against a second call that lands before the DOM disables Skip", async () => {
+    // The test above is blind: `StepImport`'s Skip disables on `pending`, and each
+    // `fireEvent.click` is its own `act()` that flushes the first click's re-render
+    // before the second click ever dispatches — so the DOM's own disabled attribute is
+    // what stops the second click, not `markComplete`'s `pendingRef` guard. Proven by
+    // mutation: deleting `if (pendingRef.current) return;` from `markComplete` leaves
+    // that test green.
+    //
+    // This test defeats the masking by firing both clicks inside a single `act()` call.
+    // React batches the state update from the first click and does not commit it — so
+    // Skip's `disabled` attribute in the DOM is still `false` — until this whole
+    // callback returns, meaning the second `fireEvent.click` reaches the real button
+    // while it is still enabled and its handler genuinely runs a second time. The only
+    // thing left to stop a second `.../complete` POST at that point is `pendingRef`
+    // itself: a plain mutable ref, set synchronously on the first call, unaffected by
+    // React's batching.
+    const completeCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/complete")) {
+          completeCalls.push(url);
+          return new Promise<Response>(() => {});
+        }
+        return json(200, { completedSteps: ["admin", "host"], completedAt: null });
+      }),
+    );
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Import/ })).toBeTruthy());
+    const skip = screen.getByRole("button", { name: /Skip/ });
+
+    act(() => {
+      fireEvent.click(skip);
+      fireEvent.click(skip);
+    });
+
+    await waitFor(() => expect(completeCalls.length).toBeGreaterThan(0));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(completeCalls).toHaveLength(1);
   });

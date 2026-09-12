@@ -67,8 +67,12 @@ export const hostCheckKey = ["setup-host-check"] as const;
  * `GET /api/setup/host-check` runs a real container for the mount preflight — the same
  * cost the route itself serialises server-side (see `src/server/routes/setup.ts`'s
  * `runPreflightOnce`). `staleTime`/`gcTime` at 0 so the step's re-check button, which
- * calls `refetch()`, always gets a genuinely fresh answer rather than a cached one from
- * before the user went and fixed their bind mount.
+ * calls `refetch()`, never serves this client's own previous answer from cache. It does
+ * not guarantee a fresh container run on every click: `runPreflightOnce` shares one
+ * in-flight run across concurrent callers, so a second tab, a second admin, or a reload
+ * that lands here while a run from before the fix is still spinning its container joins
+ * that run and gets the pre-fix verdict rather than a brand new one. The next click,
+ * once nothing is in flight, is always genuinely fresh.
  */
 export function useHostCheck() {
   return useQuery({

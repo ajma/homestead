@@ -57,11 +57,11 @@ export type SetupStepProps = {
 /**
  * Step 6, reached only once `resumeStep` returns `"finish"` — which only happens once
  * every entry in `SETUP_STEPS` is in `completedSteps` (see that function above). That is
- * the wizard's own gate on reachability: `POST /api/setup/finish` itself is permissive
- * (a reviewer measured it succeeding with zero steps completed — see that route's own
- * comment) precisely because it was never meant to be the thing standing between a
- * click and a premature finish. This component, and the fact that nothing else in this
- * file can reach it early, is that gate.
+ * the wizard's own gate on reachability: `POST /api/setup/finish` (`src/server/routes/setup.ts`)
+ * itself is permissive — admin-only, but with no check on which steps are complete,
+ * only a COALESCE that keeps it one-way — precisely because it was never meant to be the
+ * thing standing between a click and a premature finish. This component, and the fact
+ * that nothing else in this file can reach it early, is that gate.
  *
  * `useAdminApps`/`useUsers` are the same two lists `AdminApps` and `Settings` already
  * read — no new endpoint. Onboarding is the one moment their raw counts are exactly the

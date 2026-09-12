@@ -27,10 +27,9 @@ import type { SetupStepProps } from "./SetupWizard";
  * completion request (`markComplete`) is in flight and `pending` is true for at least
  * one macrotask (TanStack's `notifyManager` defers the re-render that would reflect a
  * mutation's own `isPending` through `setTimeout(fn, 0)` — see `AdoptPanel`'s and
- * `SetupWizard`'s own comments on the same trap). Unlike `StepPlaceholder`'s Skip button
- * — a stand-in that deliberately ignores `pending` to prove `SetupWizard`'s own
- * double-call guard holds without help — this is a real step, so it disables itself
- * properly rather than relying only on that backstop.
+ * `SetupWizard`'s own comments on the same trap). `SetupWizard`'s own `pendingRef` guard
+ * in `markComplete` backstops this regardless, but Skip disables itself properly too
+ * rather than relying on that backstop alone.
  *
  * Skip is also gated on `busy`, the argument `AdoptPanel`'s `actions` render prop
  * supplies — true for the entire window between a click on Adopt and that request
