@@ -14,8 +14,14 @@ import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
 import { Settings } from "@web/routes/Settings";
 import { SetupWizard } from "@web/routes/setup/SetupWizard";
-import { type ComponentType, lazy, Suspense, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { type ComponentType, lazy, Suspense, useMemo, useState } from "react";
+import {
+  createBrowserRouter,
+  createRoutesFromElements,
+  Navigate,
+  Route,
+  RouterProvider,
+} from "react-router-dom";
 
 // CodeMirror, its schema-driven completions and both lint layers are the largest thing
 // in this app's bundle by far (measured: ~580 kB raw, ~183 kB gzip of the ~930 kB total)
@@ -80,6 +86,79 @@ function Routed() {
   // one".
   const needsSetupCheck = !isViewer;
   const setup = useSetupState({ enabled: !isPending && needsSetupCheck });
+  // Read by the guards and by `AppLayout` below — computed here, alongside `isViewer`,
+  // rather than inside the branch that used to compute it, because both routers have to
+  // be built by hooks called unconditionally on every render (Rules of Hooks), before
+  // any of the early returns below run.
+  const isAdmin = me?.role === "admin";
+
+  // `useBlocker` (needed by the compose and `.env` editors, to come) is data-router-only
+  // and throws under a plain `<BrowserRouter>` — hence `createBrowserRouter` in place of
+  // `<Routes>`. Built with `useMemo`, not at module scope: a module-level router would
+  // capture `window.location` once, at import time, and never notice this component
+  // being mounted again at a different URL — exactly what a plain `<BrowserRouter>`
+  // never did either, since it built its own history object fresh per mount. `useMemo`
+  // reproduces that "fresh per mount, stable across re-renders" lifecycle instead of a
+  // "recreated on every render, remounting the whole tree" one, which is the actual
+  // hazard this shape is written to avoid.
+  const incompleteSetupRouter = useMemo(
+    () =>
+      createBrowserRouter(
+        createRoutesFromElements(
+          <>
+            <Route path="/setup" element={<SetupWizard />} />
+            <Route path="*" element={<Navigate to="/setup" replace />} />
+          </>,
+        ),
+      ),
+    [],
+  );
+
+  // Depends on `isAdmin` and `me` because the guards and `AppLayout` below read them —
+  // a router built from a stale value would show one session's admin state to the next.
+  // `me` can still be null or pending here: the `!me` branch further down returns
+  // `<Login/>` before this router is ever handed to a `RouterProvider`, so the guarded
+  // tree below is provably unreached while that holds, but the memo itself still has to
+  // run on every render (again, Rules of Hooks) regardless of which branch is current.
+  const mainRouter = useMemo(() => {
+    if (!me) {
+      return createBrowserRouter(createRoutesFromElements(<Route path="*" element={null} />));
+    }
+    return createBrowserRouter(
+      createRoutesFromElements(
+        <>
+          {/* Setup is complete (or this is a viewer, for whom it's moot) — re-entering the
+              wizard would offer "create the first admin" to a second admin, which is why
+              completion is one-way. Written out explicitly rather than left to the
+              catch-all below: that generic 404 fallback would currently redirect `/setup`
+              to the same place, but it exists for unrelated reasons (a typo'd URL), and
+              this rule needs to keep holding even if that one's target ever changes. */}
+          <Route path="/setup" element={<Navigate to="/" replace />} />
+          <Route element={<AppLayout me={me} />}>
+            <Route path="/" element={<Launcher />} />
+            <Route path="/apps" element={isAdmin ? <AdminApps /> : <Navigate to="/" replace />} />
+            <Route
+              path="/apps/:slug/*"
+              element={isAdmin ? <EditApp /> : <Navigate to="/" replace />}
+            >
+              <Route index element={<Navigate to="overview" replace />} />
+              <Route path="overview" element={<OverviewTab />} />
+              <Route path="containers" element={<ContainersTab />} />
+              <Route path="logs" element={<LogsTab />} />
+              <Route path="probes" element={<ProbesTab />} />
+              <Route path="compose" element={<LazyTab loader={loadComposeTab} />} />
+              <Route path="env" element={<LazyTab loader={loadEnvTab} />} />
+            </Route>
+            <Route
+              path="/settings/*"
+              element={isAdmin ? <Settings /> : <Navigate to="/" replace />}
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </>,
+      ),
+    );
+  }, [isAdmin, me]);
 
   if (isPending) return <div className="p-6 text-sm text-slate-500">Loading…</div>;
   if (needsSetupCheck && setup.isPending) {
@@ -128,52 +207,18 @@ function Routed() {
   // Incomplete setup pulls every other route to `/setup`; a viewer is the one
   // exception, since they can't complete it and must not be trapped by it either.
   if (!setupComplete) {
-    return (
-      <Routes>
-        <Route path="/setup" element={<SetupWizard />} />
-        <Route path="*" element={<Navigate to="/setup" replace />} />
-      </Routes>
-    );
+    return <RouterProvider router={incompleteSetupRouter} />;
   }
 
   if (!me) return <Login />;
 
-  const isAdmin = me.role === "admin";
-
-  return (
-    <Routes>
-      {/* Setup is complete (or this is a viewer, for whom it's moot) — re-entering the
-          wizard would offer "create the first admin" to a second admin, which is why
-          completion is one-way. Written out explicitly rather than left to the
-          catch-all below: that generic 404 fallback would currently redirect `/setup`
-          to the same place, but it exists for unrelated reasons (a typo'd URL), and
-          this rule needs to keep holding even if that one's target ever changes. */}
-      <Route path="/setup" element={<Navigate to="/" replace />} />
-      <Route element={<AppLayout me={me} />}>
-        <Route path="/" element={<Launcher />} />
-        <Route path="/apps" element={isAdmin ? <AdminApps /> : <Navigate to="/" replace />} />
-        <Route path="/apps/:slug/*" element={isAdmin ? <EditApp /> : <Navigate to="/" replace />}>
-          <Route index element={<Navigate to="overview" replace />} />
-          <Route path="overview" element={<OverviewTab />} />
-          <Route path="containers" element={<ContainersTab />} />
-          <Route path="logs" element={<LogsTab />} />
-          <Route path="probes" element={<ProbesTab />} />
-          <Route path="compose" element={<LazyTab loader={loadComposeTab} />} />
-          <Route path="env" element={<LazyTab loader={loadEnvTab} />} />
-        </Route>
-        <Route path="/settings/*" element={isAdmin ? <Settings /> : <Navigate to="/" replace />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
-  );
+  return <RouterProvider router={mainRouter} />;
 }
 
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routed />
-      </BrowserRouter>
+      <Routed />
     </QueryClientProvider>
   );
 }
