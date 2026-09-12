@@ -125,6 +125,19 @@ describe("AdoptDialog", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("closes automatically after a fully successful adopt", async () => {
+    // The counterpart to "reports per-directory failures instead of claiming success"
+    // above: a response with zero failures is the one case that should close the
+    // dialog, same as `StepImport`'s equivalent case advances the wizard.
+    stubScan({ adopted: [{ id: "a1", directory: "jellyfin" }], failed: [] });
+    const onClose = vi.fn();
+    mount(onClose);
+    await waitFor(() => expect(screen.getByLabelText(/jellyfin/)).toBeTruthy());
+    fireEvent.click(screen.getByLabelText(/jellyfin/));
+    fireEvent.click(screen.getByRole("button", { name: /Adopt 1/ }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
   it("invalidates the app list after a successful adopt", async () => {
     stubScan({ adopted: [{ id: "a1", directory: "jellyfin" }], failed: [] });
     const { client } = mount();

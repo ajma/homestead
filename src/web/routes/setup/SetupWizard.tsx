@@ -2,6 +2,7 @@ import { SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
 import { useCompleteStep, useSetupState } from "@web/api/setup";
 import { useRef, useState } from "react";
 import { StepCreateAdmin } from "./StepCreateAdmin";
+import { StepImport } from "./StepImport";
 import { StepVerifyHost } from "./StepVerifyHost";
 
 const STEP_LABELS: Record<SetupStep, string> = {
@@ -211,6 +212,14 @@ export function SetupWizard() {
         />
       ) : displayed === "host" ? (
         <StepVerifyHost
+          state={state}
+          pending={pending}
+          onComplete={() => markComplete(displayed)}
+          onFail={setStepError}
+          skippable={skippable}
+        />
+      ) : displayed === "import" ? (
+        <StepImport
           state={state}
           pending={pending}
           onComplete={() => markComplete(displayed)}
