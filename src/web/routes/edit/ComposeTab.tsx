@@ -92,6 +92,7 @@ export function ComposeTab() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [confirmingReload, setConfirmingReload] = useState(false);
+  const [confirmingOverwrite, setConfirmingOverwrite] = useState(false);
 
   const saveMutation = useMutation({
     mutationFn: (body: { content: string; expectedHash: string | null }) =>
@@ -101,11 +102,15 @@ export function ComposeTab() {
       }),
   });
 
-  function handleSave() {
+  // Shared by the normal Save button and the conflict banner's "keep mine" action: both
+  // are "write this exact content, guarded by this exact hash" — they differ only in
+  // which hash they carry. Save uses the hash this tab loaded with; "keep mine" uses the
+  // fresh hash the 409 handler fetched, which is what makes it a deliberate overwrite
+  // instead of just repeating the same request and getting the same 409 back.
+  function performSave(content: string, expectedHash: string | null) {
     setSaveError(null);
-    const content = text;
     saveMutation.mutate(
-      { content, expectedHash: loadedHash },
+      { content, expectedHash },
       {
         onSuccess: (result) => {
           setLoadedHash(result.hash);
@@ -135,6 +140,10 @@ export function ComposeTab() {
     );
   }
 
+  function handleSave() {
+    performSave(text, loadedHash);
+  }
+
   function handleLoadDiskVersion() {
     const disk = conflict?.disk;
     if (!disk) return;
@@ -143,6 +152,17 @@ export function ComposeTab() {
     setLoadedHash(disk.hash);
     setConflict(null);
     queryClient.setQueryData(composeKey(appId), disk);
+  }
+
+  // The conflict's other resolution: instead of adopting the disk copy, deliberately
+  // overwrite it with what's still sitting in this editor, guarded by the fresh hash the
+  // 409 handler fetched rather than the stale one that just got refused. Requires
+  // `conflict.disk` for the same reason `handleLoadDiskVersion` does — without a fresh
+  // hash there is nothing to overwrite *against*, only the same stale one that already
+  // bounced.
+  function handleKeepMineOverwrite() {
+    if (!conflict?.disk) return;
+    performSave(text, conflict.disk.hash);
   }
 
   // A ref, read from a `beforeunload` listener installed once on mount. Rebuilding the
@@ -206,14 +226,38 @@ export function ComposeTab() {
 
   // Layer one already knows the document is syntactically broken — `docker compose
   // config` would certainly fail too, at the cost of a real subprocess on the NAS, on
-  // every debounce tick while someone is mid-edit. And validating text nobody has typed
-  // yet (fresh off the initial load) buys nothing: it's a spawn spent confirming a file
-  // that hasn't changed since the last time anyone (if ever) checked it. Both live here,
-  // not in the hook, because both require knowing about layer one and about `dirty` —
-  // the hook stays a dumb debounced fetcher that only does what it's told.
+  // every debounce tick while someone is mid-edit. That gate stays. What doesn't: this
+  // used to also require `dirty`, on the theory that unedited text costs nothing new to
+  // check. Measured consequence: a file that is only *semantically* broken —
+  // `depends_on` naming a service that doesn't exist, typically someone's SSH edit —
+  // never reached the server until the user made a net edit, so opening the tab to ask
+  // "will this start?" got no answer. One spawn per tab open buys exactly that answer;
+  // the spawn worth avoiding is repeated ones while typing, which the debounce and the
+  // syntax gate already handle without `dirty`'s help.
+  //
+  // `hasCheckedOnce` tracks whether a check has ever actually settled (see the effect
+  // below), so the load-time allowance fires exactly once: as soon as it's used, `dirty`
+  // alone carries the gate from then on, same as before this fix. It latches from
+  // `settledCount` rather than from `checking` toggling — see that field's own doc
+  // comment in the hook — because `checking` going true then false within a single
+  // render (routine once the round trip resolves near-instantly) leaves nothing to
+  // observe a transition on. It flips only once a check *settles*, not once it starts:
+  // flipping it earlier would let `enabled` go false while the very check it just
+  // enabled is still in flight, and `useServerValidate`'s own late-response guard would
+  // then discard that in-flight response as "arrived after we stopped caring", silently
+  // throwing away the one answer this fix exists to deliver.
   const hasSyntaxError = diagnostics.some((diagnostic) => diagnostic.severity === "error");
-  const serverCheckEnabled = dirty && !hasSyntaxError;
-  const { message: serverMessage } = useServerValidate(appId, text, serverCheckEnabled);
+  const [hasCheckedOnce, setHasCheckedOnce] = useState(false);
+  const serverCheckEnabled = loaded && !hasSyntaxError && (dirty || !hasCheckedOnce);
+  const { message: serverMessage, settledCount } = useServerValidate(
+    appId,
+    text,
+    serverCheckEnabled,
+  );
+
+  useEffect(() => {
+    if (settledCount > 0) setHasCheckedOnce(true);
+  }, [settledCount]);
 
   if (!loaded) {
     if (composeQuery.isPending) {
@@ -264,6 +308,14 @@ export function ComposeTab() {
             >
               Load the version on disk instead
             </button>
+            <button
+              type="button"
+              disabled={!conflict.disk}
+              onClick={() => setConfirmingOverwrite(true)}
+              className="rounded-lg border border-rose-400 px-2 py-1 text-xs font-medium text-rose-700 disabled:opacity-50 dark:border-rose-700 dark:text-rose-300"
+            >
+              Keep mine — overwrite the disk version
+            </button>
           </div>
         </div>
       )}
@@ -276,6 +328,17 @@ export function ComposeTab() {
           destructive
           onConfirm={handleLoadDiskVersion}
           onClose={() => setConfirmingReload(false)}
+        />
+      )}
+
+      {confirmingOverwrite && conflict?.disk && (
+        <ConfirmDialog
+          title="Overwrite the version on disk"
+          message="This saves your edits over what's currently on disk, discarding the change that caused this conflict — the one shown above. There is no undo once this is confirmed."
+          confirmLabel="Overwrite"
+          destructive
+          onConfirm={handleKeepMineOverwrite}
+          onClose={() => setConfirmingOverwrite(false)}
         />
       )}
 
@@ -292,7 +355,9 @@ export function ComposeTab() {
         <p className="text-xs italic text-slate-500 dark:text-slate-400">
           {hasSyntaxError
             ? "Server check paused until the YAML syntax error is fixed. Any message above may be stale."
-            : "Server check not running yet — it starts once you edit the file."}
+            : hasCheckedOnce
+              ? "Server check not running — it runs again once you make another edit."
+              : "Server check not running yet — it starts once you edit the file."}
         </p>
       )}
 

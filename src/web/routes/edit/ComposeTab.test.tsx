@@ -290,6 +290,55 @@ describe("ComposeTab", () => {
     expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull();
   });
 
+  it("offers an explicit overwrite that resends the user's text against the fresh hash", async () => {
+    // The other resolution: instead of loading the disk copy, deliberately overwrite it
+    // with what's still in the editor. Must be an explicit, labelled choice — see the
+    // "does not silently discard" test above for the property this must not break.
+    const diskContent = "services:\n  web:\n    image: nginx:alpine\n";
+    mockApi({
+      composeGets: [
+        { status: 200, body: { content: ORIGINAL, hash: "h1" } },
+        { status: 200, body: { content: diskContent, hash: "h2" } },
+      ],
+      composePuts: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h3" } },
+      ],
+    });
+    const { container } = mount();
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+    const view = findView(container);
+
+    typeInto(view, "\n# mine\n");
+    const myText = view.state.doc.toString();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Someone changed this file since you loaded it/);
+
+    const overwriteButton = screen.getByRole("button", {
+      name: "Keep mine — overwrite the disk version",
+    });
+    // Disabled until the disk fetch (fired alongside the conflict) resolves — there is
+    // no fresh hash to overwrite against before then.
+    await waitFor(() => expect(overwriteButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(overwriteButton);
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/saves your edits over what's currently on disk/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Overwrite" }));
+
+    // The second PUT carries the user's own text, guarded by the FRESH hash the conflict
+    // fetched (h2) — not the stale one that just bounced (h1), and not a silent no-op.
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const secondBody = JSON.parse(puts()[1]?.body as string);
+    expect(secondBody).toEqual({ content: myText, expectedHash: "h2" });
+
+    await waitFor(() =>
+      expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull(),
+    );
+    // The overwrite resolved the conflict as a normal successful save: dirty clears.
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  });
+
   it("keeps editing untouched when the user chooses to keep their own version", async () => {
     mockApi({
       composePuts: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
@@ -361,18 +410,58 @@ describe("ComposeTab", () => {
   });
 
   describe("gating the server round trip", () => {
-    it("does not validate on mount before any edit has been made", async () => {
+    it("validates once on open, before any edit, for a clean file", async () => {
+      // This used to be gated on `dirty` too, on the theory that unedited text has
+      // nothing new for `docker compose config` to say. Measured consequence: a file
+      // that is only semantically broken never got checked until the user made a net
+      // edit — see the next test. One spawn per tab open buys the answer the user came
+      // for; repeated spawns while typing are what the debounce (and the syntax gate
+      // below) actually guard against.
       mockApi();
       const { container } = mount();
       await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
 
-      // Opening the tab to read the file costs nothing extra: the text on screen is
-      // exactly what was loaded, so there is nothing new for `docker compose config` to
-      // say about it.
+      await settle();
+      expect(validateCalls()).toBe(1);
+      expect(
+        screen.getByText("Server check not running — it runs again once you make another edit."),
+      ).toBeTruthy();
+    });
+
+    it("answers a semantically-broken file on open without requiring an edit first", async () => {
+      // Syntactically fine YAML — layer one's schema walk has nothing to say about it —
+      // but `depends_on` names a service that doesn't exist, which only `docker compose
+      // config` can catch. This is the exact case the regression this fix undoes broke:
+      // opening the tab to ask "will this start?" got no answer until a net edit.
+      const brokenContent = "services:\n  web:\n    depends_on: [databse]\n";
+      mockApi({
+        composeGets: [{ status: 200, body: { content: brokenContent, hash: "h1" } }],
+        validate: {
+          status: 200,
+          body: { valid: false, message: 'service "web" depends on undefined service "databse"' },
+        },
+      });
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+      await settle();
+      expect(validateCalls()).toBe(1);
+      expect(screen.getByText('service "web" depends on undefined service "databse"')).toBeTruthy();
+    });
+
+    it("does not spawn a server check for a file that is syntactically broken on open", async () => {
+      // The syntax gate must still block the load-time check too — layer one already
+      // knows this document is broken, so a `docker compose config` spawn buys nothing.
+      mockApi({ composeGets: [{ status: 200, body: { content: "bogus nginx\n", hash: "h1" } }] });
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
       await settle();
       expect(validateCalls()).toBe(0);
       expect(
-        screen.getByText("Server check not running yet — it starts once you edit the file."),
+        screen.getByText(
+          "Server check paused until the YAML syntax error is fixed. Any message above may be stale.",
+        ),
       ).toBeTruthy();
     });
 

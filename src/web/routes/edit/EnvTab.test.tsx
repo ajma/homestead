@@ -309,6 +309,174 @@ describe("EnvTab", () => {
     expect(body).toEqual({ content: `${FILE_CONTENT}NEW_KEY=added\n`, expectedHash: FILE_HASH });
   });
 
+  it("shows a raw edit's new key in the table immediately, before saving", async () => {
+    // The table used to keep showing whatever `GET .../env` returned at load, unaffected
+    // by anything typed in raw mode — correct once saved (see the "does not silently
+    // drop" test above), but a key added or changed in raw mode simply didn't appear in
+    // the table until then, even though the state already carried it.
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => ({
+        status: 200,
+        body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true },
+      }),
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    await waitFor(() => expect(screen.getByLabelText(".env file contents")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText(".env file contents"), {
+      target: { value: `${FILE_CONTENT}NEW_KEY=added\n` },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Table" }));
+    await waitFor(() => expect(screen.getByText("NEW_KEY")).toBeTruthy());
+    // Still masked — reflecting a raw edit in the table does not hand it a secret value
+    // the user has not explicitly revealed for that row.
+    expect(screen.getAllByDisplayValue(MASK).length).toBeGreaterThan(0);
+    expect(screen.queryByText("added")).toBeNull();
+  });
+
+  it("merges a table edit onto the disk's newer content on a stale hash, without asking", async () => {
+    // `upsertEnv` only ever changes the keys this tab actually touched, so a 409 here
+    // does not need the user to adjudicate anything — refetching and reapplying the same
+    // edit preserves both the user's change and whatever showed up on disk meanwhile,
+    // the same guarantee a single save already gives untouched lines.
+    const diskV1 = "DB_PASSWORD=hunter2\n";
+    const diskV2 = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: (key) => {
+        if (key) return { status: 200, body: { key, value: "hunter2" } };
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: diskV1, hash: "h1", exists: true } }
+          : { status: 200, body: { content: diskV2, hash: "h2", exists: true } };
+      },
+      put: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h3" } },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("hunter2"), { target: { value: "newpass" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const secondBody = JSON.parse(puts()[1]?.body as string);
+    expect(secondBody).toEqual({
+      content: "DB_PASSWORD=newpass\nEXTRA=fromssh\n",
+      expectedHash: "h2",
+    });
+    // No conflict to adjudicate — the merge resolved it on its own.
+    expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull();
+  });
+
+  it("does not silently discard a raw edit when the file changed underneath you", async () => {
+    // A raw edit is arbitrary free-form text, not a set of named key changes, so it
+    // cannot be merged the way a table edit can — this needs the same explicit,
+    // two-choice conflict `ComposeTab` uses for its own whole-file edits.
+    const diskContent = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => {
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true } }
+          : { status: 200, body: { content: diskContent, hash: "h2", exists: true } };
+      },
+      put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    await waitFor(() => expect(screen.getByLabelText(".env file contents")).toBeTruthy());
+    const myText = `${FILE_CONTENT}NEW_KEY=added\n`;
+    fireEvent.change(screen.getByLabelText(".env file contents"), { target: { value: myText } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Someone changed this file since you loaded it/);
+
+    // The user's text is untouched — not reverted, not overwritten.
+    expect((screen.getByLabelText(".env file contents") as HTMLTextAreaElement).value).toBe(myText);
+
+    // Both texts are available: theirs is still right there, and the disk's current
+    // version can be shown alongside it.
+    fireEvent.click(screen.getByText("Show the version currently on disk"));
+    await waitFor(() => expect(screen.getByText(/EXTRA=fromssh/)).toBeTruthy());
+
+    const useDiskButton = screen.getByRole("button", { name: "Load the version on disk instead" });
+    await waitFor(() => expect(useDiskButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(useDiskButton);
+    // Clicking it does not immediately discard anything — it asks first.
+    expect((screen.getByLabelText(".env file contents") as HTMLTextAreaElement).value).toBe(myText);
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/replaces this tab's raw text/)).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Load it" }));
+    await waitFor(() =>
+      expect((screen.getByLabelText(".env file contents") as HTMLTextAreaElement).value).toBe(
+        diskContent,
+      ),
+    );
+    expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull();
+  });
+
+  it("offers an explicit overwrite for a raw edit that resends against the fresh hash", async () => {
+    const diskContent = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => {
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true } }
+          : { status: 200, body: { content: diskContent, hash: "h2", exists: true } };
+      },
+      put: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h3" } },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    await waitFor(() => expect(screen.getByLabelText(".env file contents")).toBeTruthy());
+    const myText = `${FILE_CONTENT}NEW_KEY=added\n`;
+    fireEvent.change(screen.getByLabelText(".env file contents"), { target: { value: myText } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Someone changed this file since you loaded it/);
+
+    const overwriteButton = screen.getByRole("button", {
+      name: "Keep mine — overwrite the disk version",
+    });
+    await waitFor(() => expect(overwriteButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(overwriteButton);
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/saves your edits over what's currently on disk/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Overwrite" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const secondBody = JSON.parse(puts()[1]?.body as string);
+    expect(secondBody).toEqual({ content: myText, expectedHash: "h2" });
+
+    await waitFor(() =>
+      expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull(),
+    );
+  });
+
   it("says the file exists but cannot be read, distinctly from having none", async () => {
     mockApi({
       env: {

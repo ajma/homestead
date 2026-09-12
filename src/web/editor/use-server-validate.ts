@@ -59,16 +59,40 @@ function isValidateResponse(value: unknown): value is ValidateResponse {
  * one already knows the document is syntactically broken, and while the text hasn't been
  * touched since it loaded, since `docker compose config` will predictably fail or is
  * redundant either way and each attempt is a real subprocess on the NAS. Turning it off
- * only stops new debounce timers from starting; it never touches `message`, so the last
- * real verdict stays on screen instead of being blanked while checks are paused.
+ * only stops new debounce timers from starting — a request already dispatched keeps
+ * running to completion.
+ *
+ * That last part has one deliberate exception, guarded by `enabledRef`: `message` is
+ * updated only if the check is *still* enabled at the moment a response lands. Without
+ * this, an edit followed by a revert to the exact loaded text within the debounce window
+ * sends a request while `enabled` is true, then flips it false (nothing left to check);
+ * if that request's answer arrives after the flip, applying it would set `message` right
+ * next to a caption already telling the user no check is running — two true-sounding
+ * statements that contradict each other. Discarding it instead means the last verdict
+ * that was actually applied *while enabled* stays on screen, which is the one still
+ * relevant to `enabled`'s own caption. This is narrower than `seqRef`'s guard: `seqRef`
+ * discards a superseded request's answer even while checks are still running; this
+ * discards any answer, superseded or not, once nothing is checking any more.
+ *
+ * `settledCount` is a plain monotonic counter, not a derived read of `checking` falling
+ * back to `false` — a caller that wants to know "has a round trip for the current text
+ * ever finished" cannot reliably watch `checking` toggle for that, because a request that
+ * resolves inside the same tick it was dispatched in (routine when the mock or the real
+ * server both answer near-instantly) never renders an intermediate `true`: React 18's
+ * automatic batching coalesces `setChecking(true)` and the same callback's later
+ * `setChecking(false)` into one committed render, so a "was it ever true" check watching
+ * for a true-then-false transition can silently never fire. A counter has no such
+ * transient state to miss — it only ever moves forward, and its new value is guaranteed
+ * visible in whichever render eventually reflects it, batched or not.
  */
 export function useServerValidate(
   appId: string,
   text: string,
   enabled = true,
-): { checking: boolean; message: string | null } {
+): { checking: boolean; message: string | null; settledCount: number } {
   const [checking, setChecking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [settledCount, setSettledCount] = useState(0);
 
   const seqRef = useRef(0);
   // Distinct from `seqRef`: this only ever goes false once, on unmount, so a response
@@ -81,6 +105,12 @@ export function useServerValidate(
     },
     [],
   );
+
+  // Read directly in render, the same way `ComposeTab`'s own `dirtyRef` tracks `dirty` —
+  // no effect needed, since all that matters is what `enabled` is *at the moment* a
+  // response's callback runs, not reacting to it changing.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   useEffect(() => {
     if (!enabled) return;
@@ -96,12 +126,15 @@ export function useServerValidate(
         (response) => {
           if (!mountedRef.current || seq !== seqRef.current) return;
           setChecking(false);
+          setSettledCount((count) => count + 1);
+          if (!enabledRef.current) return;
           if (!isValidateResponse(response)) return;
           setMessage(response.valid ? null : response.message);
         },
         () => {
           if (!mountedRef.current || seq !== seqRef.current) return;
           setChecking(false);
+          setSettledCount((count) => count + 1);
           // Deliberately no `setMessage` here. See the function docstring: a transport
           // failure reports "we don't know", never "you're wrong" or "you're fine".
         },
@@ -111,5 +144,5 @@ export function useServerValidate(
     return () => clearTimeout(timer);
   }, [appId, text, enabled]);
 
-  return { checking, message };
+  return { checking, message, settledCount };
 }

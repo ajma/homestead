@@ -206,6 +206,73 @@ describe("useServerValidate", () => {
     unmount();
   });
 
+  it("discards a response that lands after `enabled` has already turned off", async () => {
+    // The scenario `enabled` alone cannot prevent: an edit sends a request while dirty,
+    // then a revert to the loaded text — still within the debounce window — makes
+    // `enabled` false (nothing left worth checking). Turning `enabled` off only stops
+    // NEW timers; the request already in flight keeps running. If its answer were
+    // applied anyway, `message` would show a verdict right next to a caption telling the
+    // user no check is running — two things on screen contradicting each other.
+    vi.useFakeTimers();
+    const resolvers: Array<(response: Response) => void> = [];
+    const fetchSpy = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { result, rerender, unmount } = renderHook(
+      ({ text, enabled }) => useServerValidate("app1", text, enabled),
+      { initialProps: { text: "services:\n  web:\n    image: nginx\n", enabled: true } },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // The revert: `enabled` goes false without a newer request ever being sent.
+    rerender({ text: "services:\n  web:\n    image: nginx\n", enabled: false });
+
+    const resolveFirst = must(resolvers[0], "the request never resolved");
+    await act(async () => {
+      resolveFirst(jsonResponse({ valid: false, message: "stale verdict for reverted text" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Discarded: `checking` still settles (nothing is left in flight), but no verdict
+    // was applied for a check that, per `enabled`, is not running any more.
+    expect(result.current.message).toBeNull();
+    expect(result.current.checking).toBe(false);
+    unmount();
+  });
+
+  it("still applies a response that lands while `enabled` is unchanged", async () => {
+    // The property the fix above must not damage: a response is only discarded if
+    // `enabled` actually turned off before it landed. This is the ordinary case —
+    // nothing reverted, the check is still relevant — so the verdict must still show.
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ valid: false, message: "service depends on undefined service" }),
+      ),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useServerValidate("app1", "services:\n  web:\n    depends_on: [ghost]\n", true),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(result.current.message).toBe("service depends on undefined service");
+    unmount();
+  });
+
   it("reports the server's validation message", async () => {
     vi.useFakeTimers();
     vi.stubGlobal(
@@ -444,5 +511,89 @@ describe("useServerValidate", () => {
 
     unmount();
     expect(timeoutCount()).toBe(before);
+  });
+
+  describe("settledCount", () => {
+    // `ComposeTab` latches its own "has this ever been checked" flag off this counter
+    // rather than off `checking` toggling — see the hook's own doc comment for why a
+    // true-then-false transition on `checking` cannot be relied on to ever render.
+
+    it("increments once a round trip resolves", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => jsonResponse({ valid: true })),
+      );
+
+      const { result, unmount } = renderHook(() => useServerValidate("app1", "services: {}"));
+      expect(result.current.settledCount).toBe(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.settledCount).toBe(1);
+      unmount();
+    });
+
+    it("increments even for a rejected request, since the round trip still settled", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))),
+      );
+
+      const { result, unmount } = renderHook(() => useServerValidate("app1", "services: {}"));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.settledCount).toBe(1);
+      unmount();
+    });
+
+    it("does not increment for a request discarded as stale by a newer one", async () => {
+      vi.useFakeTimers();
+      const resolvers: Array<(response: Response) => void> = [];
+      const fetchSpy = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const { result, rerender, unmount } = renderHook(
+        ({ text }) => useServerValidate("app1", text),
+        { initialProps: { text: "first" } },
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      rerender({ text: "second" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+      const resolveNewer = must(resolvers[1], "the second request never resolved");
+      await act(async () => {
+        resolveNewer(jsonResponse({ valid: true }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.settledCount).toBe(1);
+
+      // The older, superseded request now answers too — discarded by `seqRef`, same as
+      // its effect on `message`, so it must not bump the counter either.
+      const resolveOlder = must(resolvers[0], "the first request never resolved");
+      await act(async () => {
+        resolveOlder(jsonResponse({ valid: true }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.settledCount).toBe(1);
+      unmount();
+    });
   });
 });
