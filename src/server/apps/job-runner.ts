@@ -3,6 +3,7 @@ import { ulid } from "ulid";
 import type { Db } from "../db/client.js";
 import { apps, jobs } from "../db/schema.js";
 import type { Host, JobChunk, JobHandle } from "../host/types.js";
+import { AppLock } from "./app-lock.js";
 import type { ComposeConfigCache } from "./compose-config.js";
 
 export const JOB_KINDS = ["up", "down", "restart", "pull"] as const;
@@ -42,13 +43,31 @@ export type RunningJob = {
 
 export class JobRunner {
   /**
-   * The per-app mutex, and the registry the SSE route reads to attach to a job already in
-   * flight. In-process because Homestead is one Node process by design (spec §2) — a
-   * second process would need a row lock instead.
+   * The registry the SSE route reads to attach to a job already in flight, and `cancel`
+   * and `shutdown` read to reach a running job's handle. This is no longer the mutex —
+   * see `appLock` below — because the step runner is per-app too, and two private maps
+   * keyed by the same app id do not exclude each other at all.
    */
   private readonly running = new Map<string, RunningJob & { handle: JobHandle }>();
 
-  constructor(private readonly deps: { db: Db; host: Host; composeConfig: ComposeConfigCache }) {}
+  /**
+   * The per-app mutex, shared with the step runner when one is supplied. Defaults to a
+   * private instance so every existing call site (and every test that constructs a
+   * `JobRunner` directly) keeps working unchanged; callers that need the step runner and
+   * this runner to exclude each other pass the same `AppLock` instance to both.
+   */
+  private readonly appLock: AppLock;
+
+  constructor(
+    private readonly deps: {
+      db: Db;
+      host: Host;
+      composeConfig: ComposeConfigCache;
+      appLock?: AppLock;
+    },
+  ) {
+    this.appLock = deps.appLock ?? new AppLock();
+  }
 
   live(jobId: string): RunningJob | undefined {
     for (const job of this.running.values()) if (job.id === jobId) return job;
@@ -97,10 +116,9 @@ export class JobRunner {
   }
 
   async start(app: AppRow, kind: JobKind, userId: string): Promise<RunningJob> {
-    const inFlight = this.running.get(app.id);
-    if (inFlight) throw new JobBusyError(inFlight.id);
-
-    // EVERYTHING from here to `this.running.set` must be synchronous.
+    // The mutex decision is `appLock.tryAcquire` alone — not the registry below, which is
+    // bookkeeping for `live`/`cancel`/`shutdown` and no longer guards anything. Everything
+    // from here to `this.running.set` must stay synchronous.
     //
     // Measured with the insert placed first: two `start` calls in the same tick both
     // returned a job and both spawned `docker compose up` on the same stack, because
@@ -108,6 +126,15 @@ export class JobRunner {
     // double-click on Deploy is enough. `ulid()` and `runCompose` are both synchronous —
     // `runCompose` returns a handle, not a promise — so the slot can be taken before any
     // await exists to yield at.
+    if (!this.appLock.tryAcquire(app.id, `${kind} job`)) {
+      // The registry names the job if this runner is the one holding the lock, which is
+      // the only case reachable today. A holder from outside this runner (the step
+      // runner, once one exists) has no job id to report — the app id is the fallback,
+      // and changing what the route does with it is not this task's business.
+      const inFlight = this.running.get(app.id);
+      throw new JobBusyError(inFlight?.id ?? this.appLock.heldBy(app.id) ?? app.id);
+    }
+
     const id = ulid();
     const handle = this.deps.host.runCompose(
       { directory: app.directory, composeFile: app.composeFile },
@@ -153,6 +180,7 @@ export class JobRunner {
       // free the slot, rather than leaving an untracked `up` on the user's stack.
       handle.cancel();
       this.running.delete(app.id);
+      this.appLock.release(app.id);
       settleDone();
       throw error;
     }
@@ -200,6 +228,7 @@ export class JobRunner {
     } finally {
       // Always, or a failed job wedges the app until restart.
       this.running.delete(app.id);
+      this.appLock.release(app.id);
     }
   }
 }
