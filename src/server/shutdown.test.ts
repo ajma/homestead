@@ -7,7 +7,14 @@ function parts(overrides: Partial<Closeable> = {}): { parts: Closeable; order: s
     scheduler: { stop: () => void order.push("scheduler") },
     retention: { stop: () => void order.push("retention") },
     jobs: {
+      // Genuinely asynchronous, and pushes its marker on COMPLETION rather than on
+      // invocation. `jobs` is the one stage whose whole point is that a cancelled job's
+      // terminal write is awaited before the sequence moves on (job-runner.ts:68-79) — a
+      // fake that pushes synchronously on invocation would pass every ordering assertion
+      // below even if the code dropped the `await` on this stage entirely, which is
+      // exactly the gap the 1H review measured (shutdown.ts:102).
       shutdown: async () => {
+        await Promise.resolve();
         order.push("jobs");
       },
     },
@@ -52,6 +59,18 @@ describe("createShutdown", () => {
     await createShutdown(p)();
 
     expect(order.at(-1)).toBe("db");
+  });
+
+  it("runs every stage, in the documented order, and waits for each to finish before starting the next", async () => {
+    // The pairwise `indexOf` comparisons above are satisfied by `-1` for a stage that
+    // never ran at all, which is exactly how deleting `retention.stop()` (shutdown.ts:101)
+    // stayed invisible, and they only ever measure when a stage was INVOKED, which is how
+    // dropping the `await` on `jobs.shutdown()` (shutdown.ts:102) also stayed invisible.
+    // This asserts presence and completion order for every stage in one go.
+    const { parts: p, order } = parts();
+    await createShutdown(p)();
+
+    expect(order).toEqual(["scheduler", "retention", "jobs", "events", "server", "db"]);
   });
 
   it("runs once however many times it is called", async () => {
