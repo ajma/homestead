@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { adminAppKey } from "@web/api/admin";
 import { EditApp } from "@web/routes/EditApp";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -51,6 +51,16 @@ function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app)
             <Route path="overview" element={<p>OVERVIEW</p>} />
             <Route path="containers" element={<p>CONTAINERS</p>} />
             <Route path="logs" element={<p>LOGS</p>} />
+            <Route path="probes" element={<p>PROBES</p>} />
+            {/*
+             * Stand-ins, not the real `ComposeTab`/`EnvTab` — this file is about `EditApp`'s
+             * own routing and the only-active-tab boundary it must preserve, not about what
+             * those tabs render. The real components are covered by their own test files;
+             * mounting them for real here would pull in CodeMirror and the vendored schema
+             * for a question this file isn't asking.
+             */}
+            <Route path="compose" element={<p>COMPOSE</p>} />
+            <Route path="env" element={<p>ENV</p>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -96,12 +106,54 @@ describe("EditApp", () => {
     expect(screen.queryByText("OVERVIEW")).toBeNull();
   });
 
+  it("renders only the Compose tab's content, not every other tab alongside it", () => {
+    // This is the case that matters most: the real Compose tab mounts a whole CodeMirror
+    // instance, imports the vendored (86 KB) schema, and can fire a `docker compose
+    // config` spawn on load. If the shell ever rendered every tab and hid the inactive
+    // ones with CSS instead of routing through `<Outlet />`, opening the app's Overview
+    // tab would silently do all of that. This test only proves the routing boundary
+    // (stand-in tabs, not the real editor) — Task 4's own gate covers what the real tab
+    // does once mounted.
+    stubFetch(app);
+    mount("/apps/jellyfin/compose");
+    expect(screen.getByText("COMPOSE")).toBeTruthy();
+    expect(screen.queryByText("OVERVIEW")).toBeNull();
+    expect(screen.queryByText("CONTAINERS")).toBeNull();
+    expect(screen.queryByText("LOGS")).toBeNull();
+    expect(screen.queryByText("PROBES")).toBeNull();
+    expect(screen.queryByText("ENV")).toBeNull();
+  });
+
+  it("renders only the .env tab's content, not every other tab alongside it", () => {
+    stubFetch(app);
+    mount("/apps/jellyfin/env");
+    expect(screen.getByText("ENV")).toBeTruthy();
+    expect(screen.queryByText("OVERVIEW")).toBeNull();
+    expect(screen.queryByText("CONTAINERS")).toBeNull();
+    expect(screen.queryByText("LOGS")).toBeNull();
+    expect(screen.queryByText("PROBES")).toBeNull();
+    expect(screen.queryByText("COMPOSE")).toBeNull();
+  });
+
   it("offers a tab link per route", () => {
     stubFetch(app);
     mount();
-    for (const name of ["Overview", "Containers", "Logs"]) {
+    for (const name of ["Overview", "Containers", "Logs", "Probes", "Compose", ".env"]) {
       expect(screen.getByRole("link", { name })).toBeTruthy();
     }
+  });
+
+  it("orders the tabs Overview, Containers, Logs, Probes, Compose, then .env", () => {
+    // Not just presence — the brief calls for "a sensible order" and this is the one a
+    // reader would expect: status/inspection tabs first, the two editors (the heaviest,
+    // least-often-needed tabs) last.
+    stubFetch(app);
+    mount();
+    const nav = screen.getByRole("navigation", { name: "App sections" });
+    const labels = within(nav)
+      .getAllByRole("link")
+      .map((link) => link.textContent);
+    expect(labels).toEqual(["Overview", "Containers", "Logs", "Probes", "Compose", ".env"]);
   });
 
   it("has no exposure tab, since Cloudflare is Phase 2", () => {

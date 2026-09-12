@@ -145,6 +145,31 @@ describe("the admin route guard", () => {
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
+  it("sends a viewer away from the compose deep url", async () => {
+    // The compose tab is the heaviest thing this phase ships — a whole CodeMirror
+    // instance, an 86 KB vendored schema, and a `docker compose config` spawn on load.
+    // A viewer must never reach it by URL, bookmark or otherwise, even though the guard
+    // that stops them lives one level up in `App.tsx`'s route tree, not in the tab itself.
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/compose");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Compose" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
+  it("sends a viewer away from the env deep url", async () => {
+    // `.env` holds secrets on top of everything the compose tab already needs guarding
+    // against — this is the URL the viewer premise ("hand a housemate a link without
+    // thinking about it") most depends on staying closed.
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/env");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: ".env" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
   it("lets an admin reach both", async () => {
     stubMe({ role: "admin" });
     renderAt("/apps");
@@ -157,5 +182,47 @@ describe("the admin route guard", () => {
     renderAt("/apps/jellyfin/containers");
 
     await waitFor(() => expect(screen.getByRole("link", { name: "Containers" })).toBeTruthy());
+  });
+});
+
+describe("the tab data-loading boundary", () => {
+  /**
+   * Spec §8: "the compose file, container inspect data, and log stream load on demand
+   * and close on navigate, rather than being produced because someone glanced at
+   * status." This exercises the real routes with the real `ComposeTab`/`EnvTab` (unlike
+   * `EditApp.test.tsx`, which uses stand-ins to test the routing shell in isolation) —
+   * the concern named in this task is specifically that the real compose tab mounts a
+   * whole CodeMirror instance, imports the vendored schema, and can spawn `docker
+   * compose config`, so the thing worth proving here is that none of that happens
+   * merely because the edit page is open on a different tab.
+   */
+  it("never fetches compose or env data while only the overview tab is open", async () => {
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/overview");
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Containers" })).toBeTruthy());
+    // TanStack's `notifyManager` can defer a query's actual fetch through a `setTimeout(0)`
+    // that `act()` doesn't wait out on its own — flushing one real macrotask here closes
+    // that gap, so an eagerly-mounted compose/env query gets a genuine chance to fire
+    // before the assertion below treats its absence as proof rather than a false negative.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const urls = calls.map((call) => String(call[0]));
+    expect(urls.some((url) => url.includes("/compose"))).toBe(false);
+    expect(urls.some((url) => url.includes("/env"))).toBe(false);
+  });
+
+  it("fetches compose data once the compose tab is the one open", async () => {
+    // The mirror image of the test above: proves the assertion is actually discriminating
+    // between tabs, not just observing that nothing in this harness ever calls `/compose`.
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/compose");
+
+    await waitFor(() => {
+      const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const urls = calls.map((call) => String(call[0]));
+      expect(urls.some((url) => url.includes("/compose"))).toBe(true);
+    });
   });
 });
