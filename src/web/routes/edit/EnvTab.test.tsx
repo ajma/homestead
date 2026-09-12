@@ -239,11 +239,11 @@ describe("EnvTab", () => {
     expect(calls[0]).toEqual({ key: "DB_PASSWORD" });
   });
 
-  it("keeps the comments on the lines it did not touch", async () => {
-    // `upsertEnv` exists because editing one variable used to destroy the note explaining
-    // why another was set — a loss the user only discovers later, over SSH. Rebuilding
-    // the file from key/value pairs (the binding check for this test) would drop both
-    // the leading "# Database" comment line and PUID's inline "# keep this note".
+  it("sends only the key it touched as a named change, not a rebuilt file", async () => {
+    // Comment preservation is now `apps.ts`'s job — the server applies `changes` through
+    // `upsertEnv` against its own read of the file (see `apps-env.test.ts`). This only
+    // has to prove the client hands over the one key it touched, guarded by the hash its
+    // own `GET` already returned, rather than a whole file rebuilt around it.
     mockApi({
       env: {
         status: 200,
@@ -253,12 +253,10 @@ describe("EnvTab", () => {
             { key: "PUID", masked: MASK },
           ],
           exists: true,
+          hash: FILE_HASH,
         },
       },
-      reveal: (key) =>
-        key
-          ? { status: 200, body: { key, value: "hunter2" } }
-          : { status: 200, body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true } },
+      reveal: (key) => ({ status: 200, body: { key, value: "hunter2" } }),
     });
     mount();
     await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
@@ -272,9 +270,43 @@ describe("EnvTab", () => {
     await waitFor(() => expect(puts()).toHaveLength(1));
     const body = JSON.parse(puts()[0]?.body as string);
     expect(body).toEqual({
-      content: "# Database\nDB_PASSWORD=newpass\nPUID=1000 # keep this note\n",
+      changes: [{ key: "DB_PASSWORD", value: "newpass" }],
       expectedHash: FILE_HASH,
     });
+  });
+
+  it("saves a table edit without ever fetching the other secrets", async () => {
+    // The carried finding: the browser used to receive every credential in order to
+    // write one. Assert on what was requested, because the DOM looks identical either
+    // way — this is the binding check that actually proves the fix.
+    mockApi({
+      env: {
+        status: 200,
+        body: {
+          entries: [
+            { key: "DB_PASSWORD", masked: MASK },
+            { key: "PUID", masked: MASK },
+          ],
+          exists: true,
+          hash: FILE_HASH,
+        },
+      },
+      reveal: (key) => ({ status: 200, body: { key, value: key === "PUID" ? "1000" : "hunter2" } }),
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Reveal" })[1] as HTMLElement);
+    await waitFor(() => expect(screen.getByDisplayValue("1000")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("1000"), { target: { value: "1001" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts()).toHaveLength(1));
+
+    // Not one whole-file fetch happened — not before the save, not for it.
+    expect(revealCalls().filter((call) => call.key === undefined)).toHaveLength(0);
+    const body = JSON.parse(puts()[0]?.body as string);
+    expect(body).toEqual({ changes: [{ key: "PUID", value: "1001" }], expectedHash: FILE_HASH });
   });
 
   it("raw mode fetches the whole file and edits text directly", async () => {
@@ -369,18 +401,17 @@ describe("EnvTab", () => {
     // `upsertEnv` only ever changes the keys this tab actually touched, so a 409 here
     // does not need the user to adjudicate anything — refetching and reapplying the same
     // edit preserves both the user's change and whatever showed up on disk meanwhile,
-    // the same guarantee a single save already gives untouched lines.
-    const diskV1 = "DB_PASSWORD=hunter2\n";
+    // the same guarantee a single save already gives untouched lines. The initial attempt
+    // itself never fetches anything — only the 409 recovery does, once.
     const diskV2 = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
-    let wholeCalls = 0;
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
+      },
       reveal: (key) => {
         if (key) return { status: 200, body: { key, value: "hunter2" } };
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: diskV1, hash: "h1", exists: true } }
-          : { status: 200, body: { content: diskV2, hash: "h2", exists: true } };
+        return { status: 200, body: { content: diskV2, hash: "h2", exists: true } };
       },
       put: [
         { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
@@ -397,6 +428,11 @@ describe("EnvTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(puts()).toHaveLength(2));
+    const firstBody = JSON.parse(puts()[0]?.body as string);
+    expect(firstBody).toEqual({
+      changes: [{ key: "DB_PASSWORD", value: "newpass" }],
+      expectedHash: "h1",
+    });
     const secondBody = JSON.parse(puts()[1]?.body as string);
     expect(secondBody).toEqual({
       content: "DB_PASSWORD=newpass\nEXTRA=fromssh\n",
@@ -510,9 +546,10 @@ describe("EnvTab", () => {
     // "what you've typed here will be gone" — but a pending delete surviving that reload
     // meant the NEXT save carried it out anyway, deleting a credential from the disk
     // content the user had just chosen to adopt.
-    const base = "DB_PASSWORD=hunter2\nPUID=1000\n";
+    // A delete is a structural edit — this tab never fetches a whole file up front to
+    // build a "mine" preview from, so on a 409 it fetches the disk copy once, right here,
+    // to compute one.
     const diskContent = "DB_PASSWORD=hunter2\nPUID=1000\nEXTRA=fromssh\n";
-    let wholeCalls = 0;
     mockApi({
       env: {
         status: 200,
@@ -522,14 +559,10 @@ describe("EnvTab", () => {
             { key: "PUID", masked: MASK },
           ],
           exists: true,
+          hash: "h1",
         },
       },
-      reveal: () => {
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: base, hash: "h1", exists: true } }
-          : { status: 200, body: { content: diskContent, hash: "h2", exists: true } };
-      },
+      reveal: () => ({ status: 200, body: { content: diskContent, hash: "h2", exists: true } }),
       put: [
         { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
         { status: 200, body: { hash: "h3" } },
@@ -545,6 +578,11 @@ describe("EnvTab", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByText(/Someone changed this file since you loaded it/);
+    // The initial attempt sent only the delete — no whole-file fetch preceded it.
+    expect(JSON.parse(puts()[0]?.body as string)).toEqual({
+      changes: [{ key: "DB_PASSWORD", value: null }],
+      expectedHash: "h1",
+    });
 
     fireEvent.click(screen.getByText("Show the version currently on disk"));
     const useDiskButton = screen.getByRole("button", { name: "Load the version on disk instead" });
@@ -573,20 +611,23 @@ describe("EnvTab", () => {
   });
 
   it("does not silently reapply a stale value edit once the disk version has been loaded", async () => {
-    const base = "DB_PASSWORD=hunter2\n";
+    // Three PUTs now, not the original's fourth-that-never-was: the initial attempt sends
+    // `changes` with no fetch, the per-key merge's own retry is the first whole-file read,
+    // and its own 409 lands on `openConflict`'s already-computed `retryContent`.
     const fresh = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
     const diskContent = "DB_PASSWORD=hunter2\nEXTRA=fromssh\nMORE=1\n";
     let wholeCalls = 0;
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
+      },
       reveal: (key) => {
         if (key) return { status: 200, body: { key, value: "hunter2" } };
         wholeCalls++;
-        if (wholeCalls === 1)
-          return { status: 200, body: { content: base, hash: "h1", exists: true } };
-        if (wholeCalls === 2)
-          return { status: 200, body: { content: fresh, hash: "h2", exists: true } };
-        return { status: 200, body: { content: diskContent, hash: "h3", exists: true } };
+        return wholeCalls === 1
+          ? { status: 200, body: { content: fresh, hash: "h2", exists: true } }
+          : { status: 200, body: { content: diskContent, hash: "h3", exists: true } };
       },
       put: [
         { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
@@ -631,17 +672,15 @@ describe("EnvTab", () => {
   });
 
   it("does not silently reapply a pending add once the disk version has been loaded", async () => {
-    const base = "DB_PASSWORD=hunter2\n";
+    // Also a structural edit: the initial attempt sends `changes` with no fetch, and the
+    // disk copy is fetched exactly once, on the 409, inside `openConflict`.
     const diskContent = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
-    let wholeCalls = 0;
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
-      reveal: () => {
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: base, hash: "h1", exists: true } }
-          : { status: 200, body: { content: diskContent, hash: "h2", exists: true } };
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
       },
+      reveal: () => ({ status: 200, body: { content: diskContent, hash: "h2", exists: true } }),
       put: [
         { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
         { status: 200, body: { hash: "h3" } },
@@ -657,6 +696,10 @@ describe("EnvTab", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByText(/Someone changed this file since you loaded it/);
+    expect(JSON.parse(puts()[0]?.body as string)).toEqual({
+      changes: [{ key: "NEWVAR", value: "temp" }],
+      expectedHash: "h1",
+    });
 
     fireEvent.click(screen.getByText("Show the version currently on disk"));
     const useDiskButton = screen.getByRole("button", { name: "Load the version on disk instead" });
@@ -838,16 +881,19 @@ describe("EnvTab", () => {
     // The first Important finding: `upsertEnv` reapplies the browser's own value
     // unconditionally on retry. When the concurrent edit touched the SAME key, that
     // silently reverts whatever it just set — for a secrets file, often a credential
-    // rotation.
-    let wholeCalls = 0;
+    // rotation. The initial attempt itself never fetches anything; only the 409
+    // recovery's own single fetch reveals the concurrent edit.
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
+      },
       reveal: (key) => {
         if (key) return { status: 200, body: { key, value: "hunter2" } };
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true } }
-          : { status: 200, body: { content: "DB_PASSWORD=rotated\n", hash: "h2", exists: true } };
+        return {
+          status: 200,
+          body: { content: "DB_PASSWORD=rotated\n", hash: "h2", exists: true },
+        };
       },
       put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
     });
@@ -863,6 +909,10 @@ describe("EnvTab", () => {
 
     // Not silently applied — only one PUT has happened, the one that got refused.
     expect(puts()).toHaveLength(1);
+    expect(JSON.parse(puts()[0]?.body as string)).toEqual({
+      changes: [{ key: "DB_PASSWORD", value: "newpass" }],
+      expectedHash: "h1",
+    });
 
     fireEvent.click(screen.getByRole("radio", { name: /Keep mine/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save with these choices" }));
@@ -877,18 +927,17 @@ describe("EnvTab", () => {
     // The binding check proving the two conflict checks above didn't just disable the
     // auto-merge feature entirely: a concurrent edit to a DIFFERENT key than the one this
     // tab touched still merges without asking, and nothing is lost either side.
-    let wholeCalls = 0;
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
+      },
       reveal: (key) => {
         if (key) return { status: 200, body: { key, value: "hunter2" } };
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true } }
-          : {
-              status: 200,
-              body: { content: "DB_PASSWORD=hunter2\nEXTRA=fromssh\n", hash: "h2", exists: true },
-            };
+        return {
+          status: 200,
+          body: { content: "DB_PASSWORD=hunter2\nEXTRA=fromssh\n", hash: "h2", exists: true },
+        };
       },
       put: [
         { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
@@ -918,15 +967,14 @@ describe("EnvTab", () => {
     // The second Important finding: `upsertEnv`'s `findLastIndex` returns -1 for a key
     // that is gone from the fresh file, and appends it again — quietly undoing whatever
     // deleted it.
-    let wholeCalls = 0;
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
+      },
       reveal: (key) => {
         if (key) return { status: 200, body: { key, value: "hunter2" } };
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true } }
-          : { status: 200, body: { content: "OTHER=1\n", hash: "h2", exists: true } };
+        return { status: 200, body: { content: "OTHER=1\n", hash: "h2", exists: true } };
       },
       put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
     });
@@ -954,9 +1002,14 @@ describe("EnvTab", () => {
   it("adds a new variable in the table without touching raw mode or any secret", async () => {
     // Minor from the final review: before this, adding `TZ=Europe/London` meant
     // switching to Raw — fetching and displaying every secret in the file for what
-    // should be the most routine `.env` edit there is.
+    // should be the most routine `.env` edit there is. It also no longer needs a
+    // whole-file fetch to save: the add lands as a named change, guarded by the hash
+    // this tab's own `GET` already returned.
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: FILE_HASH },
+      },
     });
     mount();
     await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
@@ -974,12 +1027,12 @@ describe("EnvTab", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(puts()).toHaveLength(1));
+    // Still no reveal call — the add succeeded on the first try, without any conflict
+    // fetch either.
+    expect(revealCalls()).toHaveLength(0);
     const body = JSON.parse(puts()[0]?.body as string);
-    // The base this save applies onto is the whole-file fetch `mockApi`'s default
-    // `reveal` answers with — `FILE_CONTENT` — not the (differently-shaped) masked
-    // `entries` this test passed just to get the table to render.
     expect(body).toEqual({
-      content: "# Database\nDB_PASSWORD=hunter2\nPUID=1000 # keep this note\nTZ=Europe/London\n",
+      changes: [{ key: "TZ", value: "Europe/London" }],
       expectedHash: FILE_HASH,
     });
   });
@@ -1028,6 +1081,7 @@ describe("EnvTab", () => {
             { key: "PUID", masked: MASK },
           ],
           exists: true,
+          hash: FILE_HASH,
         },
       },
     });
@@ -1044,12 +1098,14 @@ describe("EnvTab", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(puts()).toHaveLength(1));
+    // Still never revealed: `removeEnv` (server-side, via the `changes` list's
+    // `value: null`) only needs the key's name — the comment above it and PUID's own
+    // inline note both survive untouched, since the browser never had to fetch, let
+    // alone rewrite, either line to do this.
+    expect(revealCalls()).toHaveLength(0);
     const body = JSON.parse(puts()[0]?.body as string);
-    // `removeEnv` drops only the `DB_PASSWORD` line — the comment above it and PUID's
-    // own inline note both survive untouched, the same guarantee `upsertEnv` gives a
-    // value edit.
     expect(body).toEqual({
-      content: "# Database\nPUID=1000 # keep this note\n",
+      changes: [{ key: "DB_PASSWORD", value: null }],
       expectedHash: FILE_HASH,
     });
   });
@@ -1073,18 +1129,15 @@ describe("EnvTab", () => {
     // Structural edits (add/delete) get the same explicit conflict raw mode uses,
     // rather than the granular "merge everything but the keys that actually conflict"
     // treatment a plain rename gets — see the module doc comment.
-    let wholeCalls = 0;
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
-      reveal: () => {
-        wholeCalls++;
-        return wholeCalls === 1
-          ? { status: 200, body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true } }
-          : {
-              status: 200,
-              body: { content: "DB_PASSWORD=hunter2\nEXTRA=fromssh\n", hash: "h2", exists: true },
-            };
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: FILE_HASH },
       },
+      reveal: () => ({
+        status: 200,
+        body: { content: "DB_PASSWORD=hunter2\nEXTRA=fromssh\n", hash: "h2", exists: true },
+      }),
       put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
     });
     mount();
@@ -1103,19 +1156,15 @@ describe("EnvTab", () => {
     // The Minor finding: the retry's whole-file fetch can itself answer 409
     // `env_unreadable` — a permissions problem, not a concurrent edit — and showing
     // "Someone changed this file since you loaded it" for that would name the wrong
-    // cause.
-    let wholeCalls = 0;
+    // cause. The initial attempt never fetches at all now, so this is the ONE whole-file
+    // call this save makes.
     mockApi({
-      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      env: {
+        status: 200,
+        body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true, hash: "h1" },
+      },
       reveal: (key) => {
         if (key) return { status: 200, body: { key, value: "hunter2" } };
-        wholeCalls++;
-        if (wholeCalls === 1) {
-          return {
-            status: 200,
-            body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true },
-          };
-        }
         return {
           status: 409,
           body: {

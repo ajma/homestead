@@ -148,10 +148,13 @@ function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
  * files are hand-maintained over SSH and their comments carry real information —
  * `upsertEnv`'s own docstring records the measured reason it exists, that rebuilding a
  * file from key/value pairs "would make editing one variable destroy the note explaining
- * why it is set". So a save here never rebuilds the file: it fetches the file's current
- * full content, applies each changed key with `upsertEnv`, and `PUT`s the result with the
- * hash *that fetch* returned — every untouched line survives byte-identical, the same
- * guarantee `ComposeTab`'s hash dance gives compose.yaml.
+ * why it is set". So a table save here never rebuilds the file, and — since this task —
+ * never even fetches it: `handleSave`'s non-raw branch sends `PUT .../env` a `changes`
+ * list (`{ key, value }`, `value: null` for a delete) guarded by the hash the table's own
+ * `GET` already returned, and the ROUTE applies each change through `upsertEnv`/
+ * `removeEnv` against its own read of the file — see `apps.ts`. Every untouched line
+ * still survives byte-identical, the same guarantee `ComposeTab`'s hash dance gives
+ * compose.yaml, but now the rest of the file never has to leave the server to get there.
  *
  * Secrets are handled the way Task 2's server half was built for: a row's value is never
  * fetched until its own "Reveal" is clicked, and each reveal names its key in the
@@ -165,20 +168,23 @@ function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
  * rather than keeping it around for the rest of the session. See `loadRaw` and the mode
  * toggle's own comment.
  *
- * A table-mode save is the OTHER exception, and — unlike raw mode — not a deliberate one:
- * `handleSave`'s non-raw branch still calls `fetchWhole` to get a full copy to run
- * `upsertEnv` against, so every secret in the file transits the browser on every save,
- * not just the row(s) actually being changed. The real fix is doing that merge
- * server-side (`upsertEnv` is importable from `src/shared` in both zones); this phase's
- * final fix wave chose not to make that contract change to the file holding credentials
- * under time pressure, and did the smaller, safe half instead: the audit log now records
- * `detail: { scope: "all", reason: "save-merge" }` on this path (see `apps.ts` and
- * `RevealAllReason` above) so it reads differently from a deliberate Raw-mode dump
- * (`reason: "raw-edit"`), even though the underlying transfer is the same. The guard
- * in `onSaveSuccess` below (`if (rawLoaded)`) keeps that fetched copy from also becoming
- * *durable* in this component's state when only table mode triggered it — see Important
- * 2 in the phase's final review — but the transient exposure on the wire and in memory
- * during the save itself is real and still there.
+ * A table-mode save used to be the OTHER exception, and unlike raw mode's, not a
+ * deliberate one: `handleSave`'s non-raw branch called `fetchWhole` to get a full copy to
+ * run `upsertEnv` against in the browser, so every secret in the file transited the
+ * browser on every save, not just the row(s) actually being changed. 1F's final fix wave
+ * declined to make that contract change to the file holding credentials under time
+ * pressure, and did the smaller, safe half instead — the audit log recorded
+ * `detail: { scope: "all", reason: "save-merge" }` on the fetch so it read differently
+ * from a deliberate Raw-mode dump, even though the transfer itself was unchanged. This
+ * task is that deferred fix: the non-raw branch now sends `changes` instead, and the
+ * fetch — and the audit line it produced on every routine save — is gone. `save-merge`
+ * still fires, just far less often: only from `openConflict`'s own best-effort disk copy
+ * on an actual 409, which genuinely needs the full text to show a comparison or to
+ * compute what a structural edit's retry would produce (see `handleSave`'s 409 branches).
+ * The guard in `onSaveSuccess` below (`content !== null` before calling `nextRawState`)
+ * still matters for exactly that path: a 409 recovery is one of the few remaining
+ * situations where this component holds real file text without raw mode being open, and
+ * it must not leak into durable state either.
  *
  * `PUT .../env` carries the same hash guard `ComposeTab` uses and can answer the same
  * 409 — and `.env` is the file that holds secrets, so an SSH edit clobbered here is worse
@@ -398,7 +404,41 @@ export function EnvTab() {
     });
   }
 
-  function onSaveSuccess(content: string, hash: string) {
+  /**
+   * The routine save path: sends only the keys this tab actually touched, guarded by the
+   * hash the table's own `GET` already returned. No whole-file fetch precedes this — the
+   * point of this task — and the server applies each change through `upsertEnv`/
+   * `removeEnv` itself, against its own read of the file.
+   */
+  function putEnvChanges(
+    changes: Array<{ key: string; value: string | null }>,
+    expectedHash: string | null,
+  ): Promise<{ hash: string }> {
+    return apiFetch<{ hash: string }>(`/api/apps/${appId}/env`, {
+      method: "PUT",
+      body: JSON.stringify({ changes, expectedHash }),
+    });
+  }
+
+  /** Every pending table edit and deletion, as the `changes` list `putEnvChanges` sends. */
+  function buildChanges(): Array<{ key: string; value: string | null }> {
+    const changes: Array<{ key: string; value: string | null }> = Object.entries(edits).map(
+      ([key, value]) => ({ key, value }),
+    );
+    for (const key of deletedKeys) {
+      changes.push({ key, value: null });
+    }
+    return changes;
+  }
+
+  /**
+   * `content` is `null` for a `changes`-mode save: it never held the whole file to begin
+   * with, so there is nothing here to fold into `rawText`. `nextRawState` itself already
+   * refuses to resume tracking when raw mode did not produce the save — this guard is
+   * what keeps a save that has no full text at all from even reaching that check with a
+   * fabricated one.
+   */
+  function onSaveSuccess(content: string | null, hash: string) {
     setEdits({});
     setEditBaselines({});
     setRevealed({});
@@ -408,7 +448,7 @@ export function EnvTab() {
     setKeyResolutions({});
     setAddedKeys(new Set());
     setDeletedKeys(new Set());
-    const nextRaw = nextRawState(rawLoaded, { content, hash });
+    const nextRaw = content !== null ? nextRawState(rawLoaded, { content, hash }) : null;
     if (nextRaw) {
       setRawText(nextRaw.rawText);
       setRawBaseline(nextRaw.rawBaseline);
@@ -421,18 +461,28 @@ export function EnvTab() {
   // `ComposeTab`'s own conflict handler: if this fails, the banner still explains what
   // happened, it just can't offer the disk text to compare against or load. The write
   // itself already failed safely either way.
-  async function openConflict(error: unknown, mine: string) {
+  //
+  // `mine` is either the merged content already known at the moment of conflict (raw
+  // mode, and a second failure on the per-key retry, both of which already had a full
+  // copy in hand) or a function of the disk copy this fetch is about to make (a plain
+  // table save's own first conflict, which never fetched anything up front — see the
+  // module doc comment). The banner still appears immediately either way; only the
+  // deferred case waits for this fetch to fill in a real value.
+  async function openConflict(error: unknown, mine: string | ((diskContent: string) => string)) {
     setConflict({
       kind: conflictKindFrom(error),
       message: messageFrom(error, "The file changed on disk since you loaded it."),
       disk: null,
-      mine,
+      mine: typeof mine === "string" ? mine : "",
     });
     try {
       // Always in service of a save that just got refused — never a deliberate raw-mode
       // reveal, even when what triggered the conflict was raw mode's own dirty text.
       const disk = await fetchWhole("save-merge");
-      setConflict((prev) => (prev ? { ...prev, disk } : prev));
+      setConflict((prev) => {
+        if (!prev) return prev;
+        return { ...prev, disk, mine: typeof mine === "function" ? mine(disk.content) : prev.mine };
+      });
     } catch {
       // Best effort — see the comment above.
     }
@@ -442,22 +492,31 @@ export function EnvTab() {
     setSaveError(null);
     setSaving(true);
     try {
-      // Raw, once loaded, is the base — it holds whatever the user typed there, or just
-      // the file as fetched if they never touched it. Table edits apply on top of it
-      // exactly as they would on top of a fresh fetch, so a raw-mode edit is never
-      // silently dropped by a save triggered after switching back to the table view.
-      let base: { content: string; hash: string | null };
+      // Two ways to make the initial attempt. Raw mode already holds real, arbitrary
+      // whole-file text — there is nothing here a named `changes` list could represent,
+      // so it sends the merged text same as before, and `knownMine` captures that text
+      // up front for reuse if this attempt gets refused. A pure table edit has no whole
+      // file in hand at all: it sends only the keys this tab actually touched, guarded
+      // by the hash its own `GET` already returned, and never fetches the rest of the
+      // file to get there — the point of this task.
+      let knownMine: string | null;
+      let attempt: () => Promise<{ hash: string }>;
       if (rawLoaded) {
-        base = { content: rawText, hash: rawHash };
+        // Table edits apply on top of the raw text exactly as they would on top of a
+        // fresh fetch, so a raw-mode edit is never silently dropped by a save triggered
+        // after switching back to the table view.
+        knownMine = applyEdits(rawText);
+        attempt = () => putEnv(knownMine as string, rawHash);
       } else {
-        const whole = await fetchWhole("save-merge");
-        base = { content: whole.content, hash: whole.hash };
+        knownMine = null;
+        const changes = buildChanges();
+        const expectedHash = envQuery.data?.hash ?? null;
+        attempt = () => putEnvChanges(changes, expectedHash);
       }
-      const content = applyEdits(base.content);
 
       try {
-        const result = await putEnv(content, base.hash);
-        onSaveSuccess(content, result.hash);
+        const result = await attempt();
+        onSaveSuccess(knownMine, result.hash);
         return;
       } catch (error) {
         if (!(error instanceof ApiError && error.status === 409)) {
@@ -472,11 +531,15 @@ export function EnvTab() {
         // value comparison `upsertEnv` can make the way it can for a plain rename.
         const hasStructuralEdits = addedKeys.size > 0 || deletedKeys.size > 0;
         if (rawDirty || hasStructuralEdits) {
-          // `rawText` is the user's own free-form edit — there is no way to merge it
-          // onto whatever the disk holds now without a diff, so (per the brief) this
-          // needs the same explicit, two-choice conflict `ComposeTab` uses for its own
-          // whole-file edits.
-          await openConflict(error, content);
+          // `knownMine` is already the right answer whenever this attempt had a whole
+          // file to build it from (raw mode). A pure table save never did — see the
+          // module doc comment — so `openConflict` is given a function of the disk copy
+          // it is about to fetch instead of an already-known string.
+          if (knownMine !== null) {
+            await openConflict(error, knownMine);
+          } else {
+            await openConflict(error, (diskContent) => applyEdits(diskContent));
+          }
           return;
         }
 
@@ -526,20 +589,30 @@ export function EnvTab() {
           }
 
           const retryContent = applyEdits(fresh.content);
-          const result = await putEnv(retryContent, fresh.hash);
-          onSaveSuccess(retryContent, result.hash);
-        } catch (retryError) {
-          if (retryError instanceof ApiError && retryError.status === 409) {
-            // Either a second concurrent write landed between the retry's own fetch
-            // and its PUT, or (see the Minor finding) the fetch itself failed because
-            // the file is unreadable rather than because anything is stale. Either
-            // way this is rare enough, and `content` (this tab's own attempted write)
-            // is still a better "mine" than nothing — falls back to the same explicit
-            // whole-file choice raw edits get, with `openConflict` telling the two
-            // causes apart in what it shows.
-            await openConflict(retryError, content);
+          try {
+            const result = await putEnv(retryContent, fresh.hash);
+            onSaveSuccess(retryContent, result.hash);
+          } catch (retryPutError) {
+            if (retryPutError instanceof ApiError && retryPutError.status === 409) {
+              // A second concurrent write landed between the retry's own fetch and its
+              // own PUT. Rare enough, and `retryContent` (this tab's own retried merge)
+              // is still a better "mine" than nothing — falls back to the same explicit
+              // whole-file choice raw edits get.
+              await openConflict(retryPutError, retryContent);
+            } else {
+              setSaveError(messageFrom(retryPutError, "Could not save the .env file."));
+            }
+          }
+        } catch (fetchError) {
+          // The retry's own fetch failed outright — e.g. (see the Minor finding from
+          // 1F) `env_unreadable`, a permissions problem no concurrent edit caused,
+          // rather than a second stale hash. There is no known "mine" yet in this case;
+          // `openConflict`'s own best-effort fetch fills one in if it happens to succeed
+          // where this one didn't.
+          if (fetchError instanceof ApiError && fetchError.status === 409) {
+            await openConflict(fetchError, (diskContent) => applyEdits(diskContent));
           } else {
-            setSaveError(messageFrom(retryError, "Could not save the .env file."));
+            setSaveError(messageFrom(fetchError, "Could not save the .env file."));
           }
         }
       }
