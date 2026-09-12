@@ -105,6 +105,39 @@ describe("POST /api/setup/state/:step/complete", () => {
     expect(stored.filter((step) => step === "users")).toHaveLength(1);
   });
 
+  it("scrubs an unknown value already in the column instead of writing it back", async () => {
+    // `parseCompletedSteps`'s allow-list filter has no effect on what a GET ever returns
+    // — `readState` re-filters through `SETUP_STEPS` regardless — so the only place its
+    // own filtering is observable at all is here: a corrupt or hand-edited value already
+    // sitting in the column, surviving into what the NEXT completion writes back. Without
+    // the filter, "cloudflare" (never a real `SetupStep`) would ride along forever once
+    // it's in the column; with it, `readStoredSteps` drops it before `next` is computed.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/state/host/complete",
+      headers: { cookie },
+    });
+
+    // Simulates a hand-edited or otherwise corrupted column, bypassing the app entirely
+    // — the same technique the "degrades a corrupt completed_steps value" test above uses.
+    await app.deps.db.run(
+      sql`update setup_state set completed_steps = '["host","cloudflare"]' where id = 1`,
+    );
+
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/state/import/complete",
+      headers: { cookie },
+    });
+
+    const { setupState } = await import("../db/schema.js");
+    const [row] = await app.deps.db.select().from(setupState).where(eq(setupState.id, 1));
+    const stored = row?.completedSteps as string[];
+    expect(stored).toEqual(["host", "import"]);
+  });
+
   it("rejects an unknown step name instead of storing it", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);

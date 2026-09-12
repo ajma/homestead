@@ -55,7 +55,7 @@ function json(status: number, body: unknown): Response {
 }
 
 type RecordedCall = { url: string; method: string; body: unknown };
-type Handler = (url: string, init: RequestInit | undefined) => Response | null;
+type Handler = (url: string, init: RequestInit | undefined) => Response | Promise<Response> | null;
 
 /**
  * A tiny per-URL/method router over `fetch`, rather than one big stub per test — this
@@ -358,6 +358,35 @@ describe("UserManager", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
     const patch = calls.find((c) => c.method === "PATCH");
     expect(patch?.body).toEqual({ role: "admin" });
+  });
+
+  it("disables a row's own role-change button while its PATCH is still in flight", async () => {
+    // `mutatingUserIds` is what stops a second click on THIS row from firing a second
+    // PATCH before the first settles — distinct from `busy`, the aggregate a caller's
+    // own footer button reads (already covered elsewhere: "actions(busy)" going false to
+    // true and back). Unlike `SetupWizard`'s `pendingRef`, this guard IS the disabled
+    // attribute — there is no separate ref backstop — so two ordinary, separately
+    // dispatched clicks are enough to tell the guarded button from the unguarded one:
+    // with the guard, the first click's `setMutatingUserIds` commits before the second
+    // click is dispatched, so the button is genuinely disabled and jsdom refuses to
+    // deliver the second click at all; delete the guard (`disabled={disabled}` only) and
+    // the button stays enabled regardless, so the second click reaches the handler and
+    // fires a second PATCH.
+    const calls = stubFetch([
+      (url, init) =>
+        usersList(url, init, [user({ id: "u2", name: "Vera Viewer", role: "viewer" })]),
+      (_url, init) => (init?.method === "PATCH" ? new Promise<Response>(() => {}) : null),
+    ]);
+    mount();
+
+    await waitFor(() => expect(screen.getByText("Vera Viewer")).toBeTruthy());
+    const makeAdmin = screen.getByRole("button", { name: "Make admin" });
+    fireEvent.click(makeAdmin);
+    fireEvent.click(makeAdmin);
+
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.filter((c) => c.method === "PATCH")).toHaveLength(1);
   });
 
   it("renders the last_admin refusal as a sentence when a role change would demote the last admin", async () => {
