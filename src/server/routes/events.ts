@@ -194,6 +194,7 @@ export async function eventRoutes(app: FastifyInstance): Promise<void> {
           probeId: transition.probeId,
           status: transition.status,
           faultClass: transition.faultClass,
+          statusSince: transition.statusSince,
         });
       },
       () => done?.(),

@@ -32,6 +32,7 @@ const transition = (
   appId,
   status: "down",
   faultClass: "app",
+  statusSince: 1000,
   changed: true,
   ...over,
 });

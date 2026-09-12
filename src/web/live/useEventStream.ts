@@ -13,6 +13,9 @@ export type StatusEvent = {
   probeId: string;
   status: AppStatus;
   faultClass: FaultClass | null;
+  /** Epoch seconds this transition took effect, per the server's clock — not the
+   * client's receipt time. See `PersistedTransition.statusSince`. */
+  statusSince: number;
 };
 
 export type AppChangedEvent = { appId: string };
@@ -72,7 +75,10 @@ export function useEventStream(): void {
       let matchedTile = false;
       let sawUnknownProbe = false;
       const nowMs = Date.now();
-      const statusSince = Math.floor(nowMs / 1000);
+      // The server's clock, not the client's receipt time — see `StatusEvent.statusSince`.
+      // A fetched tile and a patched tile must date a transition from the same clock, or
+      // a tile's age depends on which path it arrived by.
+      const statusSince = payload.statusSince;
 
       queryClient.setQueryData<LauncherApp[]>(launcherKey, (current) => {
         if (!current) return current;
