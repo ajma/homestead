@@ -31,6 +31,21 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
 
   const countUsers = async () => (await db.select({ id: users.id }).from(users)).length;
 
+  // Each preflight run starts a real container: image-ensure, create, attach, start,
+  // wait, remove. The wizard's re-check button is exactly where a user clicks
+  // repeatedly while fixing a bind mount, so concurrent requests share one in-flight
+  // run rather than each launching their own container. Cleared once the run settles
+  // (success or failure) so the NEXT request, after this one finishes, starts fresh.
+  let inFlightPreflight: ReturnType<typeof app.deps.preflight> | null = null;
+  const runPreflightOnce = (): ReturnType<typeof app.deps.preflight> => {
+    if (!inFlightPreflight) {
+      inFlightPreflight = app.deps.preflight().finally(() => {
+        inFlightPreflight = null;
+      });
+    }
+    return inFlightPreflight;
+  };
+
   /**
    * Selects `completed_steps` through a raw `sql` projection rather than the schema's
    * typed JSON column. Drizzle's `mode: "json"` parses on the way out of the column-typed
@@ -74,7 +89,9 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
     // registration: tests override `app.deps.preflight` wholesale (a plain function
     // property, unlike `host`, whose methods are mutated on the same shared object), and
     // a closure that captured the old function at startup would never see the override.
-    const { config, host, preflight } = app.deps;
+    // `runPreflightOnce` reads `app.deps.preflight` itself, at call time, for the same
+    // reason.
+    const { config, host } = app.deps;
 
     // Both checks run, and neither can hide the other. A wrong bind mount usually breaks
     // both, and a user who fixes the socket needs to already know the path is wrong too —
@@ -87,7 +104,7 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
           ok: false as const,
           message: error instanceof Error ? error.message : String(error),
         })),
-      preflight().catch((error: unknown) => ({
+      runPreflightOnce().catch((error: unknown) => ({
         ok: false as const,
         reason: error instanceof Error ? error.message : String(error),
       })),

@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hashContent, LocalHost } from "@server/host/local-host";
+import { hashContent, LocalHost, parseDockerVersion } from "@server/host/local-host";
 import { HashMismatchError } from "@server/host/types";
 import Docker from "dockerode";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -133,5 +133,27 @@ describe.skipIf(!(await dockerAvailable()))("LocalHost docker reads", () => {
     await expect(
       host.listContainers({ project: "definitely-not-a-real-project" }),
     ).resolves.toEqual([]);
+  });
+});
+
+describe("parseDockerVersion", () => {
+  it("maps a well-formed response", () => {
+    expect(
+      parseDockerVersion({ Version: "27.3.1", ApiVersion: "1.47", Os: "linux", Arch: "x86_64" }),
+    ).toEqual({ version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "x86_64" });
+  });
+
+  it("throws rather than reporting success when a field is missing", () => {
+    // A "success" that drops the version string is worse than a failure: JSON silently
+    // omits `undefined`, so the caller would see `{ ok: true, apiVersion, os, arch }`
+    // with no way to tell the evidence is missing.
+    expect(() => parseDockerVersion({ ApiVersion: "1.47", Os: "linux", Arch: "x86_64" })).toThrow(
+      /form Homestead understood/,
+    );
+  });
+
+  it("throws when the response is not an object at all", () => {
+    expect(() => parseDockerVersion("not an object")).toThrow(/form Homestead understood/);
+    expect(() => parseDockerVersion(null)).toThrow(/form Homestead understood/);
   });
 });

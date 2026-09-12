@@ -12,10 +12,13 @@ describe("GET /api/setup/host-check", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(typeof body.composeRoot).toBe("string");
-    expect(body.docker.ok).toBe(true);
-    expect(body.docker.version).toBeTruthy();
-    expect(body.preflight.ok).toBe(true);
+    // Asserts identity with what FakeHost actually supplies, not just truthiness/shape —
+    // a handler returning fixed strings would satisfy a looser check.
+    expect(body).toMatchObject({
+      composeRoot: app.deps.config.composeRoot,
+      docker: { ok: true, version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "x86_64" },
+      preflight: { ok: true },
+    });
   });
 
   it("reports a dead Docker socket as a failure rather than throwing", async () => {
@@ -66,6 +69,43 @@ describe("GET /api/setup/host-check", () => {
     ).json();
     expect(body.docker.ok).toBe(false);
     expect(body.preflight.ok).toBe(false);
+  });
+
+  it("serialises concurrent re-check requests into a single preflight run", async () => {
+    // Each preflight run starts a real container. The re-check button is exactly where a
+    // user double-clicks while fixing their bind mount, so a second concurrent request
+    // must reuse the first run's in-flight promise rather than starting its own container.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    app.deps.preflight = async () => {
+      calls += 1;
+      await gate;
+      return { ok: true };
+    };
+
+    const first = app.inject({ method: "GET", url: "/api/setup/host-check", headers: { cookie } });
+    // Wait until the first request has actually entered (and is gated inside) its
+    // preflight run before firing the second, so the two provably overlap.
+    while (calls === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    const second = app.inject({ method: "GET", url: "/api/setup/host-check", headers: { cookie } });
+    // Give the second request's handler time to reach the shared run while it is still
+    // gated, before releasing it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release?.();
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(calls).toBe(1);
+    expect(a.json().preflight).toEqual({ ok: true });
+    expect(b.json().preflight).toEqual({ ok: true });
   });
 
   it("is admin-only", async () => {

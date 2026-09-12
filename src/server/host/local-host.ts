@@ -4,6 +4,7 @@ import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "no
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import Docker from "dockerode";
+import { z } from "zod";
 import { ChunkQueue } from "./chunk-queue.js";
 import { LogDemultiplexer } from "./log-demux.js";
 import { PathGuard } from "./paths.js";
@@ -36,6 +37,46 @@ export function hashContent(content: string): string {
 
 /** Fixed width, so the mask reveals nothing about a secret's length. Matches env-file.ts. */
 const MASK = "••••••••";
+
+const dockerVersionSchema = z.object({
+  Version: z.string(),
+  ApiVersion: z.string(),
+  Os: z.string(),
+  Arch: z.string(),
+});
+
+/**
+ * Exported for direct unit testing, independent of a real Docker socket.
+ *
+ * `@types/dockerode` declares `Version`/`ApiVersion`/`Os`/`Arch` as required strings, but
+ * that is the typedef's claim, not a runtime guarantee: an older daemon, or Podman's
+ * Docker-compatible socket, can omit one. `undefined` is dropped silently by JSON, so an
+ * unchecked mapping would report `{ ok: true, apiVersion: "1.41", os: "linux" }` — a
+ * success with the version string missing, which is the one piece of evidence step 2 of
+ * onboarding exists to show. Throwing here instead lets the route's existing
+ * dockerVersion().catch(...) turn this into a distinguishable, actionable failure rather
+ * than a quiet gap in a "success".
+ */
+export function parseDockerVersion(raw: unknown): {
+  version: string;
+  apiVersion: string;
+  os: string;
+  arch: string;
+} {
+  const parsed = dockerVersionSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(
+      "the Docker daemon answered, but not in a form Homestead understood " +
+        "(missing or invalid version fields)",
+    );
+  }
+  return {
+    version: parsed.data.Version,
+    apiVersion: parsed.data.ApiVersion,
+    os: parsed.data.Os,
+    arch: parsed.data.Arch,
+  };
+}
 
 export class LocalHost implements Host {
   private readonly guard: PathGuard;
@@ -195,7 +236,7 @@ export class LocalHost implements Host {
     arch: string;
   }> {
     const raw = await this.docker.version();
-    return { version: raw.Version, apiVersion: raw.ApiVersion, os: raw.Os, arch: raw.Arch };
+    return parseDockerVersion(raw);
   }
 
   /**

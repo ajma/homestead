@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMountPreflight } from "@server/host/preflight";
@@ -62,6 +62,50 @@ describe.skipIf(!hasDocker)("runMountPreflight", () => {
       await expect(readdir(root)).resolves.not.toContain(".homestead-preflight");
     } finally {
       await chmod(markerDir, 0o700).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("lets two concurrent runs against a healthy mount both succeed", async () => {
+    // Both runs share the same `.homestead-preflight` directory. The first to finish
+    // must remove only its own marker file — removing the whole directory would delete
+    // the second run's marker before it has been read, failing a perfectly good mount.
+    // This is a real end-to-end race between two container runs: it is a genuine
+    // regression test, but its timing is not guaranteed to trip the bug on every run —
+    // see the deterministic test below for that guarantee.
+    const root = await mkdtemp(join(tmpdir(), "hs-preflight-concurrent-"));
+    try {
+      const [a, b] = await Promise.all([
+        runMountPreflight({ composeRoot: root, dockerSocket: "/var/run/docker.sock" }),
+        runMountPreflight({ composeRoot: root, dockerSocket: "/var/run/docker.sock" }),
+      ]);
+      expect(a).toEqual({ ok: true });
+      expect(b).toEqual({ ok: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("does not delete a concurrent run's marker file that is not its own", async () => {
+    // Deterministic version of the race above: plant a foreign marker file in the shared
+    // `.homestead-preflight` directory before running, standing in for a concurrent run
+    // that has not finished yet. A cleanup that removes the whole directory (the bug)
+    // deletes it; a cleanup scoped to this run's own marker leaves it untouched.
+    const root = await mkdtemp(join(tmpdir(), "hs-preflight-foreign-"));
+    const markerDir = join(root, ".homestead-preflight");
+    const foreignMarker = join(markerDir, "some-other-run.marker");
+    try {
+      await mkdir(markerDir, { recursive: true });
+      await writeFile(foreignMarker, "someone else's token", "utf8");
+
+      const result = await runMountPreflight({
+        composeRoot: root,
+        dockerSocket: "/var/run/docker.sock",
+      });
+
+      expect(result).toEqual({ ok: true });
+      await expect(readFile(foreignMarker, "utf8")).resolves.toBe("someone else's token");
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
