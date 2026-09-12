@@ -11,7 +11,7 @@ import { OverviewTab } from "@web/routes/edit/OverviewTab";
 import { ProbesTab } from "@web/routes/edit/ProbesPanel";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
-import { Placeholder } from "@web/routes/Placeholder";
+import { Settings } from "@web/routes/Settings";
 import { SetupWizard } from "@web/routes/setup/SetupWizard";
 import { type ComponentType, lazy, Suspense, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
@@ -147,10 +147,7 @@ function Routed() {
           <Route path="compose" element={<LazyTab loader={loadComposeTab} />} />
           <Route path="env" element={<LazyTab loader={loadEnvTab} />} />
         </Route>
-        <Route
-          path="/settings/*"
-          element={isAdmin ? <Placeholder title="Settings" /> : <Navigate to="/" replace />}
-        />
+        <Route path="/settings/*" element={isAdmin ? <Settings /> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
