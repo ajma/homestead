@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { HostCheck } from "@shared/setup.js";
 import { SETUP_STEPS } from "@shared/setup.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -14,11 +15,21 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+const HEALTHY_HOST_CHECK: HostCheck = {
+  composeRoot: "/srv/homestead/apps",
+  docker: { ok: true, version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "arm64" },
+  preflight: { ok: true },
+};
+
 describe("Settings", () => {
   it("mounts the user manager", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => json(200, [])),
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
@@ -30,6 +41,30 @@ describe("Settings", () => {
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
     await waitFor(() => expect(screen.getByText("No users yet.")).toBeTruthy());
     expect(screen.getByText("Users")).toBeTruthy();
+  });
+
+  it("mounts the host check panel, reused from setup, with no wizard footer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByText("/srv/homestead/apps")).toBeTruthy());
+    expect(screen.getByText("27.3.1")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Re-check/ })).toBeTruthy();
+    // The wizard's own Continue/Skip chrome must not leak into Settings — there is no
+    // step to complete here, only a check to re-run.
+    expect(screen.queryByRole("button", { name: /Continue/ })).toBeNull();
   });
 });
 
@@ -57,6 +92,7 @@ function stubMe(me: Me) {
         return json(200, { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 });
       }
       if (url.includes("/api/launcher")) return json(200, { apps: [] });
+      if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
       if (url.endsWith("/api/apps")) return json(200, []);
       if (url.endsWith("/api/users")) return json(200, []);
       return json(200, []);
