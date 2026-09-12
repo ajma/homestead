@@ -1,0 +1,80 @@
+# Hot-reload development deployment: the working tree is bind-mounted and watched, so files
+# pushed to the host (scripts/push-to-test.sh) take effect without a rebuild.
+#
+#   docker compose -f compose.dev.yaml up -d --build
+#
+# For the immutable production image, use the root Dockerfile and compose.example.yaml
+# instead. See docs/deployment.md for how the two differ.
+services:
+  homestead:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: homestead:dev-hotreload
+    container_name: homestead-dev
+    restart: unless-stopped
+
+    # Required for two independent reasons. First, a bridged container's 127.0.0.1 is its
+    # own network namespace's loopback, not the host's — an internal HTTP probe whose target
+    # is http://localhost:<port> would silently test the container instead of the service.
+    # Second, it puts both Vite's port and the API's port directly on the host, which is what
+    # makes this reachable from another machine on the tailnet at all.
+    network_mode: host
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # The working tree, at the same path Dockerfile.dev sets as WORKDIR. This is the
+      # hot-reload path: scripts/push-to-test.sh rsyncs into this directory on the host, and
+      # the watchers started by `pnpm dev` (tsx watch, Vite) pick the change up immediately.
+      - ./:/app
+
+      # Load-bearing, not an optimisation. Without this, the bind mount above would hide
+      # whatever `pnpm install` puts in node_modules, and the container's musl-linked
+      # node_modules would get written back over the host's glibc one on the first install.
+      # It is the same native-binding problem the production Dockerfile's prod-deps stage
+      # exists for: @libsql/client resolves its binding by libc, and a mismatched one fails
+      # at createClient(), not at build time.
+      - homestead-dev-node-modules:/app/node_modules
+
+      # homestead.db and the icon cache — HOMESTEAD_DB_PATH and HOMESTEAD_ICON_CACHE_DIR
+      # (src/server/config.ts) both default to paths under ./data relative to /app, so no
+      # env override is needed to land them in this volume.
+      - homestead-dev-data:/app/data
+
+      # The compose root, bind-mounted at the IDENTICAL absolute path on both sides — same
+      # constraint as production (docs/deployment.md §4), not a dev-only relaxation. Homestead
+      # runs `docker compose -f <root>/<app>/compose.yaml`, and the daemon resolves that
+      # stack's own relative bind mounts against the HOST filesystem, so the path string
+      # Homestead emits has to mean something there too. Using the same substitution on both
+      # sides of the mapping means the two sides can never drift apart from a typo; the boot
+      # preflight (src/server/host/preflight.ts) refuses to start if they still disagree.
+      - "${HOMESTEAD_COMPOSE_ROOT:-/opt/stacks}:${HOMESTEAD_COMPOSE_ROOT:-/opt/stacks}"
+
+    environment:
+      NODE_ENV: development
+
+      # REQUIRED. 32 bytes, base64. See docs/deployment.md §5.
+      HOMESTEAD_SECRET_KEY: "${HOMESTEAD_SECRET_KEY:?set HOMESTEAD_SECRET_KEY}"
+
+      HOMESTEAD_COMPOSE_ROOT: "${HOMESTEAD_COMPOSE_ROOT:-/opt/stacks}"
+
+      # The URL actually typed into the browser's address bar — Vite's port, not the API's.
+      # Better-Auth compares the browser's Origin header against this and derives cookie
+      # security (the Secure flag) from its scheme. In this deployment the browser only ever
+      # talks to Vite (which proxies /api to the server on the same host); pointing this at
+      # the API's own port instead would not 404, it would just silently break auth cookies.
+      HOMESTEAD_BASE_URL: "http://homestead-test.hippo-ule.ts.net:5173"
+
+      # Vite needs to bind every interface, not just loopback, to be reachable from another
+      # machine at all under network_mode: host. See src/web/dev-server-options.ts.
+      VITE_DEV_HOST: "1"
+
+      # Vite refuses an unrecognised Host header outright; bare IPs are exempt from that
+      # check, hostnames are not — which is exactly why this only bites once the box is
+      # addressed by name instead of by IP.
+      VITE_ALLOWED_HOSTS: "homestead-test.hippo-ule.ts.net"
+
+volumes:
+  homestead-dev-node-modules:
+  homestead-dev-data:
