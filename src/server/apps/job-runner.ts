@@ -65,6 +65,37 @@ export class JobRunner {
     return false;
   }
 
+  /**
+   * Cancels every in-flight job and waits for each to write its terminal row.
+   *
+   * Cancelling rather than waiting is the only option that exists: `JOB_TIMEOUT_MS` is
+   * thirty minutes and Docker SIGKILLs ten seconds after SIGTERM. A cancelled job lands as
+   * `failed` through the normal `finish` path, which is the same place the startup sweep
+   * would have put it — the difference is that this one happens while we can still write
+   * it, so the next boot has nothing to repair.
+   *
+   * `timeoutMs` bounds the wait. A child that ignores SIGTERM must not be able to hold the
+   * process open past the orchestrator's grace period; the row it leaves behind is the
+   * sweep's problem on the next boot, which is exactly what the sweep is for.
+   */
+  async shutdown(timeoutMs = 10_000): Promise<void> {
+    const inFlight = [...this.running.values()];
+    if (inFlight.length === 0) return;
+
+    for (const job of inFlight) job.handle.cancel();
+
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+
+    try {
+      await Promise.race([Promise.allSettled(inFlight.map((job) => job.done)), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async start(app: AppRow, kind: JobKind, userId: string): Promise<RunningJob> {
     const inFlight = this.running.get(app.id);
     if (inFlight) throw new JobBusyError(inFlight.id);
