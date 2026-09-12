@@ -30,6 +30,18 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     const row = await loadApp(db, ctx, params.id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
+    // Every kind, not a chosen subset. `down` on a self-adopted Homestead is unrecoverable
+    // from the UI that issued it and `restart` kills the process mid-response; `up` and
+    // `pull` are merely useless against a container that is by definition already running.
+    // Same shape as the delete guard at `apps.ts:599`. The cost is real and accepted: an
+    // admin restarts Homestead from the NAS, not from Homestead.
+    if (row.isSystem) {
+      return reply.code(409).send({
+        error: "system_app",
+        message: "Homestead does not run lifecycle actions against a system app.",
+      });
+    }
+
     try {
       const job = await runner.start(row, kind.data as JobKind, ctx.userId);
       await audit(db, ctx, {
