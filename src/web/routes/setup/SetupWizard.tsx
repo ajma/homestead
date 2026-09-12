@@ -1,9 +1,13 @@
 import { type HostCheck, SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
 import { useQueryClient } from "@tanstack/react-query";
-import { hostCheckKey, useCompleteStep, useSetupState } from "@web/api/setup";
+import { useAdminApps } from "@web/api/admin";
+import { hostCheckKey, useCompleteStep, useFinishSetup, useSetupState } from "@web/api/setup";
+import { useUsers } from "@web/api/users";
 import { useRef, useState } from "react";
+import { Navigate } from "react-router-dom";
 import { StepCreateAdmin } from "./StepCreateAdmin";
 import { StepImport } from "./StepImport";
+import { StepInviteUsers } from "./StepInviteUsers";
 import { StepVerifyHost } from "./StepVerifyHost";
 
 const STEP_LABELS: Record<SetupStep, string> = {
@@ -50,35 +54,92 @@ export type SetupStepProps = {
   skippable: boolean;
 };
 
-function StepPlaceholder({ step, skippable, onComplete }: SetupStepProps & { step: SetupStep }) {
+/**
+ * Step 6, reached only once `resumeStep` returns `"finish"` — which only happens once
+ * every entry in `SETUP_STEPS` is in `completedSteps` (see that function above). That is
+ * the wizard's own gate on reachability: `POST /api/setup/finish` itself is permissive
+ * (a reviewer measured it succeeding with zero steps completed — see that route's own
+ * comment) precisely because it was never meant to be the thing standing between a
+ * click and a premature finish. This component, and the fact that nothing else in this
+ * file can reach it early, is that gate.
+ *
+ * `useAdminApps`/`useUsers` are the same two lists `AdminApps` and `Settings` already
+ * read — no new endpoint. Onboarding is the one moment their raw counts are exactly the
+ * summary a person wants: nothing could have been adopted or invited before this wizard
+ * ran, so "how many rows are in each list" and "what did I just do" are the same
+ * question. `invitedCount` subtracts one for the administrator Step 1 always creates
+ * before this screen is reachable — the founder wasn't "invited", they signed
+ * themselves up, and the sentence below is about the household, not about them.
+ */
+function FinishScreen({ state }: { state: SetupState }) {
+  const apps = useAdminApps();
+  const users = useUsers();
+  const finishSetup = useFinishSetup();
+  const [error, setError] = useState<string | null>(null);
+  // Set synchronously in the click handler, before `mutate` — the same reason every
+  // other submit guard in this wizard (`StepCreateAdmin`'s `submitting`, `SetupWizard`'s
+  // own `pendingRef`) is plain state rather than derived from the mutation's own
+  // `isPending`: TanStack's `notifyManager` defers that through `setTimeout(fn, 0)`,
+  // which would leave a synchronous second click able to fire a second `POST
+  // /api/setup/finish` before the first one's `isPending` ever flipped true.
+  const [finishing, setFinishing] = useState(false);
+
+  // Reached once this mutation's own success writes a fresh `completedAt` into the
+  // shared `["setup-state"]` cache `useSetupState` reads — or, on a reload that lands
+  // straight here with setup already finished, without this screen's button ever having
+  // been pressed in this session at all. Either way, this is the one-way door: once
+  // `completedAt` is set, there is nothing left for this screen to do, and leaving one
+  // rendered would let a second admin dismiss the summary and still be looking at the
+  // wizard.
+  if (state.completedAt != null) return <Navigate to="/" replace />;
+
+  const appCount = apps.data?.length ?? 0;
+  const invitedCount = Math.max((users.data?.length ?? 0) - 1, 0);
+
+  function handleFinish() {
+    if (finishing) return;
+    setFinishing(true);
+    setError(null);
+    finishSetup.mutate(undefined, {
+      onError: () => {
+        setFinishing(false);
+        setError("Could not finish setup. Try again.");
+      },
+      // No `onSuccess` reset of `finishing`: success moves `state.completedAt` off
+      // `null`, which takes this component to the `<Navigate>` branch above on the very
+      // next render — there is no "done, but still showing this button" state to unwind
+      // back into.
+    });
+  }
+
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold">{STEP_LABELS[step]}</h2>
-        <p className="text-sm text-slate-500">Built in a later task.</p>
+        <h2 className="text-lg font-semibold">You're set up</h2>
+        <p className="text-sm text-slate-700">
+          {appCount} {appCount === 1 ? "app" : "apps"} adopted, {invitedCount}{" "}
+          {invitedCount === 1 ? "user" : "users"} invited.
+        </p>
+        <p className="text-sm text-slate-500">
+          Cloudflare exposure isn't set up yet — that's fine, it can be turned on later from
+          Settings.
+        </p>
       </div>
-      {skippable && (
-        // Deliberately does not disable itself while `pending` — this is a stand-in for
-        // a step Tasks 6/8 haven't built yet, not a model for one to copy. It's the
-        // concrete case proving `SetupWizard`'s own double-call guard on `onComplete`
-        // holds even when a step author forgets to wire up `pending` themselves.
-        <button
-          type="button"
-          onClick={onComplete}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-        >
-          Skip
-        </button>
-      )}
-    </div>
-  );
-}
 
-function FinishPlaceholder() {
-  return (
-    <div>
-      <h2 className="text-lg font-semibold">Done</h2>
-      <p className="text-sm text-slate-500">Built in a later task.</p>
+      {error && (
+        <p role="alert" className="text-sm text-red-600">
+          {error}
+        </p>
+      )}
+
+      <button
+        type="button"
+        onClick={handleFinish}
+        disabled={finishing}
+        className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+      >
+        {finishing ? "Finishing…" : "Finish setup"}
+      </button>
     </div>
   );
 }
@@ -116,8 +177,9 @@ export function SetupWizard() {
   // `isPending`/`isFetching` through `setTimeout(fn, 0)`, so deriving this guard from
   // either would leave a synchronous second call able to slip through first. Living
   // here, not inside each step, is what makes it hold even when a step forgets to
-  // disable its own control while `pending` is true (see `StepPlaceholder`'s Skip
-  // button).
+  // disable its own control while `pending` is true — `SetupWizard.test.tsx`'s "does
+  // not double-fire" test proves this holds regardless of what a given step's own Skip
+  // button does or doesn't guard against.
   const pendingRef = useRef(false);
   const [pending, setPending] = useState(false);
 
@@ -213,7 +275,7 @@ export function SetupWizard() {
       )}
 
       {displayed === "finish" ? (
-        <FinishPlaceholder />
+        <FinishScreen state={state} />
       ) : displayed === "admin" ? (
         <StepCreateAdmin
           state={state}
@@ -239,8 +301,7 @@ export function SetupWizard() {
           skippable={skippable}
         />
       ) : (
-        <StepPlaceholder
-          step={displayed}
+        <StepInviteUsers
           state={state}
           pending={pending}
           onComplete={() => markComplete(displayed)}

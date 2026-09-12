@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import type { AdminApp } from "@shared/dto";
 import type { HostCheck, SetupState } from "@shared/setup.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ManagedUser } from "@web/api/users";
 import { SetupWizard } from "@web/routes/setup/SetupWizard";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 function json(status: number, body: unknown): Response {
@@ -25,12 +28,27 @@ const HEALTHY_HOST_CHECK: HostCheck = {
  * steps make their own requests (`StepVerifyHost`'s `GET /api/setup/host-check`, at
  * least), and a stub that always returns `state` would hand a step something shaped
  * nothing like what it asked for the moment more than one endpoint is exercised in the
- * same test. */
-function stubState(state: SetupState) {
+ * same test.
+ *
+ * `users`/`apps` answer `GET /api/users`/`GET /api/apps` — `StepInviteUsers` (via
+ * `UserManager`) and `FinishScreen` both read them once wired in for real, and a stub
+ * that only knew about `host-check` would hand either a `SetupState` shaped nothing
+ * like what it asked for, the same problem this function already solved for
+ * `StepVerifyHost`. `finishedState`, when given, is what `POST /api/setup/finish`
+ * answers with — standing in for the server's own one-way `completedAt` write. */
+function stubState(
+  state: SetupState,
+  options: { users?: ManagedUser[]; apps?: AdminApp[]; finishedState?: SetupState } = {},
+) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: RequestInit) => {
       if (url === "/api/setup/host-check") return json(200, HEALTHY_HOST_CHECK);
+      if (url === "/api/users") return json(200, options.users ?? []);
+      if (url === "/api/apps") return json(200, options.apps ?? []);
+      if (url === "/api/setup/finish" && (init?.method ?? "GET") === "POST") {
+        return json(200, options.finishedState ?? { ...state, completedAt: 1_800_000_000 });
+      }
       return json(200, state);
     }),
   );
@@ -41,6 +59,30 @@ function mount() {
   return render(
     <QueryClientProvider client={client}>
       <SetupWizard />
+    </QueryClientProvider>,
+  );
+}
+
+/**
+ * Only the tests that reach `FinishScreen` need this: once `POST /api/setup/finish`
+ * succeeds, that screen renders `<Navigate to="/" replace />` — a real router is what
+ * turns that into an actual, assertable "landed on the launcher" rather than a prop
+ * this test would otherwise have to trust blindly. The sibling `"/"` route stands in
+ * for `App.tsx`'s own `<Launcher>` route; nothing about the guard under test cares what
+ * that page actually is; the other `SetupWizard` tests never reach this branch, so they
+ * stay on the plain `mount()` above rather than all paying for a router none of them
+ * need.
+ */
+function mountWithRouter() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={["/setup"]}>
+        <Routes>
+          <Route path="/setup" element={<SetupWizard />} />
+          <Route path="/" element={<p>You have reached the launcher</p>} />
+        </Routes>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -111,7 +153,9 @@ describe("SetupWizard", () => {
     mount();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: /Invite users/ })).toBeTruthy());
-    expect(screen.getByRole("button", { name: /Skip/ })).toBeTruthy();
+    // `UserManager` renders "Loading users…" and nothing else — no `actions` footer —
+    // until `GET /api/users` settles, so Skip isn't on screen the instant the heading is.
+    await waitFor(() => expect(screen.getByRole("button", { name: /Skip/ })).toBeTruthy());
   });
 
   it("does not offer Skip on the host step, which spec §9 does not mark skippable", async () => {
@@ -218,5 +262,106 @@ describe("SetupWizard", () => {
     // report, per its own doc comment — not an empty `{}` that would still put a
     // needless `content-type: application/json` on every ordinary step completion.
     expect(completeCalls[0]).toBeUndefined();
+  });
+
+  describe("finishing", () => {
+    const ALL_DONE: SetupState = {
+      completedSteps: ["admin", "host", "import", "users"],
+      completedAt: null,
+    };
+
+    function managedUser(over: Partial<ManagedUser> = {}): ManagedUser {
+      return {
+        id: "u1",
+        email: "ann@example.com",
+        name: "Ann Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+        disabledAt: null,
+        createdAt: 1_800_000_000,
+        ...over,
+      };
+    }
+
+    function adminApp(over: Partial<AdminApp> = {}): AdminApp {
+      return {
+        id: "a1",
+        slug: "jellyfin",
+        displayName: "Jellyfin",
+        description: null,
+        iconRef: null,
+        category: null,
+        launchUrl: null,
+        status: "up",
+        statusDetail: null,
+        hostId: "local",
+        directory: "jellyfin",
+        composeFile: "compose.yaml",
+        projectName: "jellyfin",
+        lastComposeHash: null,
+        isSystem: false,
+        showOnLauncher: true,
+        sortOrder: 0,
+        graceUntil: null,
+        adoptedAt: 1_800_000_000,
+        archivedAt: null,
+        lastDeployAt: null,
+        ...over,
+      };
+    }
+
+    it("summarises what was set up on the final screen, rather than a bare 'Done'", async () => {
+      // Spec's wording: someone who just clicked through four screens deserves to see
+      // the result. Step 1 always creates exactly one administrator before this screen
+      // is reachable, so the two users below mean "one invited", not two.
+      stubState(ALL_DONE, {
+        apps: [adminApp({ id: "a1" }), adminApp({ id: "a2", slug: "gitea" })],
+        users: [managedUser({ id: "u1" }), managedUser({ id: "u2", name: "Housemate" })],
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByRole("heading", { name: /set up/i })).toBeTruthy());
+      expect(screen.queryByText(/^Done$/)).toBeNull();
+      await waitFor(() => expect(screen.getByText(/2 apps adopted/)).toBeTruthy());
+      expect(screen.getByText(/1 user invited/)).toBeTruthy();
+      // Spec §9: step 4 (Cloudflare exposure) is skippable and completable afterwards —
+      // this is the moment to say so, since Phase 2 is where it actually lands.
+      expect(screen.getByText(/Cloudflare/)).toBeTruthy();
+    });
+
+    it("finishing posts to /api/setup/finish and lands on the launcher", async () => {
+      stubState(ALL_DONE, { apps: [], users: [managedUser()] });
+      mountWithRouter();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /Finish setup/ })).toBeTruthy(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Finish setup/ }));
+
+      await waitFor(() => {
+        const post = vi
+          .mocked(fetch)
+          .mock.calls.find(
+            (call) =>
+              call[0] === "/api/setup/finish" && (call[1] as RequestInit)?.method === "POST",
+          );
+        expect(post).toBeTruthy();
+      });
+      await waitFor(() => expect(screen.getByText("You have reached the launcher")).toBeTruthy());
+    });
+
+    it("cannot be re-entered once finished — a fresh mount with completedAt set redirects straight to the launcher", async () => {
+      // Completion is one-way: re-entering would offer "create the first admin" to a
+      // second admin. `App.tsx`'s own route guard already refuses this from outside;
+      // this proves `SetupWizard` itself refuses too, rather than relying solely on
+      // being unmounted from above.
+      stubState({ ...ALL_DONE, completedAt: 1_800_000_000 });
+      mountWithRouter();
+
+      await waitFor(() => expect(screen.getByText("You have reached the launcher")).toBeTruthy());
+      expect(screen.queryByRole("heading", { name: /set up/i })).toBeNull();
+      expect(screen.queryByRole("button", { name: /Finish setup/ })).toBeNull();
+    });
   });
 });
