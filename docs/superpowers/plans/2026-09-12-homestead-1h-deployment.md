@@ -758,7 +758,11 @@ kill -TERM $PID
 time wait $PID; echo "exit status: $?"
 ```
 
-Record the exit status and the elapsed time. Then run the same thing with the `for (const signal of …)` block commented out, and record how long it takes — it should hang until you kill it, because `scheduler`'s interval is deliberately ref'd (`scheduler.ts:74-79`). **Report both measurements.** That contrast is this task's real proof; restore the block afterwards.
+Record the exit status and the elapsed time. Then run the same thing with the `for (const signal of …)` block commented out and record what happens.
+
+**Corrected after measurement:** an earlier draft of this step predicted the handler-less process would hang, on the grounds that `scheduler`'s interval is deliberately ref'd (`scheduler.ts:74-79`). That is wrong, and the implementer who measured it was right to say so. A ref'd timer blocks Node's natural exit-when-idle; it does not block a signal. Without a handler, SIGTERM's OS-default disposition terminates the process immediately — measured at ~100 ms, exit 143.
+
+So the contrast this step actually demonstrates is not hang-versus-exit. It is **exit 143 with no shutdown sequence run, versus exit 0 with the sequence run** — the database handle closed, the streams ended, in-flight jobs cancelled and written as terminal rows rather than left for the next boot's sweep. **Report both measurements and both exit codes.** Restore the block afterwards.
 
 - [ ] **Step 8: Gates and commit**
 
