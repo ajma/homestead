@@ -48,7 +48,16 @@ export function lintYaml(text: string, schema: unknown): EditorDiagnostic[] {
     return diagnostics;
   }
 
-  walk(contents, [], schema, diagnostics, text.length);
+  // A syntax error means `yaml`'s error recovery has already reparented nodes to produce
+  // *some* tree, but that tree does not reflect what the user actually typed — a single
+  // tab-indentation mistake can knock keys out of their intended nesting and make them look
+  // unknown at the level they land on. The syntax error above is already the actionable
+  // message; walking a structure we know is a guess would only add warnings on code the user
+  // never touched. Do not restore this walk under an error condition thinking it adds
+  // coverage — it would be reading a document that doesn't exist.
+  if (doc.errors.length === 0) {
+    walk(contents, [], schema, diagnostics, text.length);
+  }
   return diagnostics;
 }
 
@@ -79,6 +88,25 @@ function walk(
   for (const pair of map.items as Pair[]) {
     const key = pair.key;
     if (!isScalar(key) || typeof key.value !== "string") continue;
+
+    // `x-` extension keys are compose's escape hatch for user-defined content (anchors for
+    // shared config are the idiomatic use — `x-defaults: &defaults`). The schema resolves the
+    // extension key itself to a permissive `{}` node, but that node describes nothing about
+    // what's inside it, so continuing to walk its children against the *root* schema would
+    // check user-defined data against the wrong schema entirely and false-warn on every
+    // nested key. Once a path enters an extension, everything beneath it is unknowable by
+    // definition — stop here and report nothing for the subtree.
+    if (key.value.startsWith("x-")) continue;
+
+    // `<<` is YAML's merge key. `parseDocument` is used with the YAML 1.2 core schema
+    // (merge keys off), which is deliberate: turning merge on would splice the anchor's pairs
+    // into this map before the walk ever sees it, changing what "one key, one warning" means
+    // everywhere else in this function for no benefit here. Treating the literal `<<` key as
+    // never-reported is the smaller, more local fix — the schema was never going to know a
+    // YAML syntax feature by name, and the aliased content it points at (`&defaults`) is
+    // itself a normal mapping that gets its own schema-shaped warnings wherever it's written.
+    if (key.value === "<<") continue;
+
     const keyPath = [...path, key.value];
 
     if (!isKnownPath(schema, keyPath)) {

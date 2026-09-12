@@ -230,4 +230,61 @@ networks:
     expect(out[0]?.severity).toBe("warning");
     expect(out[0]?.message).toContain("imag");
   });
+
+  it("does not warn inside a top-level x- extension block, however deeply nested", () => {
+    // `x-defaults: &defaults` is the idiomatic way to share config between services. The
+    // extension key itself resolves against the schema's permissive `^x-` pattern, but
+    // nothing underneath it is described by the schema at all — walking further would check
+    // user-defined content against the root schema and false-warn on every nested key.
+    const text = "x-defaults: &defaults\n  restart: always\n  logging:\n    driver: json-file\n";
+    const out = lintYaml(text, real);
+    expect(out).toEqual([]);
+  });
+
+  it("does not warn inside an x- extension block nested under a service", () => {
+    const text = "services:\n  web:\n    image: nginx\n    x-custom:\n      inner: whatever\n";
+    const out = lintYaml(text, real);
+    expect(out).toEqual([]);
+  });
+
+  it("does not warn on a merge key inside a service", () => {
+    // `parseDocument` is used with merge keys off (YAML 1.2 core schema), so `<<` arrives as
+    // a literal key. The schema was never going to know a YAML syntax feature by name.
+    const text =
+      "x-defaults: &defaults\n  restart: always\nservices:\n  web:\n    <<: *defaults\n    image: nginx\n";
+    const out = lintYaml(text, real);
+    expect(out).toEqual([]);
+  });
+
+  it("still reports a real typo alongside the anchor/extension/merge-key idiom", () => {
+    // The idiom in full: an x-defaults block shared via an anchor, merged into a service with
+    // `<<`, plus one genuine typo elsewhere. This is the test that proves the fix suppresses
+    // the false positives without suppressing real ones — if it reported zero warnings, the
+    // feature would have been turned off rather than fixed.
+    const text = [
+      "x-defaults: &defaults",
+      "  restart: always",
+      "services:",
+      "  web:",
+      "    <<: *defaults",
+      "    imag: nginx",
+      "",
+    ].join("\n");
+    const out = lintYaml(text, real);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.severity).toBe("warning");
+    expect(out[0]?.message).toContain("imag");
+  });
+
+  it("suppresses unknown-key warnings entirely when the document has a syntax error", () => {
+    // A tab-indentation mistake: `yaml`'s error recovery reparents nodes to produce some
+    // tree, but it does not reflect what the user typed, so the key walk is suppressed
+    // rather than reading a structure that doesn't exist and false-warning on top of it.
+    const text = "services:\n\tweb:\n\t\timag: nginx\n";
+    const out = lintYaml(text, real);
+    const errors = out.filter((d) => d.severity === "error");
+    const warnings = out.filter((d) => d.severity === "warning");
+    expect(errors.length).toBeGreaterThan(0);
+    expect(warnings).toEqual([]);
+  });
 });
