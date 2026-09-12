@@ -1,8 +1,10 @@
 import { buildApp } from "./app.js";
+import { AppLock } from "./apps/app-lock.js";
 import { ComposeConfigCache } from "./apps/compose-config.js";
 import { ImageUpdateChecker } from "./apps/image-updates.js";
 import { JobRunner } from "./apps/job-runner.js";
 import { createRegistryClient } from "./apps/registry.js";
+import { StepJobRunner } from "./apps/step-job-runner.js";
 import { sweepStrandedJobs } from "./apps/sweep.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost, LOCAL_HOST_ID } from "./bootstrap.js";
@@ -46,7 +48,11 @@ await startServer({
 
     const auth = createAuth(config, db);
     const composeConfig = new ComposeConfigCache(host);
-    const jobs = new JobRunner({ db, host, composeConfig });
+    // Shared so a compose job and a step sequence exclude each other on the same app —
+    // the whole reason `AppLock` was pulled out of `JobRunner` in the first place.
+    const appLock = new AppLock();
+    const jobs = new JobRunner({ db, host, composeConfig, appLock });
+    const stepJobs = new StepJobRunner({ db, appLock });
     const registry = createRegistryClient({
       fetch,
       onError: (image, reason) => {
@@ -102,6 +108,7 @@ await startServer({
       auth,
       composeConfig,
       jobs,
+      stepJobs,
       images,
       scheduler,
       events,

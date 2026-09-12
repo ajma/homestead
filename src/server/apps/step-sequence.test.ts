@@ -121,10 +121,24 @@ describe("runSteps", () => {
       { phase: "run", step: "a", stage: "start" },
       { phase: "run", step: "a", stage: "end", ok: true },
       { phase: "run", step: "failing", stage: "start" },
-      { phase: "run", step: "failing", stage: "end", ok: false },
+      { phase: "run", step: "failing", stage: "end", ok: false, error: expect.any(Error) },
       { phase: "undo", step: "a", stage: "start" },
       { phase: "undo", step: "a", stage: "end", ok: true },
     ]);
+  });
+
+  it("carries the undo's own error on a failing undo's end event, not just in undoFailures", async () => {
+    // The event stream is what a live consumer sees while rollback is still in progress —
+    // `StepOutcome.undoFailures` does not exist yet at that point, so the reason has to
+    // travel on the event itself.
+    const b = step("b", { undoFails: true });
+    const failing = step("failing", { fail: true });
+    const events: StepEvent[] = [];
+
+    await runSteps([b, failing], { log: [] }, { onProgress: (event) => events.push(event) });
+
+    const undoEnd = events.find((e) => e.phase === "undo" && e.stage === "end");
+    expect(undoEnd).toMatchObject({ ok: false, error: expect.any(Error) });
   });
 
   it("passes the original error through on the outcome", async () => {

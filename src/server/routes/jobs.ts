@@ -59,10 +59,19 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(202).send({ jobId: job.id });
     } catch (error) {
       if (error instanceof JobBusyError) {
+        // `runningJobId` is only ever present when the lock's holder is this runner's own
+        // job (see `JobBusyError`'s class doc) — the only case where a client can attach
+        // to a stream and expect to find something there. When the app is busy with
+        // something else sharing the lock (a step job, once one can run), there is no job
+        // id to give: naming the holder honestly beats handing the client an id that
+        // resolves to nothing.
         return reply.code(409).send({
           error: "job_running",
-          message: "Another job is already running for this app.",
-          runningJobId: error.runningJobId,
+          message:
+            error.runningJobId !== undefined
+              ? "Another job is already running for this app."
+              : `This app is busy: ${error.holder}.`,
+          ...(error.runningJobId !== undefined ? { runningJobId: error.runningJobId } : {}),
         });
       }
       throw error;

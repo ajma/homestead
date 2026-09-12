@@ -28,10 +28,19 @@ export type StepOutcome =
       undoFailures: Array<{ step: string; error: unknown }>;
     };
 
-/** Emitted for a step's `run`, and for its `undo` during rollback — start and end of each. */
+/**
+ * Emitted for a step's `run`, and for its `undo` during rollback — start and end of each.
+ *
+ * The failing `end` carries `error`: a live consumer (the step job runner) sees only
+ * these events as they happen, and `StepOutcome` — with its own `error` and
+ * `undoFailures` — does not exist yet while rollback is still in progress. Without it
+ * here, a real-time transcript could report *that* a step failed but not *why* until the
+ * whole sequence (including every remaining undo) has finished.
+ */
 export type StepEvent =
   | { phase: "run" | "undo"; step: string; stage: "start" }
-  | { phase: "run" | "undo"; step: string; stage: "end"; ok: boolean };
+  | { phase: "run" | "undo"; step: string; stage: "end"; ok: true }
+  | { phase: "run" | "undo"; step: string; stage: "end"; ok: false; error: unknown };
 
 export async function runSteps<C>(
   steps: Array<Step<C>>,
@@ -46,7 +55,7 @@ export async function runSteps<C>(
     try {
       await step.run(ctx);
     } catch (error) {
-      onProgress({ phase: "run", step: step.name, stage: "end", ok: false });
+      onProgress({ phase: "run", step: step.name, stage: "end", ok: false, error });
       const { undone, undoFailures } = await rollback(completed, ctx, onProgress);
       return { ok: false, failed: step.name, error, undone, undoFailures };
     }
@@ -80,7 +89,7 @@ async function rollback<C>(
       onProgress({ phase: "undo", step: step.name, stage: "end", ok: true });
       undone.push(step.name);
     } catch (error) {
-      onProgress({ phase: "undo", step: step.name, stage: "end", ok: false });
+      onProgress({ phase: "undo", step: step.name, stage: "end", ok: false, error });
       undoFailures.push({ step: step.name, error });
     }
   }

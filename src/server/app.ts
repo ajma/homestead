@@ -6,6 +6,7 @@ import { ZodError } from "zod";
 import type { ComposeConfigCache } from "./apps/compose-config.js";
 import type { ImageUpdateChecker } from "./apps/image-updates.js";
 import type { JobRunner } from "./apps/job-runner.js";
+import type { StepJobRunner } from "./apps/step-job-runner.js";
 import type { Auth } from "./auth/auth.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
@@ -73,6 +74,11 @@ export type AppDeps = {
   auth: Auth;
   composeConfig: ComposeConfigCache;
   jobs: JobRunner;
+  /** Registered here, unused by any route until 2C/2D wires one up — the same shape
+   * `jobs` has, so those routes can reach it the same way. Shares its `AppLock` with
+   * `jobs` at construction (see `index.ts`/`test-helpers.ts`), which is what makes a step
+   * sequence and a compose job exclude each other on the same app. */
+  stepJobs: StepJobRunner;
   images: ImageUpdateChecker;
   scheduler: Scheduler;
   events: EventBus;

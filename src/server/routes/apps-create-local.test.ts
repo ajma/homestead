@@ -3,9 +3,11 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AppDeps, buildApp } from "@server/app";
+import { AppLock } from "@server/apps/app-lock";
 import { ComposeConfigCache } from "@server/apps/compose-config";
 import { ImageUpdateChecker } from "@server/apps/image-updates";
 import { JobRunner } from "@server/apps/job-runner";
+import { StepJobRunner } from "@server/apps/step-job-runner";
 import { createAuth } from "@server/auth/auth";
 import { ensureLocalHost, LOCAL_HOST_ID } from "@server/bootstrap";
 import { loadConfig } from "@server/config";
@@ -72,7 +74,9 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
 
   const auth = createAuth(config, db);
   const composeConfig = new ComposeConfigCache(host);
-  const jobs = new JobRunner({ db, host, composeConfig });
+  const appLock = new AppLock();
+  const jobs = new JobRunner({ db, host, composeConfig, appLock });
+  const stepJobs = new StepJobRunner({ db, appLock });
   const images = new ImageUpdateChecker({
     db,
     host,
@@ -127,6 +131,7 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
     auth,
     composeConfig,
     jobs,
+    stepJobs,
     images,
     scheduler,
     events,

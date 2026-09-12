@@ -24,9 +24,22 @@ const OUTPUT_CAP = 256 * 1024;
 /** Seconds after a job during which probe failures render as `starting` (spec §4). */
 const GRACE_SECONDS = 120;
 
+/**
+ * Thrown by `start` when `AppLock` refuses the slot. `holder` is always the lock's own
+ * description of whoever is holding it (e.g. `"pull job"`) — safe to show a user
+ * regardless of who took the lock. `runningJobId` is populated only when the holder is
+ * THIS runner's own in-flight job, because only then does a `jobs` row exist for the
+ * route to resolve; a step job (or any future runner sharing the same `AppLock`) has no
+ * job id this registry can vouch for, so it is omitted rather than guessed. A route
+ * handing a client an id that resolves nothing is worse than a route with no id at all —
+ * see `routes/jobs.ts`.
+ */
 export class JobBusyError extends Error {
-  constructor(readonly runningJobId: string) {
-    super("Another job is already running for this app");
+  constructor(
+    readonly holder: string,
+    readonly runningJobId?: string,
+  ) {
+    super(`Another job is already running for this app: ${holder}`);
     this.name = "JobBusyError";
   }
 }
@@ -127,12 +140,13 @@ export class JobRunner {
     // `runCompose` returns a handle, not a promise — so the slot can be taken before any
     // await exists to yield at.
     if (!this.appLock.tryAcquire(app.id, `${kind} job`)) {
-      // The registry names the job if this runner is the one holding the lock, which is
-      // the only case reachable today. A holder from outside this runner (the step
-      // runner, once one exists) has no job id to report — the app id is the fallback,
-      // and changing what the route does with it is not this task's business.
+      // `inFlight` is only ever set by THIS runner's own `start`, so its presence means
+      // the lock's current holder is this runner's own job — the id is real and the
+      // route can resolve it. Its absence means something else holds the lock (a step
+      // job sharing this `AppLock`); `heldBy` still names it, but there is no job id to
+      // give, so `runningJobId` is left undefined rather than falling back to `app.id`.
       const inFlight = this.running.get(app.id);
-      throw new JobBusyError(inFlight?.id ?? this.appLock.heldBy(app.id) ?? app.id);
+      throw new JobBusyError(this.appLock.heldBy(app.id) ?? "another job", inFlight?.id);
     }
 
     const id = ulid();
