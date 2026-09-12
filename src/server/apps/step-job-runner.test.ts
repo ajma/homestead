@@ -244,4 +244,51 @@ describe("StepJobRunner", () => {
     gated.release();
     await stepPromise;
   });
+
+  it("frees the app lock when the job row cannot be written", async () => {
+    // `JobRunner` has the equivalent test (`job-runner.test.ts`: "frees the slot when the
+    // job row cannot be written"); `StepJobRunner` was modelled on it but did not inherit
+    // it (Phase 2B whole-branch review, Minor 8). Deleting the `release` in `start`'s
+    // insert-failure `catch` left the whole suite green — nothing wedged the app behind a
+    // job with no row until this test existed to notice.
+    const original = db.insert.bind(db);
+    let first = true;
+    // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+    (db as any).insert = (table: unknown) => {
+      if (first) {
+        first = false;
+        throw new Error("disk I/O error");
+      }
+      return original(table as never);
+    };
+    await expect(
+      runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId),
+    ).rejects.toThrow("disk I/O error");
+    // biome-ignore lint/suspicious/noExplicitAny: restore
+    (db as any).insert = original;
+
+    expect(appLock.heldBy(row.id)).toBeUndefined();
+    // The app is usable again immediately.
+    const { id } = await runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId);
+    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    expect(saved?.status).toBe("succeeded");
+  });
+
+  it("blocks a second start issued in the SAME TICK, not just a serialized one", async () => {
+    // The synchronous-window counterpart to the "same tick" test `JobRunner` has
+    // (`job-runner.test.ts`): probed directly and found correct but untested (Phase 2B
+    // whole-branch review, Minor 8) — this pins it the same way.
+    const gated = gatedStep("wait");
+    const settled = Promise.allSettled([
+      runner.start(row, "cloudflare_expose", [gated.step], { log: [] }, userId),
+      runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId),
+    ]);
+    gated.release();
+    const results = await settled;
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected");
+    expect(rejected?.status === "rejected" && rejected.reason).toBeInstanceOf(AppBusyError);
+  });
 });
