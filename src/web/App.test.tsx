@@ -187,6 +187,35 @@ describe("the admin route guard", () => {
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
+  it("sends a viewer away from the logs deep url", async () => {
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/logs");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Logs" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
+  it("sends a viewer away from the probes deep url", async () => {
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/probes");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Probes" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
+  it("sends a viewer away from settings", async () => {
+    // `/settings` has no per-app slug to guard, only the role check `App.tsx` applies
+    // to the whole `/settings/*` subtree — the same claim as every route above, made
+    // against the one admin surface that isn't nested under `/apps`.
+    stubMe({ role: "viewer" });
+    renderAt("/settings");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
+  });
+
   it("lets an admin reach both", async () => {
     stubMe({ role: "admin" });
     renderAt("/apps");
@@ -199,6 +228,34 @@ describe("the admin route guard", () => {
     renderAt("/apps/jellyfin/containers");
 
     await waitFor(() => expect(screen.getByRole("link", { name: "Containers" })).toBeTruthy());
+  });
+
+  it("lets an admin reach settings", async () => {
+    stubMe({ role: "admin" });
+    renderAt("/settings");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy());
+  });
+});
+
+describe("the settings nav link", () => {
+  it("shows an admin the settings link", async () => {
+    stubMe({ role: "admin" });
+    renderAt("/");
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Settings" })).toBeTruthy());
+  });
+
+  it("does not show a viewer the settings link", async () => {
+    // The launcher premise ("a housemate sees status tiles and nothing else") starts
+    // with what the nav bar offers — but this proves only the link's absence, not that
+    // the route itself is closed. "sends a viewer away from settings" above, by
+    // navigation, is the claim that actually matters.
+    stubMe({ role: "viewer" });
+    renderAt("/");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
   });
 });
 
@@ -338,6 +395,33 @@ describe("the setup route guard", () => {
     // Not merely "landed elsewhere" — a viewer must never even ask. GET /api/setup/state
     // is admin-only once an admin exists, so calling it here would risk a viewer seeing
     // a spurious error screen instead of simply not needing the answer.
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
+  });
+
+  it("sends a viewer straight to the launcher from a completed /setup, the same way as mid-setup", async () => {
+    // The test above proves a viewer skips the wizard while setup is incomplete — this
+    // proves the other half of the two-way guard doesn't accidentally reintroduce a
+    // path in. `Routed` forces `setupComplete` to `true` for a viewer unconditionally
+    // (`needsSetupCheck = !isViewer`), so `/setup` for a viewer is always resolved by
+    // the completed branch's own hardcoded `<Navigate to="/" />` — the same rule that
+    // sits beside the `isAdmin` checks for `/apps` and `/settings` — never by the
+    // incomplete branch's catch-all. Same landing, same never-fetches assertion as the
+    // mid-setup test, against the opposite `completedAt`, to prove that holds either way.
+    stubSetupGuard(
+      {
+        id: "u2",
+        email: "viewer@example.com",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
     const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
   });
