@@ -1,4 +1,3 @@
-nodeLinker: hoisted
 allowBuilds:
   cpu-features: false
   esbuild: true
