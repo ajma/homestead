@@ -1,6 +1,7 @@
 import { SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
 import { useCompleteStep, useSetupState } from "@web/api/setup";
 import { useState } from "react";
+import { StepCreateAdmin } from "./StepCreateAdmin";
 
 const STEP_LABELS: Record<SetupStep, string> = {
   admin: "Create admin",
@@ -149,6 +150,8 @@ export function SetupWizard() {
 
       {displayed === "finish" ? (
         <FinishPlaceholder />
+      ) : displayed === "admin" ? (
+        <StepCreateAdmin state={state} onComplete={() => markComplete(displayed)} />
       ) : (
         <StepPlaceholder
           step={displayed}
