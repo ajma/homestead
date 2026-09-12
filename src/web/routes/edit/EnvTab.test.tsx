@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { envKey } from "@web/api/admin";
 import type { EditAppContext } from "@web/routes/EditApp";
-import { EnvTab } from "@web/routes/edit/EnvTab";
+import { EnvTab, nextRawState } from "@web/routes/edit/EnvTab";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -130,6 +130,29 @@ function puts(): RequestInit[] {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("nextRawState", () => {
+  // Binds the guard the DOM cannot: `rawText` is only ever rendered while `rawLoaded`
+  // is true, and a pure table save never sets `rawLoaded`, so a component-level test
+  // that mutates this guard away sees no visible difference at all — the entire
+  // pre-existing suite stayed green when the review tried exactly that. Testing the
+  // extracted decision directly is what makes "no" an assertable answer.
+  it("does not resume tracking the raw file after a save that pure table edits produced", () => {
+    // This is the dangerous case: a table-only save fetched the whole file (every
+    // secret in it) to run `upsertEnv` against, and — if this returned non-null here —
+    // that content would be parked in `rawText` for the rest of the tab's life despite
+    // raw mode never having been opened.
+    expect(nextRawState(false, { content: "DB_PASSWORD=hunter2\n", hash: "h9" })).toBeNull();
+  });
+
+  it("keeps tracking the raw file when raw mode is what produced the save", () => {
+    expect(nextRawState(true, { content: "DB_PASSWORD=hunter2\n", hash: "h9" })).toEqual({
+      rawText: "DB_PASSWORD=hunter2\n",
+      rawBaseline: "DB_PASSWORD=hunter2\n",
+      rawHash: "h9",
+    });
+  });
 });
 
 describe("EnvTab", () => {
@@ -743,6 +766,154 @@ describe("EnvTab", () => {
     await waitFor(() => expect(puts()).toHaveLength(2));
     const body = JSON.parse(puts()[1]?.body as string);
     expect(body).toEqual({ content: "OTHER=1\n", expectedHash: "h2" });
+  });
+
+  it("adds a new variable in the table without touching raw mode or any secret", async () => {
+    // Minor from the final review: before this, adding `TZ=Europe/London` meant
+    // switching to Raw — fetching and displaying every secret in the file for what
+    // should be the most routine `.env` edit there is.
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "TZ" } });
+    fireEvent.change(screen.getByLabelText("Value"), {
+      target: { value: "Europe/London" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+
+    expect(screen.getByText("TZ")).toBeTruthy();
+    expect(screen.getByDisplayValue("Europe/London")).toBeTruthy();
+    // No secret was ever fetched to do this.
+    expect(revealCalls()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts()).toHaveLength(1));
+    const body = JSON.parse(puts()[0]?.body as string);
+    // The base this save applies onto is the whole-file fetch `mockApi`'s default
+    // `reveal` answers with — `FILE_CONTENT` — not the (differently-shaped) masked
+    // `entries` this test passed just to get the table to render.
+    expect(body).toEqual({
+      content: "# Database\nDB_PASSWORD=hunter2\nPUID=1000 # keep this note\nTZ=Europe/London\n",
+      expectedHash: FILE_HASH,
+    });
+  });
+
+  it("refuses to add a variable with an invalid or duplicate name", async () => {
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "1BAD" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    expect(screen.getByRole("alert").textContent).toMatch(/must start with a letter/);
+
+    fireEvent.change(screen.getByLabelText("New variable name"), {
+      target: { value: "DB_PASSWORD" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    expect(screen.getByRole("alert").textContent).toMatch(/already exists/);
+    // Refused, not silently accepted: still exactly one row for it.
+    expect(screen.getAllByText("DB_PASSWORD")).toHaveLength(1);
+  });
+
+  it("removes a pending addition without ever calling save", async () => {
+    mockApi({ env: { status: 200, body: { entries: [], exists: false } } });
+    mount();
+    await waitFor(() => expect(screen.getByText(/no \.env file yet/i)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "TZ" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    expect(screen.getByText("TZ")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByText("TZ")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("deletes an existing key without revealing it first", async () => {
+    mockApi({
+      env: {
+        status: 200,
+        body: {
+          entries: [
+            { key: "DB_PASSWORD", masked: MASK },
+            { key: "PUID", masked: MASK },
+          ],
+          exists: true,
+        },
+      },
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    const dbRow = screen.getByText("DB_PASSWORD").closest("tr");
+    if (!dbRow) throw new Error("row not found");
+    fireEvent.click(within(dbRow).getByRole("button", { name: "Delete" }));
+
+    expect(within(dbRow).getByText("Will be removed on save.")).toBeTruthy();
+    // Never revealed — deletion needs only the key's name.
+    expect(revealCalls()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts()).toHaveLength(1));
+    const body = JSON.parse(puts()[0]?.body as string);
+    // `removeEnv` drops only the `DB_PASSWORD` line — the comment above it and PUID's
+    // own inline note both survive untouched, the same guarantee `upsertEnv` gives a
+    // value edit.
+    expect(body).toEqual({
+      content: "# Database\nPUID=1000 # keep this note\n",
+      expectedHash: FILE_HASH,
+    });
+  });
+
+  it("undoes a pending delete", async () => {
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByText("Will be removed on save.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo delete" }));
+    expect(screen.queryByText("Will be removed on save.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("routes a 409 on a delete straight to the whole-file conflict, not the per-key merge", async () => {
+    // Structural edits (add/delete) get the same explicit conflict raw mode uses,
+    // rather than the granular "merge everything but the keys that actually conflict"
+    // treatment a plain rename gets — see the module doc comment.
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => {
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true } }
+          : {
+              status: 200,
+              body: { content: "DB_PASSWORD=hunter2\nEXTRA=fromssh\n", hash: "h2", exists: true },
+            };
+      },
+      put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await screen.findByText(/Someone changed this file since you loaded it/);
+    // Not the per-key dialog.
+    expect(screen.queryByText(/Someone else changed/)).toBeNull();
+    expect(puts()).toHaveLength(1);
   });
 
   it("distinguishes an unreadable file from a stale hash when the retry's own fetch fails", async () => {

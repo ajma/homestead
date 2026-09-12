@@ -1,4 +1,4 @@
-import { maskEnv, parseEnv, serialiseEnv, upsertEnv } from "@shared/env-file";
+import { maskEnv, parseEnv, removeEnv, serialiseEnv, upsertEnv } from "@shared/env-file";
 import { describe, expect, it } from "vitest";
 
 const sample = [
@@ -186,5 +186,29 @@ describe("upsertEnv", () => {
     };
     expect(value('A="test\\""')).toBe('test"');
     expect(value('A="test\\"')).toBe("test\\");
+  });
+});
+
+describe("removeEnv", () => {
+  it("removes the line holding the key, preserving surrounding lines", () => {
+    const text = serialiseEnv(removeEnv(parseEnv(sample), "PUID"));
+    expect(text).not.toContain("PUID");
+    expect(text).toContain("# Database credentials");
+  });
+
+  it("removes every occurrence of a duplicated key, not just the last", () => {
+    // The last occurrence is the one compose reads, but the earlier one is dead weight
+    // that would look like the key still exists the moment anything re-parses the file.
+    expect(serialiseEnv(removeEnv(parseEnv("A=1\nA=2\nB=3"), "A"))).toBe("B=3");
+  });
+
+  it("is a no-op for a key that is not present", () => {
+    const entries = parseEnv(sample);
+    expect(removeEnv(entries, "NOT_THERE")).toEqual(entries);
+  });
+
+  it("does not touch comments or blank lines", () => {
+    const text = "# note\n\nA=1\nB=2\n";
+    expect(serialiseEnv(removeEnv(parseEnv(text), "A"))).toBe("# note\n\nB=2\n");
   });
 });

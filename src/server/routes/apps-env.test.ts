@@ -79,6 +79,31 @@ describe(".env API", () => {
     await app.close();
   });
 
+  it("marks a whole-file reveal with a scope, so it reads differently from a per-key one", async () => {
+    // The whole-file branch and the per-key branch write the same action name — without
+    // a `detail` telling them apart, an admin who only ever revealed one row and a table
+    // save (which fetches the whole file to reapply changed keys — see `EnvTab.tsx`)
+    // produce an audit trail indistinguishable from someone deliberately dumping every
+    // secret in Raw mode.
+    const { app, cookie, id } = await withEnv();
+    await app.inject({ method: "POST", url: `/api/apps/${id}/env/reveal`, headers: { cookie } });
+    await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { key: "DB_PASSWORD" },
+    });
+
+    const entries = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "app.env_revealed"));
+    expect(entries).toHaveLength(2);
+    expect(entries[0]?.detail).toEqual({ scope: "all" });
+    expect(entries[1]?.detail).toEqual({ key: "DB_PASSWORD" });
+    await app.close();
+  });
+
   it("refuses to touch a .env it cannot read, rather than replacing it", async () => {
     // The worst outcome available here. `.env` files are routinely chmod 600, so a
     // Homestead running as another uid gets EACCES — and if that read short-circuits to

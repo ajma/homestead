@@ -1,5 +1,5 @@
 import type { EnvEntry } from "@shared/env-file";
-import { maskEnv, parseEnv, serialiseEnv, upsertEnv } from "@shared/env-file";
+import { maskEnv, parseEnv, removeEnv, serialiseEnv, upsertEnv } from "@shared/env-file";
 import { useQueryClient } from "@tanstack/react-query";
 import { envKey, useEnv } from "@web/api/admin";
 import { ApiError, apiFetch } from "@web/api/client";
@@ -91,6 +91,36 @@ function loadErrorMessage(error: unknown): string {
   return messageFrom(error, "Could not load this app's environment variables.");
 }
 
+/**
+ * Whether a successful save should also update this tab's own copy of the raw file
+ * text, and what it should become if so.
+ *
+ * Only keep tracking the real text if this tab was already doing so (i.e. raw mode is
+ * what produced this save, or a previous raw-mode load is still what's dirty). A save
+ * that started from pure table edits never had the whole file resident before this —
+ * succeeding must not be the thing that first puts it there.
+ *
+ * Pulled out as its own pure function, and exported, because the guard it embodies
+ * (`rawLoaded` gating whether the newly-saved content — every secret in the file, not
+ * just the one the user edited — gets parked in component state) has no way to bind a
+ * test to it once it's inline in a `useState` setter: the final review measured that
+ * replacing the equivalent inline `if (rawLoaded)` with `if (true)` left the entire
+ * 1095-test suite green, because nothing downstream ever reads `rawText` while
+ * `rawLoaded` is false (see `EnvTab`'s render below) — the leak is real but invisible
+ * to the DOM. Testing this function directly, in isolation from that gate, is what
+ * makes the guard's absence something a test can actually catch. See `EnvTab.test.tsx`.
+ */
+export function nextRawState(
+  rawLoaded: boolean,
+  saved: { content: string; hash: string },
+): { rawText: string; rawBaseline: string; rawHash: string } | null {
+  if (!rawLoaded) return null;
+  return { rawText: saved.content, rawBaseline: saved.content, rawHash: saved.hash };
+}
+
+/** A `.env` key: a letter or underscore, then any run of letters, digits or underscores. */
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /** The last-occurrence value of `key`, or `undefined` if it is not present at all. */
 function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
   return entries.findLast(
@@ -114,14 +144,28 @@ function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
  * Secrets are handled the way Task 2's server half was built for: a row's value is never
  * fetched until its own "Reveal" is clicked, and each reveal names its key in the
  * request — never a whole-file fetch filtered client-side, which would put every secret
- * in the browser to display one. Raw mode is the one deliberate exception: bulk paste
- * needs the real text, so switching to it fetches the whole file once, through the same
+ * in the browser to display one. Raw mode is one deliberate exception: bulk paste needs
+ * the real text, so switching to it fetches the whole file once, through the same
  * `app:secrets`-gated endpoint — and, per the standard this phase holds to (the browser
  * must never hold a secret it is not displaying), that fetch is a plain, uncached
  * `apiFetch`: a second raw-mode open re-asks the server rather than serving a query-cache
  * hit, and leaving raw mode without an unsaved edit drops the text this tab was holding
  * rather than keeping it around for the rest of the session. See `loadRaw` and the mode
  * toggle's own comment.
+ *
+ * A table-mode save is the OTHER exception, and — unlike raw mode — not a deliberate one:
+ * `handleSave`'s non-raw branch still calls `fetchWhole` to get a full copy to run
+ * `upsertEnv` against, so every secret in the file transits the browser on every save,
+ * not just the row(s) actually being changed. The real fix is doing that merge
+ * server-side (`upsertEnv` is importable from `src/shared` in both zones); this phase's
+ * final fix wave chose not to make that contract change to the file holding credentials
+ * under time pressure, and did the smaller, safe half instead: the audit log now records
+ * `detail: { scope: "all" }` on this path (see `apps.ts`) so it reads differently from a
+ * deliberate Raw-mode dump, even though the underlying transfer is the same. The guard
+ * in `onSaveSuccess` below (`if (rawLoaded)`) keeps that fetched copy from also becoming
+ * *durable* in this component's state when only table mode triggered it — see Important
+ * 2 in the phase's final review — but the transient exposure on the wire and in memory
+ * during the save itself is real and still there.
  *
  * `PUT .../env` carries the same hash guard `ComposeTab` uses and can answer the same
  * 409 — and `.env` is the file that holds secrets, so an SSH edit clobbered here is worse
@@ -138,6 +182,17 @@ function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
  * `ComposeTab`'s explicit, two-choice conflict UI instead: load the disk version, or keep
  * mine and overwrite it deliberately. See `handleUseDiskVersion` and
  * `handleKeepMineOverwrite`.
+ *
+ * Adding and deleting a key both live in the table too (`handleAddVariable`,
+ * `handleDeleteKey`) — without them, adding `TZ=Europe/London` had no route but Raw,
+ * which fetches and displays every secret in the file for what should be the most
+ * routine `.env` edit there is. Deleting needs no reveal first: `removeEnv` only needs
+ * the key's name. Neither gets the same fine-grained "merge everything but the keys that
+ * actually conflict" treatment a plain value edit gets on a 409, though — `addedKeys`/
+ * `deletedKeys` route a save carrying either straight to the same explicit whole-file
+ * conflict UI raw mode uses (see `hasStructuralEdits` in `handleSave`). A rename can
+ * always merge safely against whatever the concurrent edit left alone; whether an add or
+ * delete can is a judgement call about intent this tab does not try to make silently.
  */
 export function EnvTab() {
   const { app } = useOutletContext<EditAppContext>();
@@ -164,6 +219,17 @@ export function EnvTab() {
   // return the same value.
   const [revealed, setRevealed] = useState<Record<number, string>>({});
   const [revealErrors, setRevealErrors] = useState<Record<number, string>>({});
+
+  // Keys added or marked for deletion in this table since the last save. Both route a
+  // 409 straight to the whole-file conflict UI rather than the granular per-key merge a
+  // plain rename gets — see the module doc comment's note on `hasStructuralEdits`. An
+  // added key also gets a real entry in `edits` (its typed value); `addedKeys` only
+  // exists to say "and that key is new," which `edits` alone cannot.
+  const [addedKeys, setAddedKeys] = useState<ReadonlySet<string>>(new Set());
+  const [deletedKeys, setDeletedKeys] = useState<ReadonlySet<string>>(new Set());
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -230,7 +296,9 @@ export function EnvTab() {
   }, [mode, rawLoaded, rawLoading, loadRaw]);
 
   const rawDirty = rawBaseline !== null && rawText !== rawBaseline;
-  const dirty = Object.keys(edits).length > 0 || rawDirty;
+  // A deletion needs no value edit to be worth saving — `removeEnv` only needs the key's
+  // name, so `deletedKeys` can be non-empty while `edits` stays untouched.
+  const dirty = Object.keys(edits).length > 0 || rawDirty || deletedKeys.size > 0;
 
   /**
    * The Table/Raw toggle. Leaving raw mode with nothing unsaved is the moment this tab
@@ -298,6 +366,12 @@ export function EnvTab() {
     for (const [key, value] of Object.entries(edits)) {
       entries = upsertEnv(entries, key, value);
     }
+    // Deletions apply after value edits: the table never lets a key be both edited and
+    // marked for deletion at once (see `handleDeleteKey`), but applying them last keeps
+    // that guarantee true even if it ever stopped being enforced at the UI layer.
+    for (const key of deletedKeys) {
+      entries = removeEnv(entries, key);
+    }
     return serialiseEnv(entries);
   }
 
@@ -316,14 +390,13 @@ export function EnvTab() {
     setConflict(null);
     setKeyConflict(null);
     setKeyResolutions({});
-    // Only keep tracking the real text if this tab was already doing so (i.e. raw mode
-    // is what produced this save, or a previous raw-mode load is still what's dirty). A
-    // save that started from pure table edits never had the whole file resident before
-    // this — succeeding must not be the thing that first puts it there.
-    if (rawLoaded) {
-      setRawText(content);
-      setRawBaseline(content);
-      setRawHash(hash);
+    setAddedKeys(new Set());
+    setDeletedKeys(new Set());
+    const nextRaw = nextRawState(rawLoaded, { content, hash });
+    if (nextRaw) {
+      setRawText(nextRaw.rawText);
+      setRawBaseline(nextRaw.rawBaseline);
+      setRawHash(nextRaw.rawHash);
     }
     void queryClient.invalidateQueries({ queryKey: envKey(appId) });
   }
@@ -374,7 +447,13 @@ export function EnvTab() {
           return;
         }
 
-        if (rawDirty) {
+        // Structural changes — an added or deleted key — get the same explicit,
+        // whole-file conflict raw edits get, same as `rawDirty` below: whether adding a
+        // key that showed up concurrently, or deleting one a concurrent edit also
+        // touched, is safe to resolve silently is a judgement call about intent, not a
+        // value comparison `upsertEnv` can make the way it can for a plain rename.
+        const hasStructuralEdits = addedKeys.size > 0 || deletedKeys.size > 0;
+        if (rawDirty || hasStructuralEdits) {
           // `rawText` is the user's own free-form edit — there is no way to merge it
           // onto whatever the disk holds now without a diff, so (per the brief) this
           // needs the same explicit, two-choice conflict `ComposeTab` uses for its own
@@ -558,6 +637,78 @@ export function EnvTab() {
   entries.forEach((entry, index) => {
     lastIndexForKey.set(entry.key, index);
   });
+  const existingKeys = new Set(entries.map((entry) => entry.key));
+  // Added keys not yet reflected in `entries` — true for every one of them until a save
+  // actually lands, since `entries` only ever comes from the last `GET`/raw fetch.
+  const pendingNewKeys = [...addedKeys].filter((key) => !existingKeys.has(key));
+
+  function handleAddVariable() {
+    const key = newKey.trim();
+    setAddError(null);
+    if (!key) {
+      setAddError("Enter a name for the new variable.");
+      return;
+    }
+    if (!ENV_NAME_PATTERN.test(key)) {
+      setAddError(
+        "A variable name must start with a letter or underscore, and contain only letters, digits and underscores.",
+      );
+      return;
+    }
+    if (!deletedKeys.has(key) && (existingKeys.has(key) || key in edits)) {
+      setAddError(`${key} already exists in this file.`);
+      return;
+    }
+    // Re-adding a key that was marked for deletion just cancels the deletion — no
+    // reason to create a second, competing edit for the same name.
+    setDeletedKeys((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+    setEdits((prev) => ({ ...prev, [key]: newValue }));
+    setAddedKeys((prev) => new Set(prev).add(key));
+    setNewKey("");
+    setNewValue("");
+  }
+
+  function handleDeleteKey(key: string) {
+    if (addedKeys.has(key)) {
+      // Never saved anywhere yet — deleting a still-pending addition just un-adds it,
+      // rather than asking `removeEnv` to remove a key that was never written.
+      setAddedKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      setEdits((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      return;
+    }
+    setDeletedKeys((prev) => new Set(prev).add(key));
+    // A pending edit to a key that's about to be deleted would otherwise still apply
+    // (via `upsertEnv`) before the deletion runs — clearing it keeps "delete" the one
+    // thing that happens to this key on save.
+    setEdits((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function handleUndoDelete(key: string) {
+    setDeletedKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -731,76 +882,177 @@ export function EnvTab() {
         </p>
       )}
 
-      {mode === "table" &&
-        (entries.length === 0 ? (
-          <p className="p-4 text-sm text-slate-500 dark:text-slate-400">
-            {exists
-              ? "This .env file has no variables set."
-              : "This app has no .env file yet — switch to Raw to create one."}
-          </p>
-        ) : (
-          <table className="w-full border-collapse text-sm">
-            <tbody>
-              {entries.map((entry, index) => {
-                const shadowed = lastIndexForKey.get(entry.key) !== index;
-                const value = edits[entry.key] ?? revealed[index];
-                const revealPending = revealingIndices.has(index);
-                return (
+      {mode === "table" && (
+        <>
+          {entries.length === 0 && pendingNewKeys.length === 0 ? (
+            <p className="p-4 text-sm text-slate-500 dark:text-slate-400">
+              {exists
+                ? "This .env file has no variables set."
+                : "This app has no .env file yet — switch to Raw to create one."}
+            </p>
+          ) : (
+            <table className="w-full border-collapse text-sm">
+              <tbody>
+                {entries.map((entry, index) => {
+                  const shadowed = lastIndexForKey.get(entry.key) !== index;
+                  const isDeleted = deletedKeys.has(entry.key);
+                  const value = edits[entry.key] ?? revealed[index];
+                  const revealPending = revealingIndices.has(index);
+                  return (
+                    <tr
+                      // biome-ignore lint/suspicious/noArrayIndexKey: rows are keyed by position on purpose — a duplicated key is two distinct rows here.
+                      key={index}
+                      className="border-t border-slate-200 dark:border-slate-800"
+                    >
+                      <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
+                        {entry.key}
+                        {shadowed && !isDeleted && (
+                          <p className="mt-1 max-w-[16rem] text-xs font-normal italic text-amber-600 dark:text-amber-400">
+                            Set again below — that later line is the one compose reads.
+                          </p>
+                        )}
+                      </td>
+                      <td className="py-2 align-top">
+                        {isDeleted ? (
+                          <p className="text-xs italic text-rose-600 dark:text-rose-400">
+                            Will be removed on save.
+                          </p>
+                        ) : value !== undefined ? (
+                          <input
+                            type="text"
+                            value={value}
+                            onChange={(event) =>
+                              setEdits((prev) => ({ ...prev, [entry.key]: event.target.value }))
+                            }
+                            aria-label={`${entry.key} value`}
+                            className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
+                          />
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              readOnly
+                              value={entry.masked}
+                              aria-label={`${entry.key} value`}
+                              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleReveal(index, entry.key)}
+                              disabled={revealPending}
+                              className="shrink-0 rounded-lg border border-slate-200 px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-800"
+                            >
+                              {revealPending ? "Revealing…" : "Reveal"}
+                            </button>
+                          </div>
+                        )}
+                        {!isDeleted && revealErrors[index] && (
+                          <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+                            {revealErrors[index]}
+                          </p>
+                        )}
+                      </td>
+                      <td className="py-2 pl-3 align-top">
+                        {isDeleted ? (
+                          <button
+                            type="button"
+                            onClick={() => handleUndoDelete(entry.key)}
+                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs dark:border-slate-800"
+                          >
+                            Undo delete
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteKey(entry.key)}
+                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-rose-700 dark:border-slate-800 dark:text-rose-300"
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {pendingNewKeys.map((key) => (
                   <tr
-                    // biome-ignore lint/suspicious/noArrayIndexKey: rows are keyed by position on purpose — a duplicated key is two distinct rows here.
-                    key={index}
+                    key={`new-${key}`}
                     className="border-t border-slate-200 dark:border-slate-800"
                   >
                     <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
-                      {entry.key}
-                      {shadowed && (
-                        <p className="mt-1 max-w-[16rem] text-xs font-normal italic text-amber-600 dark:text-amber-400">
-                          Set again below — that later line is the one compose reads.
-                        </p>
-                      )}
+                      {key}
+                      <p className="mt-1 text-xs font-normal italic text-emerald-600 dark:text-emerald-400">
+                        New — will be added on save.
+                      </p>
                     </td>
                     <td className="py-2 align-top">
-                      {value !== undefined ? (
-                        <input
-                          type="text"
-                          value={value}
-                          onChange={(event) =>
-                            setEdits((prev) => ({ ...prev, [entry.key]: event.target.value }))
-                          }
-                          aria-label={`${entry.key} value`}
-                          className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
-                        />
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            readOnly
-                            value={entry.masked}
-                            aria-label={`${entry.key} value`}
-                            className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleReveal(index, entry.key)}
-                            disabled={revealPending}
-                            className="shrink-0 rounded-lg border border-slate-200 px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-800"
-                          >
-                            {revealPending ? "Revealing…" : "Reveal"}
-                          </button>
-                        </div>
-                      )}
-                      {revealErrors[index] && (
-                        <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">
-                          {revealErrors[index]}
-                        </p>
-                      )}
+                      <input
+                        type="text"
+                        value={edits[key] ?? ""}
+                        onChange={(event) =>
+                          setEdits((prev) => ({ ...prev, [key]: event.target.value }))
+                        }
+                        aria-label={`${key} value`}
+                        className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
+                      />
+                    </td>
+                    <td className="py-2 pl-3 align-top">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteKey(key)}
+                        className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-rose-700 dark:border-slate-800 dark:text-rose-300"
+                      >
+                        Remove
+                      </button>
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        ))}
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-slate-200 p-3 dark:border-slate-800">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="env-new-key" className="text-xs text-slate-500 dark:text-slate-400">
+                New variable name
+              </label>
+              <input
+                id="env-new-key"
+                type="text"
+                value={newKey}
+                onChange={(event) => setNewKey(event.target.value)}
+                placeholder="TZ"
+                className="rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="env-new-value" className="text-xs text-slate-500 dark:text-slate-400">
+                Value
+              </label>
+              <input
+                id="env-new-value"
+                type="text"
+                value={newValue}
+                onChange={(event) => setNewValue(event.target.value)}
+                placeholder="Europe/London"
+                className="rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleAddVariable}
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs dark:border-slate-800"
+            >
+              Add variable
+            </button>
+            {addError && (
+              <p role="alert" className="w-full text-xs text-rose-600 dark:text-rose-400">
+                {addError}
+              </p>
+            )}
+          </div>
+        </>
+      )}
 
       {mode === "raw" &&
         (rawLoaded ? (

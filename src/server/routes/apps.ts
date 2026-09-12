@@ -707,11 +707,19 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // A separate endpoint rather than a query flag, so revealing is always deliberate
     // and always leaves a trace. Audited only once the read succeeded — an audit line
     // saying a secret was revealed when it was not is worse than none.
+    //
+    // `detail: { scope: "all" }` is what makes this line distinguishable from the
+    // per-key branch above, which records the one key it revealed. Without it, a table
+    // save (which currently fetches the whole file to reapply changed keys through
+    // `upsertEnv` — see `EnvTab.tsx`'s module doc comment) writes an audit line
+    // byte-identical to someone deliberately dumping every secret via Raw mode. The
+    // audit log's only job is telling those two apart.
     await audit(db, ctx, {
       action: "app.env_revealed",
       targetType: "app",
       targetId: id,
       ip: request.ip,
+      detail: { scope: "all" },
     });
     return { content: file.content, hash: file.hash, exists: file.state === "present" };
   });

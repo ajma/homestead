@@ -146,6 +146,18 @@ export function maskEnv(entries: EnvEntry[]): Array<{ key: string; masked: strin
  * no-op: `A=1\nA=2` edited to `9` became `A=9\nA=2`, the UI showed success, and the
  * container still started with `2`.
  */
+/**
+ * Removes every line holding `key`, including a duplicated key's shadowed earlier
+ * occurrences — `upsertEnv` only ever rewrites the LAST one (the one compose actually
+ * reads), so leaving the others behind on delete would make the key reappear the moment
+ * anything re-parsed the file, with whatever stale value the earlier line still held.
+ * A key that is not present at all is a no-op, not an error: the caller (an undo, or a
+ * delete requested twice) should not have to check first.
+ */
+export function removeEnv(entries: EnvEntry[], key: string): EnvEntry[] {
+  return entries.filter((e) => !(e.kind === "pair" && e.key === key));
+}
+
 export function upsertEnv(entries: EnvEntry[], key: string, value: string): EnvEntry[] {
   const index = entries.findLastIndex((e) => e.kind === "pair" && e.key === key);
   if (index >= 0) {
