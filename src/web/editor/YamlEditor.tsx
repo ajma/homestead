@@ -1,5 +1,5 @@
 import { yaml } from "@codemirror/lang-yaml";
-import { setDiagnostics } from "@codemirror/lint";
+import { linter, lintGutter, setDiagnostics } from "@codemirror/lint";
 import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { basicSetup } from "codemirror";
@@ -142,6 +142,19 @@ export function YamlEditor({
           basicSetup,
           yaml(),
           EditorView.lineWrapping,
+          // `setDiagnostics` below drives this component's own lint layer directly — no
+          // async `source` is registered here (`null`), only configuration. Without
+          // `lintGutter()`, a diagnostic exists only as a `.cm-lintRange` underline,
+          // reachable by mouse hover, `Mod-Shift-m`, or `F8` — none of which exist on a
+          // touch screen, the platform the spec chose CodeMirror over Monaco for.
+          // `autoPanel: true` opens the panel listing every current diagnostic's text
+          // whenever `setDiagnostics` reports at least one, and closes it when there are
+          // none, without stealing focus from the document the way calling
+          // `openLintPanel` on every diagnostics update would — that panel is what makes
+          // a message's text actually present in the DOM instead of only inside a hover
+          // tooltip or an `aria-live` region nothing ever populates.
+          linter(null, { autoPanel: true }),
+          lintGutter(),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) onChangeRef.current(update.state.doc.toString());
           }),

@@ -221,6 +221,75 @@ describe("YamlEditor", () => {
     expect(container.querySelector(".cm-lintRange-error")).toBeTruthy();
   });
 
+  it("gives a diagnostic a visible gutter marker, not just an underline", () => {
+    // Important 4 from the final review: without `lintGutter()`, a diagnostic existed
+    // only as a `.cm-lintRange` underline in the text — reachable by mouse hover,
+    // `Mod-Shift-m`, or `F8`, none of which exist on the touch platform the spec chose
+    // CodeMirror for. `lintGutter()` is what adds a `cm-gutter-lint` column with a marker
+    // for the line, on top of the underline the previous test already covers.
+    const diagnostics: EditorDiagnostic[] = [
+      { from: 0, to: 1, severity: "error", message: "bad key" },
+    ];
+    const { container } = render(
+      <YamlEditor
+        value="a: 1"
+        onChange={() => {}}
+        diagnostics={diagnostics}
+        extraExtensions={[]}
+      />,
+    );
+    expect(container.querySelector(".cm-gutter-lint")).toBeTruthy();
+    expect(container.querySelector(".cm-lint-marker")).toBeTruthy();
+  });
+
+  it("puts the diagnostic's own message text in the DOM, reachable without a hover", () => {
+    // The measured gap this closes: dumping the DOM for an editor with one warning found
+    // the message text nowhere — only the coloured underline, a hover tooltip, and an
+    // empty `aria-live` region. The lint panel (opened automatically here via
+    // `autoPanel: true`, since nothing in this app ever calls `openLintPanel` — see
+    // `YamlEditor`'s own extension list) renders each diagnostic's text as plain,
+    // always-present DOM content: reachable on touch and by a screen reader, not only by
+    // a pointer that can hover.
+    const diagnostics: EditorDiagnostic[] = [
+      { from: 0, to: 4, severity: "warning", message: 'Unknown key "imag".' },
+    ];
+    const { container } = render(
+      <YamlEditor
+        value="imag: nginx"
+        onChange={() => {}}
+        diagnostics={diagnostics}
+        extraExtensions={[]}
+      />,
+    );
+    expect(container.querySelector(".cm-panel-lint")).toBeTruthy();
+    expect(container.textContent).toContain('Unknown key "imag".');
+  });
+
+  it("does not show the lint panel when there is nothing to report", () => {
+    const { container } = render(
+      <YamlEditor value="a: 1" onChange={() => {}} diagnostics={[]} extraExtensions={[]} />,
+    );
+    expect(container.querySelector(".cm-panel-lint")).toBeNull();
+  });
+
+  it("closes the lint panel again once its diagnostic is fixed", () => {
+    const diagnostics: EditorDiagnostic[] = [
+      { from: 0, to: 1, severity: "error", message: "bad key" },
+    ];
+    const { container, rerender } = render(
+      <YamlEditor
+        value="a: 1"
+        onChange={() => {}}
+        diagnostics={diagnostics}
+        extraExtensions={[]}
+      />,
+    );
+    expect(container.querySelector(".cm-panel-lint")).toBeTruthy();
+
+    rerender(<YamlEditor value="a: 1" onChange={() => {}} diagnostics={[]} extraExtensions={[]} />);
+    expect(container.querySelector(".cm-panel-lint")).toBeNull();
+  });
+
   it("destroys the view on unmount, so its window listeners do not leak", () => {
     // `EditorView` attaches "resize"/"scroll" listeners straight onto `window` in its
     // constructor — outside the component's own DOM subtree, so removing the host node
