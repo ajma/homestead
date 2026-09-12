@@ -1,5 +1,6 @@
-import { jobs } from "@server/db/schema";
+import { apps, jobs } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
+import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import { describe, expect, it, vi } from "vitest";
 
@@ -262,29 +263,36 @@ describe("app inventory API", () => {
     await app.close();
   });
 
-  it("refuses to delete a system app", async () => {
-    const app = await buildTestApp();
-    const { cookie } = await signUpAdmin(app);
-    app.deps.host.files.set("cloudflared/compose.yaml", "services: {}\n");
-    app.deps.host.composeResults.set("config --format json", {
-      exitCode: 0,
-      stdout: JSON.stringify({ name: "cloudflared", services: {} }),
-      stderr: "",
+  // Delete is refused for both system kinds — unlike the lifecycle guard in jobs.ts,
+  // which allows `cloudflared` through. Deleting either kind makes Homestead forget a
+  // resource it still manages, and that loss cannot be undone from the client.
+  for (const kind of ["self", "cloudflared"] as const) {
+    it(`refuses to delete a system app (${kind})`, async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("cloudflared/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "cloudflared", services: {} }),
+        stderr: "",
+      });
+      const adopted = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["cloudflared"] },
+      });
+      const id = adopted.json().adopted[0].id;
+      await app.deps.db.update(apps).set({ systemKind: kind }).where(eq(apps.id, id));
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(409);
+      await app.close();
     });
-    const adopted = await app.inject({
-      method: "POST",
-      url: "/api/apps/adopt",
-      headers: { cookie },
-      payload: { directories: ["cloudflared"] },
-    });
-    const id = adopted.json().adopted[0].id;
-    await app.deps.db
-      .update(await import("@server/db/schema").then((m) => m.apps))
-      .set({ isSystem: true });
-    const res = await app.inject({ method: "DELETE", url: `/api/apps/${id}`, headers: { cookie } });
-    expect(res.statusCode).toBe(409);
-    await app.close();
-  });
+  }
 
   it("returns 404 for an unknown app id", async () => {
     const app = await buildTestApp();

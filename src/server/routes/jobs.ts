@@ -30,12 +30,18 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     const row = await loadApp(db, ctx, params.id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
-    // Every kind, not a chosen subset. `down` on a self-adopted Homestead is unrecoverable
-    // from the UI that issued it and `restart` kills the process mid-response; `up` and
-    // `pull` are merely useless against a container that is by definition already running.
-    // Same shape as the delete guard at `apps.ts:599`. The cost is real and accepted: an
-    // admin restarts Homestead from the NAS, not from Homestead.
-    if (row.isSystem) {
+    // Only `self` is refused here, unlike the delete guard in apps.ts, which refuses both
+    // kinds. Every lifecycle kind against a self-adopted Homestead is unrecoverable from
+    // the UI that issued it: `down` cannot be undone from a UI that just went down with
+    // it, and `restart` kills the process mid-response; `up` and `pull` are merely useless
+    // against a container that is by definition already running. The cost is real and
+    // accepted: an admin restarts Homestead from the NAS, not from Homestead.
+    //
+    // `cloudflared` is not refused at all, including `down`: restarting or stopping the
+    // managed tunnel is an ordinary lifecycle action, Homestead itself keeps running to
+    // serve the response, and the confirmation for anything destructive is the client's
+    // job — a server that refused `down` here would make the UI's confirm dialog a lie.
+    if (row.systemKind === "self") {
       return reply.code(409).send({
         error: "system_app",
         message: "Homestead does not run lifecycle actions against a system app.",

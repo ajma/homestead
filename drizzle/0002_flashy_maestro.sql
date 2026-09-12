@@ -1,0 +1,1 @@
+ALTER TABLE `apps` ADD `system_kind` text;

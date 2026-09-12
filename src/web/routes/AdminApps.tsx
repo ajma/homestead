@@ -173,7 +173,7 @@ export function AdminApps() {
                       <div className="min-w-0 flex-1">
                         <p className="flex flex-wrap items-center gap-1.5 truncate font-medium text-slate-900 dark:text-slate-100">
                           {app.displayName}
-                          {app.isSystem && (
+                          {app.systemKind !== null && (
                             <span className="rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                               System
                             </span>

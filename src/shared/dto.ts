@@ -24,7 +24,7 @@ export type AdminApp = ViewerApp & {
   composeFile: string;
   projectName: string;
   lastComposeHash: string | null;
-  isSystem: boolean;
+  systemKind: "self" | "cloudflared" | null;
   showOnLauncher: boolean;
   sortOrder: number;
   graceUntil: number | null;

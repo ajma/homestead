@@ -8,6 +8,20 @@
       "when": 1789014550994,
       "tag": "0000_tiny_zzzax",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789246053922,
+      "tag": "0001_sudden_marvel_boy",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789246069340,
+      "tag": "0002_flashy_maestro",
+      "breakpoints": true
     }
   ]
 }

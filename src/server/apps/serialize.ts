@@ -17,7 +17,7 @@ export type AppRowLike = {
   projectName: string;
   launchInternalUrl: string | null;
   lastComposeHash: string | null;
-  isSystem: boolean;
+  systemKind: "self" | "cloudflared" | null;
   graceUntil: number | null;
   adoptedAt: number;
   archivedAt: number | null;
@@ -80,7 +80,7 @@ export function toAdminApp(
     composeFile: row.composeFile,
     projectName: row.projectName,
     lastComposeHash: row.lastComposeHash,
-    isSystem: row.isSystem,
+    systemKind: row.systemKind,
     showOnLauncher: row.showOnLauncher,
     sortOrder: row.sortOrder,
     graceUntil: row.graceUntil,
