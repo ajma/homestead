@@ -20,7 +20,22 @@ Alpine (musl, not the build host's glibc), and the `runtime` stage that copies t
 output plus that Alpine `node_modules` onto a `node:24-alpine` base with the Docker CLI and
 Compose plugin installed.
 
-## 3. The path-identity constraint, and why it is first
+## 3. Networking
+
+`compose.example.yaml` runs the container with `network_mode: host` rather than a bridged
+network publishing a port with `ports:`. This is not just about publishing — it is about what
+an internal probe would actually be testing: a bridged container's `127.0.0.1` is its own
+network namespace's loopback, not the host's, so an HTTP check whose target is
+`http://localhost:3000` would silently test the container instead of the service it exists to
+watch.
+
+The trade-off is real: host networking means no port remapping (Homestead's `PORT` env var
+*is* the host port, full stop) and a network namespace shared with the host. It is a smaller
+loss than it sounds, though — the container already mounts `/var/run/docker.sock`, and a
+process that can talk to that socket is root-equivalent on the host already. Host networking
+does not hand over anything the socket mount had not already handed over.
+
+## 4. The path-identity constraint, and why it is first
 
 **Get this wrong before anything else and every stack Homestead manages comes up empty.**
 Spec §10 states it exactly:
@@ -55,7 +70,7 @@ path, and reads the marker back through the daemon. If the marker is missing, th
 misconfigured and Homestead **refuses to start**, naming the mismatch in the error. The same
 check runs again as onboarding step 2.
 
-## 4. Configuration
+## 5. Configuration
 
 All environment variables are parsed in one place, `src/server/config.ts:9-29`.
 
@@ -91,15 +106,15 @@ a Cloudflare Access application it did not itself provision — Phase 2 writes t
 database when Homestead provisions its own exposure. With neither source supplying both
 values, the Access sign-in path stays dormant and password login is unaffected.
 
-## 5. Volumes
+## 6. Volumes
 
 | Mount | Purpose |
 |---|---|
 | `/var/run/docker.sock` | Read-write. Homestead runs `docker compose` commands and writes compose files for the apps it manages. |
-| The compose root (e.g. `/volume2/docker`) | Mounted at the **identical path** on both sides — see §3. Where every managed app's compose file and bind-mounted data live. |
+| The compose root (e.g. `/volume2/docker`) | Mounted at the **identical path** on both sides — see §4. Where every managed app's compose file and bind-mounted data live. |
 | `/app/data` (named volume) | Holds `homestead.db` and the icon cache. This is Homestead's own state, separate from anything it manages. |
 
-## 6. First run
+## 7. First run
 
 On first boot the container runs the mount preflight, then migrations, then a startup sweep
 that repairs any job left `running`/`queued` by a previous crash (logging only if it found
@@ -107,7 +122,7 @@ something to repair). Once serving, opening the app in a browser lands on the **
 wizard**: create the admin account, verify the Cloudflare Access team/host if using it, import
 existing Compose apps already on disk under the compose root, and optionally invite viewers.
 
-## 7. Upgrading
+## 8. Upgrading
 
 ```bash
 docker build -t homestead:dev .
@@ -124,7 +139,7 @@ is **10s** — well under the budget, not "comfortably above" it — so do not d
 45s set, an upgrade's `docker compose up -d` (which stops the old container before starting the
 new one) gets a clean shutdown rather than a `SIGKILL` mid-sequence.
 
-## 8. Managing Homestead with Homestead
+## 9. Managing Homestead with Homestead
 
 Once running, Homestead is a normal container and can be adopted and managed like any other
 app it watches. Mark its row `isSystem` and every lifecycle action (`up`, `down`, `restart`,
@@ -133,7 +148,7 @@ deletion. Restarts and stops of Homestead itself have to happen from the NAS ins
 Homestead's own UI: a `down` issued against yourself cannot be undone by the UI that issued it,
 and a `restart` kills the process handling the very request that asked for it.
 
-## 9. Verifying the mount preflight
+## 10. Verifying the mount preflight
 
 `src/server/host/preflight.ts`'s decisive check — that a marker file written inside the
 container is visible back through the daemon's own view of the compose root — can only be
@@ -157,17 +172,17 @@ docker build -t homestead:dev .
 | Container path exists on host but is a different directory | the other directory | refused |
 | No compose-root mount at all | any path | refused |
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 **The preflight refuses to start.** The container exits immediately with a `PreflightError`
 naming the mismatch — for example "the marker file was not visible to the Docker daemon at
 `<path>`". This means `HOMESTEAD_COMPOSE_ROOT` and the compose root bind mount's *container*
 path do not match. Fix the bind mount in your `compose.yaml` (or the env var) so both sides
-use the identical absolute path, per §3, and restart.
+use the identical absolute path, per §4, and restart.
 
 **`HOMESTEAD_SKIP_MOUNT_PREFLIGHT=true` exists for development and CI only.** It bypasses the
 one check that catches a silently broken mount. Setting it on the NAS defeats the entire
-protection §3 describes — a misconfigured mount would then produce apps that look freshly
+protection §4 describes — a misconfigured mount would then produce apps that look freshly
 installed instead of refusing to boot. Never set it in a real deployment.
 
 **The web UI 404s on every page but the API works.** `dist/web` is missing from the image —
