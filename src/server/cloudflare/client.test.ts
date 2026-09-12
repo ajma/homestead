@@ -103,6 +103,23 @@ describe("createCloudflareClient", () => {
       expect(error).toBeInstanceOf(CloudflareError);
       expect((error as CloudflareError).fault).toBe("cloudflare");
     });
+
+    it("accepts a result_info that omits count, a field the plan never claimed was known", async () => {
+      // `count` is not on the plan's "known and safe to rely on" list for `result_info`
+      // (only `page`, `per_page`, `total_count` are) — a schema that required it anyway
+      // would fail this entire, otherwise-valid envelope the moment Cloudflare omits or
+      // renames a field nothing here even uses.
+      const fetchMock = vi.fn(async () =>
+        jsonResponse({
+          success: true,
+          errors: [],
+          result: [{ id: "z1", name: "example.com" }],
+          result_info: { page: 1, per_page: 50, total_count: 1 },
+        }),
+      );
+      const zones = await client({ fetch: fetchMock }).listZones();
+      expect(zones).toEqual([{ id: "z1", name: "example.com" }]);
+    });
   });
 
   describe("fault classification", () => {
@@ -178,6 +195,29 @@ describe("createCloudflareClient", () => {
         .listZones()
         .catch((e: unknown) => e)) as CloudflareError;
       expect(error.fault).toBe("network");
+    });
+
+    it("classifies error code 9109 as permission even at a 200 status", async () => {
+      // Cloudflare can report a permission failure at HTTP 200 with `success: false`,
+      // the same "classic mistake" trap this whole client exists to avoid — but the
+      // classifier used to decide fault from `status` alone, so a status this switch
+      // doesn't recognise (200) fell through to the `cloudflare` catch-all and got
+      // retried three times before reporting a useless "unexpected error" message.
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: false,
+            errors: [{ code: 9109, message: "Unauthorized to access requested resource" }],
+          }),
+          { status: 200 },
+        ),
+      );
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .listZones()
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error.fault).toBe("permission");
+      // permission is not retryable — one call, not three.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
     it("classifies a 400 with a validation code as client", async () => {
@@ -264,6 +304,32 @@ describe("createCloudflareClient", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
+    it("retries a rejecting fetch (network) the same as any other retryable fault", async () => {
+      // Binds `RETRYABLE_FAULTS`'s `"network"` member to actual behaviour. Before this
+      // test, "classifies a rejecting fetch as network" above asserted only the fault,
+      // never the call count — the exact gap the plan warned about ("a test that only
+      // checks the final error passes against no retry at all"). Measured: deleting
+      // `"network"` from `RETRYABLE_FAULTS`, or deleting the retry path outright, both
+      // left the full suite green until this test existed.
+      let calls = 0;
+      const fetchMock = vi.fn(async () => {
+        calls++;
+        if (calls < 3) throw new Error("getaddrinfo ENOTFOUND api.cloudflare.com");
+        return jsonResponse(
+          envelope({
+            success: true,
+            result: [{ id: "z1", name: "example.com" }],
+            result_info: { page: 1, per_page: 50, count: 1, total_count: 1 },
+          }),
+        );
+      });
+      const sleep = fakeSleep();
+      const zones = await client({ fetch: fetchMock, sleep }).listZones();
+      expect(zones).toEqual([{ id: "z1", name: "example.com" }]);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenCalledTimes(2);
+    });
+
     it("bounds retries and raises the last fault after exhaustion", async () => {
       const fetchMock = vi.fn(async () => new Response("bad gateway", { status: 502 }));
       const sleep = fakeSleep();
@@ -329,6 +395,33 @@ describe("createCloudflareClient", () => {
         { id: "z3", name: "three.example" },
       ]);
       expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("caps pagination and raises a clear error, rather than looping forever, when the API ignores ?page=", async () => {
+      // Always answers `page: 1` regardless of the `?page=` query parameter — the
+      // measured trigger: an API that ignores pagination convinces a loop comparing
+      // against the RESPONSE's page number that it never advances, and it does not, at
+      // 203 requests and climbing. `per_page: 2` and a huge `total_count` mean the
+      // "have we fetched everything" check never trips either.
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: [
+              { id: "z1", name: "one.example" },
+              { id: "z2", name: "two.example" },
+            ],
+            result_info: { page: 1, per_page: 2, count: 2, total_count: 1_000_000 },
+          }),
+        ),
+      );
+      const error = await client({ fetch: fetchMock })
+        .listZones()
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+      // A clear, bounded failure — not a partial list quietly handed back as if it were
+      // complete, which would let an admin pick a zone a later sub-phase can't find.
+      expect(fetchMock).toHaveBeenCalledTimes(50);
     });
   });
 });

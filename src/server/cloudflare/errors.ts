@@ -1,7 +1,5 @@
 import type { CloudflareFault } from "@shared/cloudflare.js";
 
-export type { CloudflareFault };
-
 /**
  * Cloudflare's failure classified into the sentence a caller needs to say about it.
  *
