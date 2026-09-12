@@ -35,6 +35,29 @@ loss than it sounds, though — the container already mounts `/var/run/docker.so
 process that can talk to that socket is root-equivalent on the host already. Host networking
 does not hand over anything the socket mount had not already handed over.
 
+### Host networking also widens what a probe can reach
+
+Host networking is not free from a probe's point of view: a probe's target is a URL the
+server fetches, and on host networking that fetch can reach host-local services and, on a
+cloud host, the 169.254.169.254 link-local metadata endpoint — an SSRF primitive with a wider
+blast radius than a bridged network would allow.
+
+**Why that is acceptable today:** setting a probe target requires `app:config`
+(`src/server/routes/probes.ts`), and `app:config` is admin-only — `src/server/auth/context.test.ts`
+asserts a viewer does not have it. An admin who could misuse a probe target already holds
+`app:compose` and `app:lifecycle`, i.e. they can write arbitrary compose YAML and deploy it
+through the same mounted Docker socket, which is root-equivalent by construction (above).
+Host networking hands such an admin no capability they lack by a far more direct route. The
+argument rests on *who the actor is*, not on the metadata endpoint being otherwise
+unreachable.
+
+**What would invalidate this — the tripwire:** the instant probe-target configuration is
+reachable by anyone who is not already an admin — a scoped admin variant, a new capability, a
+Phase 2 external-probe surface reachable by someone else — this reasoning collapses. At that
+point probe targets need to be validated against loopback, link-local and private address
+ranges before the fetch, which nothing in this codebase does today. Anyone adding such a role
+or capability should treat that validation as part of the same change, not a follow-up.
+
 ## 4. The path-identity constraint, and why it is first
 
 **Get this wrong before anything else and every stack Homestead manages comes up empty.**
