@@ -132,6 +132,9 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
     events,
     icons: { metadata: iconMetadata, store: iconStore },
     preflight: async () => ({ ok: true }),
+    fetch: (async () => {
+      throw new Error("cloudflare fetch should not be called in tests without an override");
+    }) as unknown as typeof fetch,
   });
 
   return app as RealHostTestApp;

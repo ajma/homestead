@@ -17,6 +17,7 @@ import type { IconMetadata } from "./icons/metadata.js";
 import type { IconStore } from "./icons/store.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
+import { cloudflareRoutes } from "./routes/cloudflare.js";
 import { containerRoutes } from "./routes/containers.js";
 import type { EventBus } from "./routes/events.js";
 import { eventRoutes } from "./routes/events.js";
@@ -77,6 +78,11 @@ export type AppDeps = {
   events: EventBus;
   icons: { metadata: IconMetadata; store: IconStore };
   preflight: () => Promise<PreflightResult>;
+  /** Used to build a `CloudflareClient` per request from whatever credentials are
+   * currently stored — see `routes/cloudflare.ts`. A plain function property, like
+   * `preflight` above, so tests can override it wholesale without a second injection
+   * mechanism. */
+  fetch: typeof globalThis.fetch;
 };
 
 declare module "fastify" {
@@ -187,6 +193,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(containerRoutes);
   await app.register(imageRoutes);
   await app.register(probeRoutes);
+  await app.register(cloudflareRoutes);
   await app.register(eventRoutes);
   await app.register(launcherRoutes);
   await app.register(iconRoutes);

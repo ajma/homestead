@@ -106,6 +106,7 @@ await startServer({
       scheduler,
       events,
       icons: { metadata: iconMetadata, store: iconStore },
+      fetch,
       preflight: () =>
         runMountPreflight({ composeRoot: config.composeRoot, dockerSocket: config.dockerSocket }),
     });
