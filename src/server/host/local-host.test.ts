@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { hashContent, LocalHost, parseDockerVersion } from "@server/host/local-host";
 import { HashMismatchError } from "@server/host/types";
 import Docker from "dockerode";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 async function dockerAvailable(): Promise<boolean> {
   try {
@@ -133,6 +133,32 @@ describe.skipIf(!(await dockerAvailable()))("LocalHost docker reads", () => {
     await expect(
       host.listContainers({ project: "definitely-not-a-real-project" }),
     ).resolves.toEqual([]);
+  });
+});
+
+describe("LocalHost.dockerVersion", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects rather than reporting a bare mapping when the daemon's answer is malformed", async () => {
+    // Whether `dockerVersion()` actually calls `parseDockerVersion` at all — not whether
+    // that function validates correctly, which `parseDockerVersion`'s own tests below
+    // already cover. Nothing else exercises this call site: the `describe.skipIf` block
+    // above never calls `dockerVersion`, and `FakeHost.dockerVersion` (test-helpers.ts)
+    // is a hard-coded, always-valid literal that a route test could never see fail
+    // through. Bypassing `parseDockerVersion` at the call site — mapping `raw`'s fields
+    // directly instead of validating them — leaves every other host and setup-host test
+    // green; this is the one that would catch it.
+    vi.spyOn(Docker.prototype, "version").mockResolvedValue({
+      ApiVersion: "1.47",
+      Os: "linux",
+      Arch: "x86_64",
+      // `Version` omitted — exactly what an older daemon or Podman's Docker-compatible
+      // socket can hand back despite `@types/dockerode` declaring it required.
+    } as never);
+
+    await expect(host.dockerVersion()).rejects.toThrow(/form Homestead understood/);
   });
 });
 
