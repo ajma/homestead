@@ -572,6 +572,34 @@ describe("app inventory API", () => {
 
       expect(selectsForThree).toBe(selectsForOne);
     });
+
+    it("never issues its query for a viewer", async () => {
+      // A response-level assertion can't catch the gate going missing: `lastDeployAt`
+      // is stripped from the viewer DTO whether or not this query actually ran, so
+      // asserting on the JSON body passes either way. What has to be observed instead
+      // is the query itself — `deployTimestamps`' own `select({ appId, lastDeployAt })`
+      // shape, which is unique among this handler's queries (the base `apps` select
+      // takes no argument at all, and `runningJobs`' shape is `{ id, appId }`).
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const selectSpy = vi.spyOn(app.deps.db, "select");
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      const ranDeployTimestampsQuery = selectSpy.mock.calls.some(
+        (call) => call[0] !== undefined && "lastDeployAt" in call[0],
+      );
+      selectSpy.mockRestore();
+
+      expect(ranDeployTimestampsQuery).toBe(false);
+      await app.close();
+    });
   });
 
   describe("runningJobId", () => {
@@ -621,6 +649,32 @@ describe("app inventory API", () => {
         headers: { cookie: viewer.cookie },
       });
       expect(res.json()[0]).not.toHaveProperty("runningJobId");
+      await app.close();
+    });
+
+    it("never issues its query for a viewer", async () => {
+      // Same reasoning as `deployTimestamps`' sibling test above: the field is stripped
+      // from the viewer DTO regardless of whether this query ran, so only observing the
+      // query itself — `runningJobs`' own `select({ id, appId })` shape — can tell the
+      // gate apart from a version that runs it unconditionally.
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const selectSpy = vi.spyOn(app.deps.db, "select");
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      const ranRunningJobsQuery = selectSpy.mock.calls.some(
+        (call) => call[0] !== undefined && "id" in call[0] && "appId" in call[0],
+      );
+      selectSpy.mockRestore();
+
+      expect(ranRunningJobsQuery).toBe(false);
       await app.close();
     });
   });
