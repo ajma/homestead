@@ -65,6 +65,37 @@ export class JobRunner {
     return false;
   }
 
+  /**
+   * Cancels every in-flight job and waits for each to write its terminal row.
+   *
+   * Cancelling rather than waiting is the only option that exists: `JOB_TIMEOUT_MS` is
+   * thirty minutes and Docker SIGKILLs ten seconds after SIGTERM. A cancelled job lands as
+   * `failed` through the normal `finish` path, which is the same place the startup sweep
+   * would have put it — the difference is that this one happens while we can still write
+   * it, so the next boot has nothing to repair.
+   *
+   * `timeoutMs` bounds the wait. A child that ignores SIGTERM must not be able to hold the
+   * process open past the orchestrator's grace period; the row it leaves behind is the
+   * sweep's problem on the next boot, which is exactly what the sweep is for.
+   */
+  async shutdown(timeoutMs = 10_000): Promise<void> {
+    const inFlight = [...this.running.values()];
+    if (inFlight.length === 0) return;
+
+    for (const job of inFlight) job.handle.cancel();
+
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+
+    try {
+      await Promise.race([Promise.allSettled(inFlight.map((job) => job.done)), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async start(app: AppRow, kind: JobKind, userId: string): Promise<RunningJob> {
     const inFlight = this.running.get(app.id);
     if (inFlight) throw new JobBusyError(inFlight.id);
@@ -83,13 +114,28 @@ export class JobRunner {
       ARGS[kind],
       { timeoutMs: JOB_TIMEOUT_MS },
     );
+
+    // `done` must be truthful the instant the slot is taken, not just once the row insert
+    // below resolves. `shutdown()` reads `job.done` off the `running` map to know whether a
+    // job it is about to cancel has finished writing its terminal row — a placeholder that
+    // is already resolved (as a bare `Promise.resolve()` would be) makes that a lie for the
+    // length of this `await`, and `shutdown()` returns as soon as that lie settles rather
+    // than waiting for the real completion. This deferred is settled exactly once: either
+    // by `finish()` below once the row is terminal, or synchronously in the `catch` below
+    // once the failed insert has freed the slot — never both, and never left pending after
+    // the slot is gone.
+    let settleDone: () => void = () => {};
+    const done = new Promise<void>((resolve) => {
+      settleDone = resolve;
+    });
+
     const job: RunningJob & { handle: JobHandle } = {
       id,
       appId: app.id,
       kind,
       handle,
       output: handle.output,
-      done: Promise.resolve(),
+      done,
     };
     this.running.set(app.id, job);
 
@@ -107,10 +153,11 @@ export class JobRunner {
       // free the slot, rather than leaving an untracked `up` on the user's stack.
       handle.cancel();
       this.running.delete(app.id);
+      settleDone();
       throw error;
     }
 
-    job.done = this.finish(app, job, handle);
+    job.done = this.finish(app, job, handle).then(settleDone);
     return job;
   }
 

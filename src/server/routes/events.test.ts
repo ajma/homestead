@@ -306,6 +306,31 @@ describe("EventBus.closeForUser", () => {
   });
 });
 
+describe("EventBus.closeAll", () => {
+  it("closes every subscription even when an earlier one's onClose throws", () => {
+    const bus = new EventBus();
+    let closedB = false;
+    bus.subscribe(
+      "user-a",
+      () => {},
+      () => {
+        throw new Error("boom");
+      },
+    );
+    bus.subscribe(
+      "user-b",
+      () => {},
+      () => {
+        closedB = true;
+      },
+    );
+
+    bus.closeAll();
+
+    expect(closedB).toBe(true);
+  });
+});
+
 describe("closing a user's stream when their access changes", () => {
   function openStream(app: Awaited<ReturnType<typeof withApp>>["app"], cookie: string) {
     return app.inject({ method: "GET", url: "/api/events", headers: { cookie } });

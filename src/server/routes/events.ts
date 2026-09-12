@@ -139,7 +139,13 @@ export class EventBus {
    * cannot settle while a stream is open — and the hook a graceful shutdown will call.
    */
   closeAll(): void {
-    for (const subscription of [...this.subscriptions]) subscription.onClose?.();
+    for (const subscription of [...this.subscriptions]) {
+      try {
+        subscription.onClose?.();
+      } catch {
+        // One stream's failure to close is not another's.
+      }
+    }
   }
 
   /**

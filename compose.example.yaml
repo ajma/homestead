@@ -1,0 +1,59 @@
+# Homestead's own deployment. Copy to compose.yaml, set the two required values, and
+# `docker compose up -d`.
+#
+# THE ONE THING TO GET RIGHT: the compose root is mounted at the SAME absolute path
+# inside the container as on the host. `/volume2/docker:/volume2/docker`, not
+# `/volume2/docker:/data`. Homestead runs `docker compose -f /volume2/docker/<app>/...`,
+# and the daemon resolves that stack's own relative bind mounts against the HOST
+# filesystem — so the path string Homestead emits has to mean something on the host.
+# Get it wrong and your stacks come up with empty config and data directories, which is
+# indistinguishable from data loss until somebody looks. Homestead runs a preflight at
+# boot that catches exactly this and refuses to start.
+
+services:
+  homestead:
+    image: homestead:dev
+    container_name: homestead
+    restart: unless-stopped
+
+    # Must exceed the shutdown budget: jobs.shutdown()'s 10s (src/server/apps/job-runner.ts)
+    # plus server.close()'s 20s (src/server/shutdown.ts) = 30s worst case. Set with margin
+    # above that, not equal to it — equal buys nothing, since SIGKILL and the sequence's own
+    # deadline would land at the same instant. Compose's own default grace period, if this
+    # line is removed, is 10s, not this value — plenty of margin below the 30s budget, so
+    # a shutdown mid-sequence would be SIGKILLed early rather than completing cleanly.
+    stop_grace_period: 45s
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+      # Read-write: Homestead runs compose commands and writes compose files.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Identical path on both sides. See the note above.
+      - /volume2/docker:/volume2/docker
+      # homestead.db and the icon cache.
+      - homestead-data:/app/data
+
+    environment:
+      # REQUIRED. 32 bytes, base64. Generate once and keep it:
+      #   head -c32 /dev/urandom | base64
+      # Losing it makes every stored secret undecryptable.
+      HOMESTEAD_SECRET_KEY: "${HOMESTEAD_SECRET_KEY:?set HOMESTEAD_SECRET_KEY}"
+      # REQUIRED. The URL you reach Homestead on; used for cookies and CSRF.
+      HOMESTEAD_BASE_URL: "${HOMESTEAD_BASE_URL:?set HOMESTEAD_BASE_URL}"
+
+      # Defaults shown. Change COMPOSE_ROOT only together with the bind mount above.
+      HOMESTEAD_COMPOSE_ROOT: /volume2/docker
+      HOMESTEAD_DOCKER_SOCKET: /var/run/docker.sock
+      PORT: "3000"
+
+      # Optional: only for placing Homestead behind a Cloudflare Access application it did
+      # not create. Phase 2 writes these to the database when it provisions its own
+      # exposure. With neither source supplying both, the Access sign-in path stays
+      # dormant and password login is unaffected.
+      # HOMESTEAD_ACCESS_TEAM_DOMAIN: your-team.cloudflareaccess.com
+      # HOMESTEAD_ACCESS_AUD: <application audience tag>
+
+volumes:
+  homestead-data:

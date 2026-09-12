@@ -89,6 +89,14 @@ export class FakeHost implements Host {
   /** Set to have `runCompose` hang until `releaseCompose()` is called. */
   private composeGate: Promise<void> | null = null;
   private releaseComposeGate: (() => void) | null = null;
+  /**
+   * Set before calling `runCompose` to simulate a compose child that does not exit on its
+   * own — its `result` promise stays pending until `cancel()` resolves it (or forever, if
+   * `ignoreCancel` is also set).
+   */
+  holdCompose = false;
+  /** Set alongside `holdCompose` to make `cancel()` a no-op, simulating a child that ignores SIGTERM. */
+  ignoreCancel = false;
 
   gateCompose(): void {
     this.composeGate = new Promise((resolve) => {
@@ -210,9 +218,16 @@ export class FakeHost implements Host {
     };
     const queue = new ChunkQueue();
     let cancelled = false;
+    let resolveHold: (() => void) | null = null;
+    const holdGate = this.holdCompose
+      ? new Promise<void>((resolve) => {
+          resolveHold = resolve;
+        })
+      : null;
 
     const result = (async (): Promise<ComposeResult> => {
       if (this.composeGate) await this.composeGate;
+      if (holdGate) await holdGate;
       if (cancelled) {
         queue.close();
         return { exitCode: 143, stdout: "", stderr: "cancelled" };
@@ -231,8 +246,10 @@ export class FakeHost implements Host {
       output: queue,
       result,
       cancel: () => {
+        if (this.ignoreCancel) return;
         cancelled = true;
         this.releaseCompose();
+        resolveHold?.();
       },
     };
   }

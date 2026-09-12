@@ -249,7 +249,7 @@ describe("JobRunner", () => {
         return original(table as never);
       };
 
-      const _job = await runner.start(row, "up", userId);
+      await runner.start(row, "up", userId);
       // Do not await job.done — simulates user closing the log pane before the job finishes.
       // Wait long enough for the job to complete internally.
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -261,5 +261,106 @@ describe("JobRunner", () => {
     } finally {
       process.off("unhandledRejection", onRejection);
     }
+  });
+
+  describe("shutdown", () => {
+    it("cancels an in-flight job and lets it write its terminal row", async () => {
+      const { db, host, row, userId, runner } = await seed();
+      host.holdCompose = true; // the compose child does not exit on its own
+
+      const job = await runner.start(row, "up", userId);
+      const before = await db.select().from(jobs).where(eq(jobs.id, job.id));
+      expect(before[0]?.status).toBe("running");
+
+      await runner.shutdown(2000);
+
+      const after = await db.select().from(jobs).where(eq(jobs.id, job.id));
+      expect(after[0]?.status).toBe("failed");
+      expect(after[0]?.finishedAt).not.toBeNull();
+    });
+
+    it("waits out a start() still inside its insert-await window, not the placeholder done", async () => {
+      // Reviewer's reproduction: `start()` is called and NOT awaited, so `shutdown()` runs
+      // while `this.running` holds a slot whose `done` is still the synchronous placeholder
+      // `Promise.resolve()` — set before the row insert, overwritten only after it resolves.
+      // A `shutdown()` that trusts that placeholder returns before the real row write lands.
+      const { db, host, row, userId, runner } = await seed();
+      host.composeResults.set("up -d", { exitCode: 0, stdout: "ok\n", stderr: "" });
+
+      const startPromise = runner.start(row, "up", userId);
+      await runner.shutdown(2000);
+
+      const job = await startPromise;
+      const [saved] = await db.select().from(jobs).where(eq(jobs.id, job.id));
+      expect(saved?.status).not.toBe("running");
+      expect(saved?.finishedAt).not.toBeNull();
+    });
+
+    it("frees the per-app slot, so nothing is left wedged", async () => {
+      const { host, row, userId, runner } = await seed();
+      host.holdCompose = true;
+
+      await runner.start(row, "up", userId);
+      await runner.shutdown(2000);
+
+      // A second start would throw JobBusyError if the slot were still held.
+      host.holdCompose = false;
+      host.composeResults.set("up -d", { exitCode: 0, stdout: "", stderr: "" });
+      await expect(runner.start(row, "up", userId)).resolves.toBeDefined();
+    });
+
+    it("returns rather than hanging when a child ignores cancellation", async () => {
+      const { host, row, userId, runner } = await seed();
+      host.holdCompose = true;
+      host.ignoreCancel = true;
+
+      await runner.start(row, "up", userId);
+
+      const started = Date.now();
+      await runner.shutdown(200);
+      expect(Date.now() - started).toBeLessThan(2000);
+    });
+
+    it("resolves immediately when nothing is running", async () => {
+      const { runner } = await seed();
+      await expect(runner.shutdown(2000)).resolves.toBeUndefined();
+    });
+
+    it("settles done when start()'s insert rejects, rather than making shutdown() wait out its full timeout", async () => {
+      // Coverage gap flagged in the 1H task-3 brief: `start()`'s insert-failure `catch`
+      // calls `settleDone()` so a job that never got a row does not leave `shutdown()`
+      // waiting on a `done` placeholder that nothing will ever resolve. No committed test
+      // exercised that call — remove it from the catch and every other test in this file
+      // still passes, but this one hangs for the full 2000ms below instead of settling
+      // almost immediately.
+      const { db, host, row, userId, runner } = await seed();
+      host.composeResults.set("up -d", { exitCode: 0, stdout: "ok\n", stderr: "" });
+
+      const original = db.insert.bind(db);
+      // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+      (db as any).insert = () => ({
+        values: () =>
+          new Promise((_resolve, reject) => {
+            setTimeout(() => reject(new Error("disk I/O error")), 20);
+          }),
+      });
+
+      // Not awaited: `shutdown()` must race the still-pending insert, not a call that has
+      // already settled.
+      const startPromise = runner.start(row, "up", userId);
+      startPromise.catch(() => {}); // observed now so the eventual rejection is never unhandled
+
+      const started = Date.now();
+      await runner.shutdown(2000);
+      const elapsed = Date.now() - started;
+
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).insert = original;
+      await expect(startPromise).rejects.toThrow("disk I/O error");
+
+      // The failed insert settles `done` within ~20ms. Without `settleDone()` in the catch,
+      // `shutdown()` would still be waiting out its 2000ms budget for a job that never ran.
+      expect(elapsed).toBeLessThan(500);
+    });
   });
 });

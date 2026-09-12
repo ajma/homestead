@@ -1,4 +1,7 @@
+import { apps, jobs } from "@server/db/schema";
+import type { TestApp } from "@server/test-helpers";
 import { buildTestApp, createScopedAdmin, createViewer, signUpAdmin } from "@server/test-helpers";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 const CONFIG = JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx" } } });
@@ -19,6 +22,25 @@ async function withApp() {
     payload: { directories: ["jellyfin"] },
   });
   return { app, cookie, id: adopted.json().adopted[0].id as string };
+}
+
+/** Adopts a directory named `name`, the way `withApp` does but for a directory the caller
+ * chooses — the system-app tests need distinct directories per app rather than the one
+ * `withApp` hardcodes. */
+async function createApp(app: TestApp, cookie: string, opts: { name: string }): Promise<string> {
+  app.deps.host.files.set(`${opts.name}/compose.yaml`, "services: {}\n");
+  app.deps.host.composeResults.set("config --format json", {
+    exitCode: 0,
+    stdout: CONFIG,
+    stderr: "",
+  });
+  const adopted = await app.inject({
+    method: "POST",
+    url: "/api/apps/adopt",
+    headers: { cookie },
+    payload: { directories: [opts.name] },
+  });
+  return adopted.json().adopted[0].id as string;
 }
 
 /** Polls until `ready`, or fails loudly rather than hanging the suite. */
@@ -349,6 +371,73 @@ describe("lifecycle routes", () => {
     expect(res.body).not.toContain("SQLITE_BUSY");
     expect(res.body).not.toContain("password");
     app.deps.host.releaseCompose();
+    await app.close();
+  });
+});
+
+describe("system apps", () => {
+  it("refuses every lifecycle action on a system app", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const id = await createApp(app, cookie, { name: "homestead" });
+    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, id));
+
+    for (const kind of ["up", "down", "restart", "pull"]) {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/apps/${id}/actions/${kind}`,
+        headers: { cookie },
+      });
+      expect(res.statusCode, `${kind} should be refused`).toBe(409);
+      expect(res.json().error, `${kind} should say why`).toBe("system_app");
+    }
+    await app.close();
+  });
+
+  it("still allows every lifecycle action on an ordinary app", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const id = await createApp(app, cookie, { name: "ordinary" });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/up`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(202);
+    await app.close();
+  });
+
+  it("refuses before it starts anything", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const id = await createApp(app, cookie, { name: "homestead" });
+    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, id));
+
+    await app.inject({ method: "POST", url: `/api/apps/${id}/actions/down`, headers: { cookie } });
+
+    // No job row, and nothing reached the host — a 409 that still ran the command would be
+    // the worst of both.
+    expect(await app.deps.db.select().from(jobs)).toEqual([]);
+    await app.close();
+  });
+
+  it("tells a scoped admin nothing about a system app outside their scope", async () => {
+    // Finding from the 1H task-4 brief: no existing test caught that the guard must sit
+    // after `loadApp`, so a scoped admin still 404s on a system app they cannot see rather
+    // than learning of its existence via a 409. Moving the guard above `loadApp` (and
+    // re-querying the row without the scope filter, since a row that hasn't loaded yet
+    // cannot be guarded on) leaves every other test in this file green.
+    const { app, cookie, id } = await withApp();
+    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, id));
+    const outOfScope = await createScopedAdmin(app, cookie, { appIds: [] });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/down`,
+      headers: { cookie: outOfScope.cookie },
+    });
+    expect(res.statusCode).toBe(404);
     await app.close();
   });
 });
