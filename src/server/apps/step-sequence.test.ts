@@ -150,4 +150,44 @@ describe("runSteps", () => {
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error).toBe(boom);
   });
+
+  it("does not let a throwing onProgress abort the sequence (Minor 9)", async () => {
+    // Measured in the Phase 2B whole-branch review: `onProgress: () => { throw ... }`
+    // rejected `runSteps` outright, rather than resolving with a normal outcome. A
+    // progress callback is a reporting side channel — today's only consumer just pushes
+    // onto an array — and if it ever threw during rollback, the throw would escape
+    // `runSteps` entirely and the caller's terminal-row write would never run, leaving
+    // the job `running` forever. It must not be able to fail the job it reports on.
+    const a = step("a");
+
+    const outcome = await runSteps(
+      [a],
+      { log: [] },
+      {
+        onProgress: () => {
+          throw new Error("progress reporting blew up");
+        },
+      },
+    );
+
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("does not let a throwing onProgress abort rollback either", async () => {
+    const a = step("a", { undo: true });
+    const failing = step("failing", { fail: true });
+
+    const outcome = await runSteps(
+      [a, failing],
+      { log: [] },
+      {
+        onProgress: () => {
+          throw new Error("progress reporting blew up");
+        },
+      },
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.undone).toEqual(["a"]);
+  });
 });

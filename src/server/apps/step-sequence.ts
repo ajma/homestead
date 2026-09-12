@@ -42,6 +42,26 @@ export type StepEvent =
   | { phase: "run" | "undo"; step: string; stage: "end"; ok: true }
   | { phase: "run" | "undo"; step: string; stage: "end"; ok: false; error: unknown };
 
+/**
+ * Calls `onProgress` and swallows anything it throws. A progress callback is a reporting
+ * side channel, not a step: `StepJobRunner`'s only consumer today just pushes onto an
+ * array, but the one call it makes through `String()` inside `describeError` is not total
+ * (a `Symbol`, or an object with a null prototype, throws). If that ever threw during
+ * rollback, an unguarded call would escape `rollback` → `runSteps` → the caller's `try`,
+ * skipping the terminal-row write the caller does immediately after — the job it was
+ * reporting on would never get marked finished because reporting on it failed. A consumer
+ * that wants to know it broke should catch its own errors; it must not be able to break
+ * the sequence it is merely watching.
+ */
+function reportProgress(onProgress: (event: StepEvent) => void, event: StepEvent): void {
+  try {
+    onProgress(event);
+  } catch {
+    // Deliberately silent — see the function doc. There is nowhere safe to surface this
+    // that would not itself risk throwing.
+  }
+}
+
 export async function runSteps<C>(
   steps: Array<Step<C>>,
   ctx: C,
@@ -51,15 +71,15 @@ export async function runSteps<C>(
   const completed: Array<Step<C>> = [];
 
   for (const step of steps) {
-    onProgress({ phase: "run", step: step.name, stage: "start" });
+    reportProgress(onProgress, { phase: "run", step: step.name, stage: "start" });
     try {
       await step.run(ctx);
     } catch (error) {
-      onProgress({ phase: "run", step: step.name, stage: "end", ok: false, error });
+      reportProgress(onProgress, { phase: "run", step: step.name, stage: "end", ok: false, error });
       const { undone, undoFailures } = await rollback(completed, ctx, onProgress);
       return { ok: false, failed: step.name, error, undone, undoFailures };
     }
-    onProgress({ phase: "run", step: step.name, stage: "end", ok: true });
+    reportProgress(onProgress, { phase: "run", step: step.name, stage: "end", ok: true });
     completed.push(step);
   }
 
@@ -83,13 +103,19 @@ async function rollback<C>(
     const step = completed[i];
     if (!step?.undo) continue;
 
-    onProgress({ phase: "undo", step: step.name, stage: "start" });
+    reportProgress(onProgress, { phase: "undo", step: step.name, stage: "start" });
     try {
       await step.undo(ctx);
-      onProgress({ phase: "undo", step: step.name, stage: "end", ok: true });
+      reportProgress(onProgress, { phase: "undo", step: step.name, stage: "end", ok: true });
       undone.push(step.name);
     } catch (error) {
-      onProgress({ phase: "undo", step: step.name, stage: "end", ok: false, error });
+      reportProgress(onProgress, {
+        phase: "undo",
+        step: step.name,
+        stage: "end",
+        ok: false,
+        error,
+      });
       undoFailures.push({ step: step.name, error });
     }
   }
