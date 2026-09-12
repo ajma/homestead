@@ -673,11 +673,32 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/apps/:id/env/reveal", async (request, reply) => {
     const ctx = requireCapability(request, "app:secrets");
     const { id } = z.object({ id: z.string() }).parse(request.params);
+    const body = z.object({ key: z.string().max(256).optional() }).parse(request.body ?? {});
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
     const file = await readEnv(row.directory);
     if (file.state === "unreadable") return reply.code(409).send(UNREADABLE);
+
+    if (body.key !== undefined) {
+      // Per-key reveal: return only the one row the admin asked for, so the browser
+      // never holds the rest of the file in memory to display it. The 404 body must
+      // not disclose which keys do exist, and — per the rule below — carries no audit
+      // trace either, so a caller guessing key names learns nothing either way.
+      const entry = parseEnv(file.content).find(
+        (e): e is Extract<typeof e, { kind: "pair" }> => e.kind === "pair" && e.key === body.key,
+      );
+      if (!entry) return reply.code(404).send({ error: "key_not_found" });
+      await audit(db, ctx, {
+        action: "app.env_revealed",
+        targetType: "app",
+        targetId: id,
+        ip: request.ip,
+        detail: { key: entry.key },
+      });
+      return { key: entry.key, value: entry.value };
+    }
+
     // A separate endpoint rather than a query flag, so revealing is always deliberate
     // and always leaves a trace. Audited only once the read succeeded — an audit line
     // saying a secret was revealed when it was not is worse than none.

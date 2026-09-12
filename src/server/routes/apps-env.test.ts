@@ -6,11 +6,11 @@ import { describe, expect, it } from "vitest";
 const VALID = JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx" } } });
 const ENV = "# Database\nDB_PASSWORD=hunter2\nPUID=1000\n";
 
-async function withEnv() {
+async function withEnv(content: string = ENV) {
   const app = await buildTestApp();
   const { cookie } = await signUpAdmin(app);
   app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
-  app.deps.host.files.set("jellyfin/.env", ENV);
+  app.deps.host.files.set("jellyfin/.env", content);
   app.deps.host.composeResults.set("config --format json", {
     exitCode: 0,
     stdout: VALID,
@@ -22,7 +22,7 @@ async function withEnv() {
     headers: { cookie },
     payload: { directories: ["jellyfin"] },
   });
-  return { app, cookie, id: res.json().adopted[0].id as string };
+  return { app, cookie, id: res.json().adopted[0].id as string, db: app.deps.db };
 }
 
 describe(".env API", () => {
@@ -246,5 +246,83 @@ describe(".env API", () => {
     expect(detail.json().status).toBe("up");
 
     await app.close();
+  });
+});
+
+describe("POST /api/apps/:id/env/reveal with a key", () => {
+  it("returns just that key's value", async () => {
+    const { app, cookie, id } = await withEnv("API_KEY=sk-live-123\nOTHER=zzz\n");
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { key: "API_KEY" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ key: "API_KEY", value: "sk-live-123" });
+  });
+
+  it("does not include any other key's value in the response", async () => {
+    // The whole point of per-key reveal: showing one row must not ship the rest to the
+    // browser, where they sit in memory and in the devtools network pane.
+    const { app, cookie, id } = await withEnv("API_KEY=sk-live-123\nOTHER=secret-two\n");
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { key: "API_KEY" },
+    });
+    expect(res.body).not.toContain("secret-two");
+  });
+
+  it("records which key was revealed, not merely that something was", async () => {
+    const { app, cookie, id, db } = await withEnv("API_KEY=sk-live-123\n");
+    await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { key: "API_KEY" },
+    });
+    const [entry] = await db.select().from(auditLog).where(eq(auditLog.action, "app.env_revealed"));
+    expect(JSON.stringify(entry?.detail)).toContain("API_KEY");
+  });
+
+  it("404s a key that is not in the file, without saying what is", async () => {
+    const { app, cookie, id, db } = await withEnv("API_KEY=x\n");
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { key: "NOPE" },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("key_not_found");
+    expect(res.body).not.toContain("API_KEY");
+    const entries = await db.select().from(auditLog).where(eq(auditLog.action, "app.env_revealed"));
+    // An audit line claiming a key was revealed when it was not is worse than none.
+    expect(entries).toEqual([]);
+  });
+
+  it("still returns the whole file when no key is given, for raw mode", async () => {
+    const { app, cookie, id } = await withEnv("API_KEY=x\nOTHER=y\n");
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: {},
+    });
+    expect(res.json().content).toContain("OTHER=y");
+  });
+
+  it("requires app:secrets, like the whole-file mode", async () => {
+    const { app, cookie, id } = await withEnv("API_KEY=x\n");
+    const viewer = await createViewer(app, cookie);
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie: viewer.cookie },
+      payload: { key: "API_KEY" },
+    });
+    expect(res.statusCode).toBe(403);
   });
 });
