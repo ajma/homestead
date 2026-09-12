@@ -677,6 +677,83 @@ describe("app inventory API", () => {
       expect(ranRunningJobsQuery).toBe(false);
       await app.close();
     });
+
+    it("keeps a running job's id when Docker is unreachable, rather than hard-nulling it", async () => {
+      // The `!dockerReachable` branch builds its `AdminApp` from a stub status rather
+      // than a real one, and it would be easy for that branch's own `runningMap.get(...)
+      // ?? null` to get simplified to a bare `null` without anything noticing — every
+      // other test of this branch only checks `status`/`statusDetail`. A job that really
+      // is running is what makes this observe the fallback rather than the case (no job
+      // running) both a correct and a broken version would agree on.
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const jobId = ulid();
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: jobId, appId: id, kind: "up", status: "running" });
+
+      const originalListContainers = app.deps.host.listContainers.bind(app.deps.host);
+      app.deps.host.listContainers = async () => {
+        throw new Error("Cannot connect to the Docker daemon");
+      };
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].runningJobId).toBe(jobId);
+
+      app.deps.host.listContainers = originalListContainers;
+      await app.close();
+    });
+  });
+
+  describe("runningJobId on GET /api/apps/:id", () => {
+    it("shows the running job's id for an admin", async () => {
+      // `GET /api/apps` has its own version of this test; the single-app route builds
+      // its `AdminApp` from a separately-written `runningMap.get(row.id) ?? null`
+      // (`apps.ts:576`) that nothing exercised — a mutation hard-nulling it would pass
+      // every existing test for this route, all of which use apps with no running job.
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const jobId = ulid();
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: jobId, appId: id, kind: "up", status: "running" });
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+      });
+      expect(res.json().runningJobId).toBe(jobId);
+      await app.close();
+    });
+
+    it("is absent from the viewer DTO even while a job is running", async () => {
+      // The list route gates `runningJobId` behind `can(ctx, "app:config")` before ever
+      // computing it; this route's `!can(ctx, "app:config")` branch (`apps.ts:573`)
+      // returns `toViewerApp` — which has no `runningJobId` field at all — before
+      // `deployTimestamps`/`runningJobs` are even called. Proven here rather than just
+      // read off the source, the same way the list route's sibling test is: a viewer
+      // reading this route while a job actually runs must not see the field, not merely
+      // see it as `null`.
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, adminCookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "running" });
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/apps/${id}`,
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).not.toHaveProperty("runningJobId");
+      await app.close();
+    });
   });
 
   it("never shows a viewer the raw output of docker compose config", async () => {
