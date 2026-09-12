@@ -1,1 +1,1 @@
-ALTER TABLE `apps` ADD `system_kind` text;
+ALTER TABLE `apps` DROP COLUMN `is_system`;

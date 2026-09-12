@@ -165,11 +165,19 @@ new one) gets a clean shutdown rather than a `SIGKILL` mid-sequence.
 ## 9. Managing Homestead with Homestead
 
 Once running, Homestead is a normal container and can be adopted and managed like any other
-app it watches. Mark its row `isSystem` and every lifecycle action (`up`, `down`, `restart`,
-`pull`) is refused with 409 `system_app`, the same guard that already protects it from
-deletion. Restarts and stops of Homestead itself have to happen from the NAS instead of from
-Homestead's own UI: a `down` issued against yourself cannot be undone by the UI that issued it,
-and a `restart` kills the process handling the very request that asked for it.
+app it watches. Set its row's `system_kind` column to `'self'` (there is no UI for this — it is
+a direct SQL update against `apps`, e.g. `UPDATE apps SET system_kind = 'self' WHERE id = '<id>'`)
+and every lifecycle action (`up`, `down`, `restart`, `pull`) is refused with 409 `system_app`,
+the same guard that already protects it from deletion. Restarts and stops of Homestead itself
+have to happen from the NAS instead of from Homestead's own UI: a `down` issued against yourself
+cannot be undone by the UI that issued it, and a `restart` kills the process handling the very
+request that asked for it.
+
+`system_kind` also has a second value, `'cloudflared'`, for the managed Cloudflare Tunnel
+container Phase 2 introduces: it is refused deletion the same as `'self'`, but — unlike
+`'self'` — its lifecycle actions (including `down`) are **not** refused, since restarting or
+stopping the tunnel does not take Homestead's own UI down with it. Use `'self'` only for
+Homestead's own row.
 
 ## 10. Verifying the mount preflight
 
