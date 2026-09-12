@@ -249,11 +249,12 @@ export function ComposeTab() {
   const hasSyntaxError = diagnostics.some((diagnostic) => diagnostic.severity === "error");
   const [hasCheckedOnce, setHasCheckedOnce] = useState(false);
   const serverCheckEnabled = loaded && !hasSyntaxError && (dirty || !hasCheckedOnce);
-  const { message: serverMessage, settledCount } = useServerValidate(
-    appId,
-    text,
-    serverCheckEnabled,
-  );
+  const {
+    message: serverMessage,
+    settledCount,
+    checking,
+    transportError,
+  } = useServerValidate(appId, text, serverCheckEnabled);
 
   useEffect(() => {
     if (settledCount > 0) setHasCheckedOnce(true);
@@ -345,6 +346,31 @@ export function ComposeTab() {
       {serverMessage && (
         <p className="rounded-2xl border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300">
           {serverMessage}
+        </p>
+      )}
+
+      {/* The one place layer one and layer two can visibly disagree: layer one's
+          diagnostics are always current (they're recomputed synchronously from `text`),
+          but `serverMessage` above is only ever as fresh as the last round trip that
+          actually got an answer. Without this, fixing the typo that caused `serverMessage`
+          leaves the same red banner on screen with nothing saying a new check is even
+          running, let alone that it might have failed to reach the server at all. */}
+      {/* The one place layer one and layer two can visibly disagree: layer one's
+          diagnostics are always current (they're recomputed synchronously from `text`),
+          but `serverMessage` above is only ever as fresh as the last round trip that
+          actually got an answer. Without this, fixing the typo that caused `serverMessage`
+          leaves the same red banner on screen with nothing saying a new check is even
+          running, let alone that it might have failed to reach the server at all. */}
+      {checking && (
+        <p className="text-xs italic text-slate-500 dark:text-slate-400">
+          Checking with the server… Any message above may be stale until this finishes.
+        </p>
+      )}
+
+      {transportError && !checking && (
+        <p className="text-xs italic text-amber-600 dark:text-amber-400">
+          Could not reach the server to check this file. Any message above is left over from the
+          last check that actually got an answer, and may no longer be accurate.
         </p>
       )}
 

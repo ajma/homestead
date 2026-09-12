@@ -498,4 +498,164 @@ describe("ComposeTab", () => {
       expect(validateCalls()).toBeGreaterThan(0);
     });
   });
+
+  describe("extraExtensions memoisation survives consuming checking/transportError", () => {
+    // Context worth re-stating rather than assuming: the final review's brief noted this
+    // memoisation was verified stable across keystrokes, a settling query and the
+    // validate debounce, and asked that any render-path change re-verify it rather than
+    // assume it still holds. Important 3 above adds new render output driven by
+    // `checking`/`transportError` state that changes independently of `desktop` and
+    // `getEnvKeys` — `extraExtensions`'s own `useMemo` dependencies — so this proves
+    // those state changes don't themselves cause `YamlEditor`'s compartments to
+    // reconfigure. A `checking`/`transportError` toggle with no text edit is the cleanest
+    // isolation: `extraExtensions` and `diagnostics` (keyed on `text`) would only dispatch
+    // if something regressed, since nothing else in this window changes `readOnly` either.
+    it("dispatches nothing to the editor while checking/transportError toggle with no text change", async () => {
+      let resolveValidate: ((response: Response) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          const json = (status: number, body: unknown) =>
+            new Response(JSON.stringify(body), {
+              status,
+              headers: { "content-type": "application/json" },
+            });
+          if (url.endsWith("/compose/validate")) {
+            return new Promise<Response>((resolve) => {
+              resolveValidate = resolve;
+            });
+          }
+          if (url.endsWith("/env")) return json(200, { entries: [] });
+          if (url.endsWith("/compose")) return json(200, { content: ORIGINAL, hash: "h1" });
+          return json(200, {});
+        }),
+      );
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      await settle();
+      expect(screen.getByText(/Checking with the server…/)).toBeTruthy();
+
+      const view = findView(container);
+      const dispatchSpy = vi.spyOn(view, "dispatch");
+
+      // Settles `checking` back to `false` — no text change anywhere in this window.
+      await act(async () => {
+        resolveValidate?.(
+          new Response(JSON.stringify({ valid: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      });
+      await waitFor(() => expect(screen.queryByText(/Checking with the server…/)).toBeNull());
+
+      expect(dispatchSpy).not.toHaveBeenCalled();
+      dispatchSpy.mockRestore();
+    });
+  });
+
+  describe("a stale verdict that nothing says is stale", () => {
+    // Important 3 from the final review: `useServerValidate` computes `checking` and
+    // `transportError` but the tab used to discard both, so a red banner about text the
+    // user already fixed just sat there with no caption, no indicator and no retry once
+    // the next check failed in transport (a dropped connection, or the rate limiter).
+
+    it("shows an in-flight indicator while a check is running", async () => {
+      let resolveValidate: ((response: Response) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          const json = (status: number, body: unknown) =>
+            new Response(JSON.stringify(body), {
+              status,
+              headers: { "content-type": "application/json" },
+            });
+          if (url.endsWith("/compose/validate")) {
+            return new Promise<Response>((resolve) => {
+              resolveValidate = resolve;
+            });
+          }
+          if (url.endsWith("/env")) return json(200, { entries: [] });
+          if (url.endsWith("/compose")) return json(200, { content: ORIGINAL, hash: "h1" });
+          return json(200, {});
+        }),
+      );
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+      await settle();
+      expect(screen.getByText(/Checking with the server…/)).toBeTruthy();
+
+      // Cleans up: let the hanging request resolve so nothing leaks into the next test.
+      await act(async () => {
+        resolveValidate?.(
+          new Response(JSON.stringify({ valid: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      });
+    });
+
+    it("says the server could not be reached when the next check fails in transport, without dropping the last real verdict", async () => {
+      const brokenContent = "services:\n  web:\n    depends_on: [databse]\n";
+      let validateCallCount = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          const method = init?.method ?? "GET";
+          const json = (status: number, body: unknown) =>
+            new Response(JSON.stringify(body), {
+              status,
+              headers: { "content-type": "application/json" },
+            });
+          if (url.endsWith("/compose/validate")) {
+            validateCallCount++;
+            if (validateCallCount === 1) {
+              return json(200, {
+                valid: false,
+                message: 'service "web" depends on undefined service "databse"',
+              });
+            }
+            throw new TypeError("Failed to fetch");
+          }
+          if (url.endsWith("/env")) return json(200, { entries: [] });
+          if (url.endsWith("/compose") && method === "GET") {
+            return json(200, { content: brokenContent, hash: "h1" });
+          }
+          return json(200, {});
+        }),
+      );
+      const { container } = mount();
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+      await settle();
+      expect(screen.getByText('service "web" depends on undefined service "databse"')).toBeTruthy();
+
+      // Fix the typo; the *next* validate fails in transport rather than answering.
+      // `typeInto` only appends, so the whole-document replace goes straight through
+      // the view, the same primitive `typeInto` itself dispatches through.
+      const view = findView(container);
+      act(() => {
+        view.dispatch({
+          changes: {
+            from: 0,
+            to: view.state.doc.length,
+            insert: brokenContent.replace("databse", "database"),
+          },
+        });
+      });
+
+      await settle();
+
+      // The old verdict is still what's on screen — a transport failure must never be
+      // rendered as a fresh, current answer — but now with a caption saying it may be
+      // stale, not silence.
+      expect(screen.getByText('service "web" depends on undefined service "databse"')).toBeTruthy();
+      expect(screen.getByText(/Could not reach the server to check this file/)).toBeTruthy();
+    });
+  });
 });

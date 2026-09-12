@@ -91,10 +91,16 @@ describe("useServerValidate", () => {
     unmount();
   });
 
-  it("ignores a stale error that arrives after a newer request already reported success", async () => {
-    // Each keystroke restarts the debounce, but a slow round trip can still land after
-    // the next one has been sent. Showing its verdict means the user sees an error about
-    // text they already fixed.
+  it("validates the corrected text immediately once a slow, now-outdated request settles", async () => {
+    // Before the in-flight gate (see the "in-flight gate" describe block below), a
+    // second, newer request went out *while* the first was still pending, and this test
+    // proved the older one's late answer got discarded rather than clobbering the
+    // newer verdict. The gate now makes that overlap impossible in the first place — a
+    // debounce tick found a request already running and declined to start a second one
+    // — so what this test proves instead is the other half of the fix: once the
+    // outstanding request settles, the hook notices the text has since changed and
+    // validates it right away, rather than waiting out another full debounce that may
+    // never come if the user has stopped typing.
     vi.useFakeTimers();
     const resolvers: Array<(response: Response) => void> = [];
     const fetchSpy = vi.fn(
@@ -116,29 +122,21 @@ describe("useServerValidate", () => {
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    // The user fixes the typo before the first request answers; a second, newer request
-    // goes out for the corrected text.
+    // The user fixes the typo before the first request answers. The debounce fires
+    // again, but finds a request already in flight and declines to start a second one.
     rerender({ text: "services:\n  web:\n    depends_on: [database]\n" });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    const resolveOlder = must(resolvers[0], "the first request never resolved");
-    const resolveNewer = must(resolvers[1], "the second request never resolved");
+    const resolveFirst = must(resolvers[0], "the first request never resolved");
 
-    // The newer request answers first: the fixed text is valid.
+    // The one outstanding request finally answers, for the typo that is no longer on
+    // screen — and its own settle handler immediately fires a second request for the
+    // corrected text, with no further debounce wait.
     await act(async () => {
-      resolveNewer(jsonResponse({ valid: true }));
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(result.current.message).toBeNull();
-    expect(result.current.checking).toBe(false);
-
-    // The older, slower request now answers, reporting the typo error for text that is
-    // no longer on screen. It must be discarded rather than clobbering the newer verdict.
-    await act(async () => {
-      resolveOlder(
+      resolveFirst(
         jsonResponse({
           valid: false,
           message: 'service "web" depends on undefined service "databse"',
@@ -146,14 +144,23 @@ describe("useServerValidate", () => {
       );
       await vi.advanceTimersByTimeAsync(0);
     });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    const resolveSecond = must(resolvers[1], "the second request never resolved");
+    await act(async () => {
+      resolveSecond(jsonResponse({ valid: true }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(result.current.message).toBeNull();
+    expect(result.current.checking).toBe(false);
     unmount();
   });
 
-  it("ignores a stale success that arrives after a newer request already reported an error", async () => {
-    // The more dangerous direction of the same bug: a stale *success* must not clear a
-    // real, current error off the screen.
+  it("validates the newly-broken text immediately once a slow, now-outdated request settles", async () => {
+    // The mirror image of the test above, confirming the immediate follow-up check is
+    // not one-directional: it fires just as readily when the text changed from valid to
+    // invalid while the first request was still outstanding.
     vi.useFakeTimers();
     const resolvers: Array<(response: Response) => void> = [];
     const fetchSpy = vi.fn(
@@ -178,27 +185,27 @@ describe("useServerValidate", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
+    // Still just the one in-flight request — the tick for the edited text was declined.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    const resolveFirst = must(resolvers[0], "the first request never resolved");
+    await act(async () => {
+      resolveFirst(jsonResponse({ valid: true }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // The first answer (for text no longer on screen) is briefly applied — accurate for
+    // what was on screen at the time — and a second request for the current text was
+    // dispatched immediately as part of the same settle.
     expect(fetchSpy).toHaveBeenCalledTimes(2);
 
-    const resolveOlder = must(resolvers[0], "the first request never resolved");
-    const resolveNewer = must(resolvers[1], "the second request never resolved");
-
-    // The newer request answers first, reporting the real, current error.
+    const resolveSecond = must(resolvers[1], "the second request never resolved");
     await act(async () => {
-      resolveNewer(
+      resolveSecond(
         jsonResponse({
           valid: false,
           message: 'service "web" depends on undefined service "ghost"',
         }),
       );
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(result.current.message).toBe('service "web" depends on undefined service "ghost"');
-
-    // The older request now answers, saying the earlier (now-superseded) text was fine.
-    // It must not clear the error that is still accurate for what's on screen now.
-    await act(async () => {
-      resolveOlder(jsonResponse({ valid: true }));
       await vi.advanceTimersByTimeAsync(0);
     });
 
@@ -397,13 +404,15 @@ describe("useServerValidate", () => {
     });
   });
 
-  it("keeps checking true when a stale rejection lands while a newer request is still in flight", async () => {
-    // The sequence guard in the *rejection* callback (`seq !== seqRef.current`) exists to
-    // stop an older in-flight request, failing after a newer one is already pending, from
-    // flipping `checking` back to false while the newer one is still running — which would
-    // tell the user the check is done when it isn't. Removing that guard leaves every other
-    // test in this file green, since none of them reject an old request while a newer one
-    // is still outstanding.
+  it("keeps checking true across an immediate follow-up check for text that changed while a request failed in transport", async () => {
+    // Before the in-flight gate, this proved `checking` survived a newer request still
+    // being outstanding when an older, discarded one rejected. That overlap is no longer
+    // possible (a debounce tick while one is in flight declines to start another), so
+    // what matters now is that the follow-up check the settle handler fires for changed
+    // text doesn't produce a visible `checking: false` flicker in between — both the
+    // `setChecking(false)` from the failed request settling and the `setChecking(true)`
+    // from the immediate re-dispatch happen inside the same callback, so React's
+    // batching should coalesce them into `checking` staying `true` throughout.
     vi.useFakeTimers();
     const rejectors: Array<(error: unknown) => void> = [];
     const resolvers: Array<(response: Response) => void> = [];
@@ -427,30 +436,31 @@ describe("useServerValidate", () => {
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    // A second, newer request goes out before the first ever answers.
+    // The text changes before the first request answers. The debounce fires again but
+    // finds one already in flight, so no second request goes out yet.
     rerender({ text: "second" });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.current.checking).toBe(true);
+
+    const rejectFirst = must(rejectors[0], "the first request never registered a rejector");
+
+    // The first request fails in transport. Text has since changed, so its own settle
+    // handler immediately fires a second request — `checking` must never read `false`
+    // in between, or the user would (however briefly) see "not checking" between two
+    // checks that are, from their perspective, one continuous wait.
+    await act(async () => {
+      rejectFirst(new TypeError("Failed to fetch"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(result.current.checking).toBe(true);
 
-    const rejectOlder = must(rejectors[0], "the first request never registered a rejector");
-    const resolveNewer = must(resolvers[1], "the second request never resolved");
-
-    // The older request now fails. It must be discarded, including its effect on
-    // `checking`: the newer request is still the one running, so `checking` must stay
-    // true.
+    const resolveSecond = must(resolvers[1], "the second request never resolved");
     await act(async () => {
-      rejectOlder(new TypeError("Failed to fetch"));
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(result.current.checking).toBe(true);
-
-    // The newer request then lands normally, and is still the one that gets to decide
-    // the outcome.
-    await act(async () => {
-      resolveNewer(jsonResponse({ valid: false, message: "second problem" }));
+      resolveSecond(jsonResponse({ valid: false, message: "second problem" }));
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(result.current.checking).toBe(false);
@@ -513,6 +523,104 @@ describe("useServerValidate", () => {
     expect(timeoutCount()).toBe(before);
   });
 
+  describe("transportError", () => {
+    // What lets a caller tell "we don't know" apart from a real verdict — see the
+    // hook's own doc comment. `message` must never carry this (a transport failure is
+    // not "you're wrong"), so it needs its own field.
+
+    it("goes true when the round trip rejects", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))),
+      );
+
+      const { result, unmount } = renderHook(() => useServerValidate("app1", "services: {}"));
+      expect(result.current.transportError).toBe(false);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.transportError).toBe(true);
+      expect(result.current.message).toBeNull();
+      unmount();
+    });
+
+    it("goes true for a 200 that does not match ValidateResponse", async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => jsonResponse({ unexpected: "shape" })),
+      );
+
+      const { result, unmount } = renderHook(() => useServerValidate("app1", "services: {}"));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.transportError).toBe(true);
+      unmount();
+    });
+
+    it("clears once a later round trip gets a real verdict", async () => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+      const { result, rerender, unmount } = renderHook(
+        ({ text }) => useServerValidate("app1", text),
+        { initialProps: { text: "first" } },
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(result.current.transportError).toBe(true);
+
+      fetchMock.mockResolvedValueOnce(jsonResponse({ valid: true }));
+      rerender({ text: "second" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.transportError).toBe(false);
+      unmount();
+    });
+
+    it("clears as soon as a new attempt starts, not only once it settles", async () => {
+      // Once a fresh check is underway, `checking` is already the right thing to show —
+      // a stale "could not reach the server" caption sitting next to it would say two
+      // different things about the same request.
+      vi.useFakeTimers();
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+      const { result, rerender, unmount } = renderHook(
+        ({ text }) => useServerValidate("app1", text),
+        { initialProps: { text: "first" } },
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(result.current.transportError).toBe(true);
+
+      fetchMock.mockImplementationOnce(() => new Promise(() => {}));
+      rerender({ text: "second" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      expect(result.current.checking).toBe(true);
+      expect(result.current.transportError).toBe(false);
+      unmount();
+    });
+  });
+
   describe("settledCount", () => {
     // `ComposeTab` latches its own "has this ever been checked" flag off this counter
     // rather than off `checking` toggling — see the hook's own doc comment for why a
@@ -553,7 +661,14 @@ describe("useServerValidate", () => {
       unmount();
     });
 
-    it("does not increment for a request discarded as stale by a newer one", async () => {
+    it("increments once per round trip, including an immediate follow-up for changed text", async () => {
+      // Before the in-flight gate, two requests could be outstanding at once, and this
+      // proved the older one — discarded by `seqRef` once a newer one had already
+      // answered — did not double-count. That overlap can no longer happen: the gate
+      // means a second request only ever starts once the first has fully settled, so
+      // neither dispatch is ever "stale" relative to the other — each is simply counted
+      // when it finishes, including the automatic follow-up for text that changed while
+      // the first was in flight.
       vi.useFakeTimers();
       const resolvers: Array<(response: Response) => void> = [];
       const fetchSpy = vi.fn(
@@ -576,23 +691,77 @@ describe("useServerValidate", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(600);
       });
+      // Still one request outstanding — the tick for the changed text was declined.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      const resolveFirst = must(resolvers[0], "the first request never resolved");
+      await act(async () => {
+        resolveFirst(jsonResponse({ valid: true }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // That settle both counted itself and immediately dispatched the follow-up for
+      // "second", which is now the one outstanding request.
+      expect(result.current.settledCount).toBe(1);
       expect(fetchSpy).toHaveBeenCalledTimes(2);
 
-      const resolveNewer = must(resolvers[1], "the second request never resolved");
+      const resolveSecond = must(resolvers[1], "the second request never resolved");
       await act(async () => {
-        resolveNewer(jsonResponse({ valid: true }));
+        resolveSecond(jsonResponse({ valid: true }));
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(result.current.settledCount).toBe(1);
+      expect(result.current.settledCount).toBe(2);
+      unmount();
+    });
+  });
 
-      // The older, superseded request now answers too — discarded by `seqRef`, same as
-      // its effect on `message`, so it must not bump the counter either.
-      const resolveOlder = must(resolvers[0], "the first request never resolved");
+  describe("the in-flight gate", () => {
+    // Minor from the final review: `use-server-validate.ts:118` had no gate on
+    // *dispatch*, only on which response wins (`seqRef`). Measured consequence: ten
+    // seconds of realistic typing against a 2.5s round trip (representative of `docker
+    // compose config` on a loaded NAS) produced 14 requests with up to 4 running
+    // concurrently — each one a temp file written into the app's own directory, a real
+    // subprocess, and a delete.
+
+    it("does not start a second request while one is still in flight", async () => {
+      vi.useFakeTimers();
+      const resolvers: Array<(response: Response) => void> = [];
+      const fetchSpy = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const { rerender, unmount } = renderHook(({ text }) => useServerValidate("app1", text), {
+        initialProps: { text: "first" },
+      });
+
       await act(async () => {
-        resolveOlder(jsonResponse({ valid: true }));
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // Keep "typing" well past two more debounce windows while the first request is
+      // still unresolved — the exact shape of the measured bug.
+      rerender({ text: "second" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      rerender({ text: "third" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+
+      // Still exactly one request outstanding.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // Cleans up: let it resolve so nothing leaks into the next test.
+      const resolveFirst = must(resolvers[0], "the first request never resolved");
+      await act(async () => {
+        resolveFirst(jsonResponse({ valid: true }));
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(result.current.settledCount).toBe(1);
       unmount();
     });
   });
