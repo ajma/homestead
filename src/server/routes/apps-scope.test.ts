@@ -1,4 +1,6 @@
+import { apps } from "@server/db/schema";
 import { buildTestApp, signUpAdmin } from "@server/test-helpers";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 describe("app scope enforcement", () => {
@@ -96,4 +98,65 @@ describe("app scope enforcement", () => {
       await app.close();
     });
   }
+
+  it("tells a scoped admin nothing about a system app outside their scope", async () => {
+    // `DELETE /api/apps/:id` checks scope (via `loadApp`) before it checks `isSystem`
+    // (`apps.ts:599-600`), so an out-of-scope system app 404s today, by construction —
+    // never 409, which would confirm to a scoped admin that an app they cannot see
+    // exists at all. Nothing else pins that ordering: a refactor that hoisted the
+    // `isSystem` check above `loadApp` would turn this into a 409 and nothing would
+    // notice.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    // Adopt a system app as the admin.
+    app.deps.host.files.set("cloudflared/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "cloudflared", services: {} }),
+      stderr: "",
+    });
+    const adopted = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["cloudflared"] },
+    });
+    const appId = adopted.json().adopted[0].id;
+    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, appId));
+
+    // Create a scoped admin with an empty allowlist — cannot see the system app above.
+    const scopedEmail = `scoped-${Math.random().toString(36).slice(2)}@example.com`;
+    await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { cookie },
+      payload: {
+        email: scopedEmail,
+        password: "correct-horse-battery",
+        name: "Scoped Admin",
+        role: "admin",
+        scopeAllApps: false,
+        appIds: [],
+      },
+    });
+    const signIn = await app.inject({
+      method: "POST",
+      url: "/api/auth/sign-in/email",
+      payload: { email: scopedEmail, password: "correct-horse-battery" },
+    });
+    const scopedCookie = String(signIn.headers["set-cookie"] ?? "").split(";")[0] ?? "";
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}`,
+      headers: { cookie: scopedCookie },
+    });
+
+    // 404 — never 409. A 409 confirms the app exists.
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: "not_found" });
+
+    await app.close();
+  });
 });

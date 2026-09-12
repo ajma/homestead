@@ -167,14 +167,15 @@ describe("SetupWizard", () => {
     expect(screen.queryByRole("button", { name: /Skip/ })).toBeNull();
   });
 
-  it("does not double-fire a step's completion from a second click while the first is still in flight", async () => {
+  it("disables Skip once a click puts its completion in flight", async () => {
     // `StepImport`'s real Skip button disables itself once `pending` is true
     // (`disabled={pending || busy}`), and by the time this test's second `fireEvent.click`
     // runs, RTL has already flushed the first click's `setPending(true)` — so the button
     // is disabled in the DOM and jsdom refuses to dispatch the second click at all. That
     // proves Skip disables itself; it proves nothing about `markComplete`'s own
     // `pendingRef` guard, since the click never reaches the handler a second time either
-    // way. The test below drives both clicks past that masking.
+    // way — see "guards markComplete itself against a second call that lands before the
+    // DOM disables Skip" below for that.
     const completeCalls: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -191,14 +192,11 @@ describe("SetupWizard", () => {
     mount();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: /Import/ })).toBeTruthy());
-    const skip = screen.getByRole("button", { name: /Skip/ });
-    fireEvent.click(skip);
+    const skip = screen.getByRole("button", { name: /Skip/ }) as HTMLButtonElement;
     fireEvent.click(skip);
 
     await waitFor(() => expect(completeCalls.length).toBeGreaterThan(0));
-    // Give any errant second dispatch a chance to land before asserting its absence.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(completeCalls).toHaveLength(1);
+    expect(skip.disabled).toBe(true);
   });
 
   it("guards markComplete itself against a second call that lands before the DOM disables Skip", async () => {
