@@ -13,6 +13,7 @@ function user(over: Partial<ManagedUser> = {}): ManagedUser {
     name: "Ann Admin",
     role: "admin",
     scopeAllApps: true,
+    appIds: [],
     disabledAt: null,
     createdAt: 1_800_000_000,
     ...over,
@@ -201,6 +202,45 @@ describe("UserManager", () => {
     expect(put?.body).toEqual({ scopeAllApps: false, appIds: ["a1"] });
   });
 
+  // Important finding from Task 6/7's review: `GET /api/users` used to omit `appIds`
+  // entirely, so this dialog always opened blank for an already-scoped user — an admin
+  // narrowing access couldn't see what they were narrowing from, and saving silently
+  // replaced the real scope with whatever the blank picker happened to have checked.
+  it("opens the scope picker with a viewer's current two apps already checked", async () => {
+    const calls = stubFetch([
+      (url, init) => usersList(url, init, [user({ scopeAllApps: false, appIds: ["a1", "a3"] })]),
+      (url, init) =>
+        appsList(url, init, [
+          app({ id: "a1", displayName: "Jellyfin" }),
+          app({ id: "a2", slug: "gitea", displayName: "Gitea" }),
+          app({ id: "a3", slug: "radarr", displayName: "Radarr" }),
+        ]),
+      (url, init) =>
+        init?.method === "PUT" && /\/scope$/.test(url)
+          ? json(200, { scopeAllApps: false, appIds: ["a1", "a3"] })
+          : null,
+    ]);
+    mount();
+
+    await waitFor(() => expect(screen.getByText("Ann Admin")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Edit scope" }));
+    const dialog = screen.getByRole("dialog");
+
+    // `scopeAllApps: false` on the user means the checklist is already showing, with no
+    // need to touch the "Specific apps" radio first.
+    await waitFor(() => expect(within(dialog).getByLabelText("Jellyfin")).toBeTruthy());
+    expect((within(dialog).getByLabelText("Jellyfin") as HTMLInputElement).checked).toBe(true);
+    expect((within(dialog).getByLabelText("Gitea") as HTMLInputElement).checked).toBe(false);
+    expect((within(dialog).getByLabelText("Radarr") as HTMLInputElement).checked).toBe(true);
+
+    // Saving without touching anything must round-trip exactly the two apps that were
+    // pre-checked, not an empty selection.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const put = calls.find((c) => c.method === "PUT");
+    expect(put?.body).toEqual({ scopeAllApps: false, appIds: ["a1", "a3"] });
+  });
+
   // BINDING CHECK 1 (task-7-brief.md Step 3): sending `appIds` alongside a
   // `scopeAllApps: true` update must never happen — `appIds` is meaningless once scope
   // is "all apps", and a stale selection from an earlier "specific apps" session must
@@ -299,6 +339,41 @@ describe("UserManager", () => {
     const patch = calls.find((c) => c.method === "PATCH");
     expect(patch?.body).toEqual({ disabled: false });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("promotes a viewer to admin", async () => {
+    const calls = stubFetch([
+      (url, init) =>
+        usersList(url, init, [user({ id: "u2", name: "Vera Viewer", role: "viewer" })]),
+      (_url, init) =>
+        init?.method === "PATCH"
+          ? json(200, user({ id: "u2", name: "Vera Viewer", role: "admin" }))
+          : null,
+    ]);
+    mount();
+
+    await waitFor(() => expect(screen.getByText("Vera Viewer")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Make admin" }));
+
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch?.body).toEqual({ role: "admin" });
+  });
+
+  it("renders the last_admin refusal as a sentence when a role change would demote the last admin", async () => {
+    stubFetch([
+      (url, init) => usersList(url, init, [user()]),
+      (_url, init) => (init?.method === "PATCH" ? json(409, { error: "last_admin" }) : null),
+    ]);
+    mount();
+
+    await waitFor(() => expect(screen.getByText("Ann Admin")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Make viewer" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/cannot remove the last administrator/i)).toBeTruthy(),
+    );
+    expect(screen.queryByText("last_admin")).toBeNull();
   });
 
   it("renders the server's last_admin refusal as a sentence, not a slug, and stays open", async () => {

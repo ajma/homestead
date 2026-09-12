@@ -31,6 +31,15 @@ import type { SetupStepProps } from "./SetupWizard";
  * — a stand-in that deliberately ignores `pending` to prove `SetupWizard`'s own
  * double-call guard holds without help — this is a real step, so it disables itself
  * properly rather than relying only on that backstop.
+ *
+ * Skip is also gated on `busy`, the argument `AdoptPanel`'s `actions` render prop
+ * supplies — true for the entire window between a click on Adopt and that request
+ * settling. `pending` alone cannot cover this window: it only becomes true once
+ * `onComplete` has already fired, which is exactly one macrotask too late. Without
+ * `busy`, checking a directory, clicking Adopt, then clicking Skip before the POST
+ * resolves fires `onComplete` immediately — the wizard advances and marks import done
+ * while `StepImport` unmounts out from under the still-in-flight request, and nothing
+ * ever tells the admin whether that directory was actually adopted.
  */
 export function StepImport({ onComplete, pending, skippable }: SetupStepProps) {
   return (
@@ -46,12 +55,13 @@ export function StepImport({ onComplete, pending, skippable }: SetupStepProps) {
       <AdoptPanel
         onAllAdopted={onComplete}
         disabled={pending}
-        actions={
+        showComposeFile
+        actions={(busy) =>
           skippable && (
             <button
               type="button"
               onClick={onComplete}
-              disabled={pending}
+              disabled={pending || busy}
               className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
             >
               Skip

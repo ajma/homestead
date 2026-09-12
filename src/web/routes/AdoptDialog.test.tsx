@@ -68,6 +68,22 @@ describe("AdoptDialog", () => {
     expect(screen.getByLabelText(/gitea/)).toBeTruthy();
   });
 
+  it("renders project name, container count and running state, but not the compose file", async () => {
+    // Task 6's extraction moved this row markup into the shared `AdoptPanel` and, along
+    // the way, added `composeFile` to it unconditionally — a change specified only for
+    // `StepImport`, that silently altered this dialog's Phase 1E-reviewed row content.
+    // Nothing here asserted row content before, which is exactly how that slipped past
+    // review; this pins the dialog back to what it rendered before the extraction.
+    stubScan();
+    mount();
+    await waitFor(() => expect(screen.getByLabelText(/jellyfin/)).toBeTruthy());
+    const row = screen.getByLabelText(/jellyfin/).closest("label");
+    expect(row?.textContent).toContain("jellyfin");
+    expect(row?.textContent).toContain("2 containers");
+    expect(row?.textContent).toContain("running");
+    expect(row?.textContent).not.toContain("compose.yaml");
+  });
+
   it("shows an already-adopted directory without a checkbox", async () => {
     // Offering to adopt something already adopted produces a confusing 409 the user
     // cannot act on.

@@ -3,11 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@web/api/client";
 
 /**
- * `GET /api/users`'s row shape (`publicUser` in `src/server/routes/users.ts`) — never a
- * password hash, and never per-user `appIds`: the list endpoint doesn't carry them
- * (only `GET /api/me` does, for the caller's own account, off `AuthContext`). A scope
- * editor for another user therefore has no way to learn which apps they're currently
- * scoped to from this list alone; see `UserManager`'s own comment on that gap.
+ * `GET /api/users`'s row shape (`publicUser` plus `appIds` in
+ * `src/server/routes/users.ts`) — never a password hash. `appIds` comes from a second,
+ * whole-list query over `user_app_scope` grouped by user, so `EditScopeDialog` can
+ * pre-select what a user is currently scoped to instead of opening blank.
  */
 export type ManagedUser = {
   id: string;
@@ -15,6 +14,7 @@ export type ManagedUser = {
   name: string;
   role: Role;
   scopeAllApps: boolean;
+  appIds: string[];
   disabledAt: number | null;
   createdAt: number;
 };

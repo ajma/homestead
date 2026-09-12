@@ -22,10 +22,11 @@ type AdoptResponse = { adopted: AdoptedApp[]; failed: AdoptFailure[] };
  * different chrome around it: `AdoptDialog` wraps this in `DialogShell` with a Cancel
  * button, `StepImport` wraps it in the wizard's own step chrome with a Skip button. Both
  * pass this component their own `actions` slot for that footer button, and their own
- * meaning of "we're done here" as `onAllAdopted` — everything above the footer, and the
- * footer's Adopt button itself, is identical between the two, which is the entire point
- * of pulling it out rather than copying it: two adoption flows that quietly drifted on
- * the partial-failure path would be a regression in a flow nobody runs twice.
+ * meaning of "we're done here" as `onAllAdopted` — the selection, submission, and
+ * partial-failure handling are identical between the two (the entire point of pulling
+ * it out rather than copying it: two adoption flows that quietly drifted on the
+ * partial-failure path would be a regression in a flow nobody runs twice); the one row
+ * field that isn't, `showComposeFile`, is called out on its own prop below.
  *
  * `submitting` is plain component state, set synchronously in the click handler before
  * `mutate` is even called — deliberately not derived from the mutation's own `isPending`.
@@ -36,10 +37,22 @@ type AdoptResponse = { adopted: AdoptedApp[]; failed: AdoptFailure[] };
  * see the stale, still-checked row and report done before the request even resolves.
  * Hiding the submitted rows through ordinary `useState` happens in the same React commit
  * as the click, so nothing async has to elapse before they disappear.
+ *
+ * `actions` is a render prop, not a plain node, precisely so a caller's footer button can
+ * see `submitting.size > 0` (`busy`, below) without duplicating this component's own
+ * submission state. `StepImport`'s Skip is the reason this exists: it was previously
+ * gated only on the wizard's own `pending`, which is false for the entire window between
+ * a click on Adopt and that request settling — so Skip could fire mid-adopt, advance the
+ * wizard, and unmount this panel before any success or partial-failure result ever
+ * rendered, leaving the admin unable to tell which checked directories actually got
+ * adopted. `AdoptDialog`'s Cancel has no equivalent problem (closing mid-adopt just
+ * abandons the dialog; the mutation already in flight still completes and still
+ * invalidates the app list), so it ignores the argument.
  */
 export function AdoptPanel({
   onAllAdopted,
   disabled = false,
+  showComposeFile = false,
   actions,
 }: {
   /** Called once a submitted batch comes back with zero failures, right after
@@ -49,14 +62,23 @@ export function AdoptPanel({
    * silently drop directories the user explicitly asked for. */
   onAllAdopted: () => void;
   /** An extra reason, beyond this component's own submitting state, that the Adopt
-   * button must not fire — `StepImport` passes its `pending` (the wizard's own
-   * completion request already in flight for this very success) here. `AdoptDialog` has
-   * no equivalent and leaves this at its default. */
+   * button (and every checkbox — a row that looks interactive while nothing it does can
+   * take effect is the "looks broken" bug this guards against) must not fire —
+   * `StepImport` passes its `pending` (the wizard's own completion request already in
+   * flight for this very success) here. `AdoptDialog` has no equivalent and leaves this
+   * at its default. */
   disabled?: boolean;
+  /** Adds the compose filename to each row's caption. Specified for `StepImport`
+   * (spec §8/§9's four-field listing) only — `AdoptDialog` predates that field and its
+   * own review never asked for it, so it stays opt-in rather than changing what the
+   * already-reviewed dialog renders out from under that review. */
+  showComposeFile?: boolean;
   /** Footer buttons rendered before Adopt: `AdoptDialog`'s Cancel, `StepImport`'s Skip.
-   * The only chrome difference between the two callers that lives outside this
+   * Receives `busy` — true while this panel's own submit is in flight — so a caller's
+   * button can refuse to fire on top of an adopt neither of them has seen the result of
+   * yet. The only chrome difference between the two callers that lives outside this
    * component. */
-  actions?: ReactNode;
+  actions?: (busy: boolean) => ReactNode;
 }) {
   const { data, isPending: scanPending, isError: scanFailed } = useScan(true);
   const queryClient = useQueryClient();
@@ -206,13 +228,15 @@ export function AdoptPanel({
                       type="checkbox"
                       checked={selected.has(dir.directory)}
                       onChange={() => toggle(dir.directory)}
+                      disabled={disabled}
                     />
                     <span className="flex-1">
                       <span className="font-medium text-slate-900 dark:text-slate-100">
                         {dir.directory}
                       </span>
                       <span className="ml-2 text-xs text-slate-500">
-                        {dir.projectName ?? "no project name"} · {dir.composeFile} ·{" "}
+                        {dir.projectName ?? "no project name"} ·{" "}
+                        {showComposeFile && <>{dir.composeFile} · </>}
                         {dir.containerCount} container
                         {dir.containerCount === 1 ? "" : "s"} ·{" "}
                         {dir.running ? "running" : "stopped"}
@@ -260,7 +284,7 @@ export function AdoptPanel({
       </div>
 
       <div className="mt-4 flex justify-end gap-2">
-        {actions}
+        {actions?.(submitting.size > 0)}
         <button
           type="button"
           onClick={handleAdopt}

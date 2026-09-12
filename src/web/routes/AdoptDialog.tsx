@@ -11,13 +11,17 @@ import { AdoptPanel } from "@web/routes/AdoptPanel";
  * selection, submission and partial-failure handling — lives in `AdoptPanel` (Task 6),
  * shared with the setup wizard's `StepImport`, which needs the identical behaviour
  * behind a Skip button instead of this dialog's Cancel.
+ *
+ * Leaves `AdoptPanel`'s `showComposeFile` at its default `false` deliberately: this
+ * dialog's row content was Phase 1E's reviewed UI, and `StepImport`'s four-field
+ * listing (spec §8/§9) was never specified for this dialog too.
  */
 export function AdoptDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogShell title="Adopt from disk" onClose={onClose}>
       <AdoptPanel
         onAllAdopted={onClose}
-        actions={
+        actions={() => (
           <button
             type="button"
             onClick={onClose}
@@ -25,7 +29,7 @@ export function AdoptDialog({ onClose }: { onClose: () => void }) {
           >
             Cancel
           </button>
-        }
+        )}
       />
     </DialogShell>
   );

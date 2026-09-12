@@ -172,11 +172,64 @@ describe("StepImport", () => {
     expect(screen.queryByRole("button", { name: /Skip/ })).toBeNull();
   });
 
-  it("disables Skip and Adopt while the wizard's own completion request is pending", async () => {
+  it("does not fire Skip while an adopt is in flight, even though the wizard's own pending is still false", async () => {
+    // The Critical finding: Skip was gated only on the wizard's own `pending`, which
+    // stays false for the entire window between clicking Adopt and that POST settling —
+    // `pending` only flips true once `onComplete` has already fired, one step too late.
+    // Checking a directory, clicking Adopt, then clicking Skip before the response
+    // arrives must not advance the wizard: doing so leaves the admin with no idea
+    // whether the directory they just checked was actually adopted.
+    let resolvePost!: (response: Response) => void;
+    const postResponse = new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return postResponse;
+        return new Response(JSON.stringify(SCAN), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    const { onComplete } = mount({ pending: false });
+    await waitFor(() => expect(screen.getByLabelText(/jellyfin/)).toBeTruthy());
+    fireEvent.click(screen.getByLabelText(/jellyfin/));
+    fireEvent.click(screen.getByRole("button", { name: /Adopt 1/ }));
+
+    // The adopt POST is now in flight; the wizard has not been told to complete
+    // anything yet, so its own `pending` prop is still false.
+    expect(screen.getByRole("button", { name: /Skip/ }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /Skip/ }));
+    expect(onComplete).not.toHaveBeenCalled();
+
+    resolvePost(
+      new Response(JSON.stringify({ adopted: [{ id: "a1", directory: "jellyfin" }], failed: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it("disables Skip, Adopt, and the row checkboxes while the wizard's own completion request is pending", async () => {
     stubScan();
     mount({ pending: true });
     await waitFor(() => expect(screen.getByLabelText(/jellyfin/)).toBeTruthy());
-    fireEvent.click(screen.getByLabelText(/jellyfin/));
+    const checkbox = screen.getByLabelText(/jellyfin/);
+    // The "checkboxes stay toggleable while disabled" finding: the row looked broken
+    // because `disabled` reached the Adopt button but not the checkbox itself.
+    //
+    // Harness note: jsdom does not implement the HTML activation-behavior check that
+    // makes a real browser's `disabled` attribute block a checkbox's click-driven state
+    // change — `fireEvent.click` here still flips `checked` in jsdom even with the
+    // attribute present, so this test can only assert the attribute exists, not that a
+    // click is inert. A real browser (and screen readers, which key off the attribute)
+    // do honour it.
+    expect(checkbox.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(checkbox);
     expect(screen.getByRole("button", { name: /Skip/ }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: /Adopt 1/ }).hasAttribute("disabled")).toBe(true);
   });

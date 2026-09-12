@@ -172,19 +172,16 @@ function CreateUserDialog({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * `PUT /api/users/:id/scope`'s editor. Starts from `{ scopeAllApps: user.scopeAllApps,
- * appIds: [] }` rather than the user's persisted app list — `GET /api/users` (this
- * screen's only read of any user but the caller) never returns `appIds`; only
- * `GET /api/me` does, off the caller's own `AuthContext`. Reopening this dialog for an
- * already-scoped user therefore cannot show which apps are currently checked — the
- * admin picks a fresh set each time, which is exactly what `PUT`'s full-replace
- * semantics already expect.
+ * `PUT /api/users/:id/scope`'s editor. Pre-selects `user.appIds` — `GET /api/users`
+ * now carries them (a second, whole-list query over `user_app_scope`) — so reopening
+ * this dialog for an already-scoped user shows exactly what they can currently reach,
+ * rather than a blank checklist an admin would otherwise overwrite unseeingly.
  */
 function EditScopeDialog({ user, onClose }: { user: ManagedUser; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { data: apps } = useAdminApps();
   const [scopeAllApps, setScopeAllApps] = useState(user.scopeAllApps);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set(user.appIds));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -355,6 +352,22 @@ export function UserManager({
     }
   }
 
+  async function handleRoleChange(user: ManagedUser, role: Role) {
+    setRowError(null);
+    try {
+      await apiFetch(`/api/users/${user.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ role }),
+      });
+      invalidate();
+    } catch (error) {
+      // Demoting the last active admin hits the same 409 `last_admin` guard as
+      // disabling or deleting one — `describeUserError` already maps it to one
+      // sentence regardless of which field triggered it.
+      setRowError(describeUserError(error, "Something went wrong changing this user's role."));
+    }
+  }
+
   async function handleDisableConfirmed(user: ManagedUser) {
     await apiFetch(`/api/users/${user.id}`, {
       method: "PATCH",
@@ -410,7 +423,19 @@ export function UserManager({
                     <p className="font-medium text-slate-900 dark:text-slate-100">{user.name}</p>
                     <p className="text-xs text-slate-500">{user.email}</p>
                   </td>
-                  <td className="px-4 py-3 capitalize">{user.role}</td>
+                  <td className="px-4 py-3 capitalize">
+                    {user.role}{" "}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleRoleChange(user, user.role === "admin" ? "viewer" : "admin")
+                      }
+                      disabled={disabled}
+                      className="ml-1 text-slate-500 underline disabled:opacity-50"
+                    >
+                      {user.role === "admin" ? "Make viewer" : "Make admin"}
+                    </button>
+                  </td>
                   <td className="px-4 py-3">
                     {scopeSummary(user)}{" "}
                     <button

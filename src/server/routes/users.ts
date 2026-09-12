@@ -131,7 +131,23 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/users", async (request) => {
     requireAdmin(request);
-    return db.select(publicUser).from(users);
+    const rows = await db.select(publicUser).from(users);
+
+    // One query over the whole scope table, grouped in memory, rather than a
+    // per-user query — the point of the fix this replaces (`EditScopeDialog`
+    // could not show what it was editing because this endpoint carried no
+    // `appIds` at all) is defeated if listing N users now costs N+1 queries.
+    const scopeRows = await db
+      .select({ userId: userAppScope.userId, appId: userAppScope.appId })
+      .from(userAppScope);
+    const appIdsByUser = new Map<string, string[]>();
+    for (const { userId, appId } of scopeRows) {
+      const appIds = appIdsByUser.get(userId);
+      if (appIds) appIds.push(appId);
+      else appIdsByUser.set(userId, [appId]);
+    }
+
+    return rows.map((row) => ({ ...row, appIds: appIdsByUser.get(row.id) ?? [] }));
   });
 
   app.post("/api/users", async (request, reply) => {
