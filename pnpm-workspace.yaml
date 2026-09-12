@@ -1,5 +1,8 @@
+nodeLinker: hoisted
 allowBuilds:
   cpu-features: false
   esbuild: true
   protobufjs: false
   ssh2: false
+minimumReleaseAgeExclude:
+  - yaml@2.9.1
