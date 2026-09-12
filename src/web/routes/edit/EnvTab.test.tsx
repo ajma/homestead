@@ -3,6 +3,7 @@
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { envKey } from "@web/api/admin";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { EnvTab } from "@web/routes/edit/EnvTab";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
@@ -574,5 +575,215 @@ describe("EnvTab", () => {
     await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
 
     expect(within(puidRow).getByDisplayValue(MASK)).toBeTruthy();
+  });
+
+  it("does not leave the secret retrievable from the query cache after leaving raw mode", async () => {
+    // The Critical finding this guards: raw mode used to fetch through `useQuery`, keyed
+    // `[...envKey(appId), "raw"]` — TanStack's default `gcTime` (~5 minutes) kept the
+    // whole file, secrets included, retrievable from the cache long after the tab went
+    // back to Table and re-masked. There is nothing here worth caching, so there must be
+    // nothing here TO retrieve.
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => ({
+        status: 200,
+        body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true },
+      }),
+    });
+    const { client } = mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    await waitFor(() => expect(screen.getByLabelText(".env file contents")).toBeTruthy());
+    expect((screen.getByLabelText(".env file contents") as HTMLTextAreaElement).value).toBe(
+      FILE_CONTENT,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Table" }));
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    expect(client.getQueryData([...envKey(app.id), "raw"])).toBeUndefined();
+  });
+
+  it("asks the server again on a second raw-mode open, rather than reusing anything cached", async () => {
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => ({
+        status: 200,
+        body: { content: FILE_CONTENT, hash: FILE_HASH, exists: true },
+      }),
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    await waitFor(() => expect(screen.getByLabelText(".env file contents")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Table" }));
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Raw" }));
+    await waitFor(() => expect(screen.getByLabelText(".env file contents")).toBeTruthy());
+
+    const wholeFileCalls = revealCalls().filter((call) => call.key === undefined);
+    expect(wholeFileCalls).toHaveLength(2);
+  });
+
+  it("stops and asks when a concurrent edit changed the same key, instead of silently keeping the older value", async () => {
+    // The first Important finding: `upsertEnv` reapplies the browser's own value
+    // unconditionally on retry. When the concurrent edit touched the SAME key, that
+    // silently reverts whatever it just set — for a secrets file, often a credential
+    // rotation.
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: (key) => {
+        if (key) return { status: 200, body: { key, value: "hunter2" } };
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true } }
+          : { status: 200, body: { content: "DB_PASSWORD=rotated\n", hash: "h2", exists: true } };
+      },
+      put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("hunter2"), { target: { value: "newpass" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Someone else changed this variable/);
+
+    // Not silently applied — only one PUT has happened, the one that got refused.
+    expect(puts()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Keep mine/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save with these choices" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const body = JSON.parse(puts()[1]?.body as string);
+    expect(body).toEqual({ content: "DB_PASSWORD=newpass\n", expectedHash: "h2" });
+    expect(screen.queryByText(/Someone else changed this variable/)).toBeNull();
+  });
+
+  it("merges a table edit onto a different concurrently-added key silently, with no prompt", async () => {
+    // The binding check proving the two conflict checks above didn't just disable the
+    // auto-merge feature entirely: a concurrent edit to a DIFFERENT key than the one this
+    // tab touched still merges without asking, and nothing is lost either side.
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: (key) => {
+        if (key) return { status: 200, body: { key, value: "hunter2" } };
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true } }
+          : {
+              status: 200,
+              body: { content: "DB_PASSWORD=hunter2\nEXTRA=fromssh\n", hash: "h2", exists: true },
+            };
+      },
+      put: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h3" } },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("hunter2"), { target: { value: "newpass" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const secondBody = JSON.parse(puts()[1]?.body as string);
+    expect(secondBody).toEqual({
+      content: "DB_PASSWORD=newpass\nEXTRA=fromssh\n",
+      expectedHash: "h2",
+    });
+    expect(screen.queryByText(/Someone else changed/)).toBeNull();
+    expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull();
+  });
+
+  it("treats a concurrently deleted key as a conflict instead of silently re-adding it", async () => {
+    // The second Important finding: `upsertEnv`'s `findLastIndex` returns -1 for a key
+    // that is gone from the fresh file, and appends it again — quietly undoing whatever
+    // deleted it.
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: (key) => {
+        if (key) return { status: 200, body: { key, value: "hunter2" } };
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true } }
+          : { status: 200, body: { content: "OTHER=1\n", hash: "h2", exists: true } };
+      },
+      put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("hunter2"), { target: { value: "newpass" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Removed on disk while you were editing it/);
+
+    // Not silently re-added — only the refused PUT has happened so far.
+    expect(puts()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("radio", { name: /Accept the removal/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save with these choices" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const body = JSON.parse(puts()[1]?.body as string);
+    expect(body).toEqual({ content: "OTHER=1\n", expectedHash: "h2" });
+  });
+
+  it("distinguishes an unreadable file from a stale hash when the retry's own fetch fails", async () => {
+    // The Minor finding: the retry's whole-file fetch can itself answer 409
+    // `env_unreadable` — a permissions problem, not a concurrent edit — and showing
+    // "Someone changed this file since you loaded it" for that would name the wrong
+    // cause.
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: (key) => {
+        if (key) return { status: 200, body: { key, value: "hunter2" } };
+        wholeCalls++;
+        if (wholeCalls === 1) {
+          return {
+            status: 200,
+            body: { content: "DB_PASSWORD=hunter2\n", hash: "h1", exists: true },
+          };
+        }
+        return {
+          status: 409,
+          body: {
+            error: "env_unreadable",
+            message:
+              "A .env file exists but Homestead cannot read it. Check its ownership and mode.",
+          },
+        };
+      },
+      put: [{ status: 409, body: { error: "stale_hash", message: "Changed on disk." } }],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("hunter2"), { target: { value: "newpass" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/cannot be read right now/);
+
+    expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull();
+    expect(puts()).toHaveLength(1);
   });
 });

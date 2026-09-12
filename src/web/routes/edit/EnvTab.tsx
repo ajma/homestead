@@ -1,10 +1,11 @@
+import type { EnvEntry } from "@shared/env-file";
 import { maskEnv, parseEnv, serialiseEnv, upsertEnv } from "@shared/env-file";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { envKey, useEnv } from "@web/api/admin";
 import { ApiError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import type { EditAppContext } from "@web/routes/EditApp";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 
 /** `POST /api/apps/:id/env/reveal` with a `key`: one row, and nothing else. */
@@ -13,6 +14,9 @@ type RevealOne = { key: string; value: string };
 /** `POST /api/apps/:id/env/reveal` with no `key`: the whole file, for raw mode and for save. */
 type RevealAll = { content: string; hash: string | null; exists: boolean };
 
+/** The two 409 causes this tab can hit — see `conflictKindFrom` for how they're told apart. */
+type ConflictKind = "stale_hash" | "env_unreadable" | "unknown";
+
 /**
  * A save the server refused with 409: the file on disk no longer matches the hash this
  * tab last saw. `mine` is the exact content this tab tried to write — captured at the
@@ -20,8 +24,28 @@ type RevealAll = { content: string; hash: string | null; exists: boolean };
  * was refused rather than something reconstructed after the fact from state that may have
  * moved on. `disk` is `null` while that copy is still being fetched, or if the fetch
  * itself failed — same shape `ComposeTab`'s own `Conflict` uses, for the same reason.
+ * `kind` is what lets the banner below say the right thing: a stale hash and an
+ * unreadable file are both a 409, but only one of them means "someone else touched this
+ * file" — see the Minor finding this exists to fix.
  */
-type Conflict = { message: string; disk: RevealAll | null; mine: string };
+type Conflict = { kind: ConflictKind; message: string; disk: RevealAll | null; mine: string };
+
+/**
+ * One table-edited key whose value on the fresh disk copy no longer matches what this
+ * tab loaded it as when the user started editing it — either changed to something else,
+ * or removed outright (`theirs: null`). Every OTHER key the user touched still merges
+ * silently; only these need a decision, which is what makes this narrower than raw
+ * mode's whole-file `Conflict`.
+ */
+type KeyConflictEntry = { key: string; mine: string; theirs: string | null };
+
+/**
+ * The table-edit retry's own conflict. `safeContent` already has every non-conflicting
+ * edited key reapplied onto the fresh file — `handleResolveKeyConflict` only has to layer
+ * the user's per-key choices for `entries` on top of it, never re-deriving what was
+ * already safe to merge.
+ */
+type KeyConflict = { entries: KeyConflictEntry[]; safeContent: string; freshHash: string | null };
 
 function messageFrom(error: unknown, fallback: string): string {
   if (error instanceof ApiError) {
@@ -29,6 +53,23 @@ function messageFrom(error: unknown, fallback: string): string {
     if (typeof body?.message === "string") return body.message;
   }
   return error instanceof Error ? error.message : fallback;
+}
+
+/**
+ * Both `PUT .../env` and the whole-file `POST .../env/reveal` answer 409 for two
+ * unrelated reasons — a stale hash (someone else wrote the file) or `env_unreadable`
+ * (nobody can read it right now, hash or no hash) — and the server tells them apart in
+ * the body's `error` field. Conflating them used to show "Someone changed this file
+ * since you loaded it" for a permissions problem no concurrent edit caused; see the
+ * Minor finding this exists to fix.
+ */
+function conflictKindFrom(error: unknown): ConflictKind {
+  if (error instanceof ApiError && error.status === 409) {
+    const body = error.body as { error?: unknown } | undefined;
+    if (body?.error === "env_unreadable") return "env_unreadable";
+    if (body?.error === "stale_hash") return "stale_hash";
+  }
+  return "unknown";
 }
 
 /**
@@ -50,6 +91,13 @@ function loadErrorMessage(error: unknown): string {
   return messageFrom(error, "Could not load this app's environment variables.");
 }
 
+/** The last-occurrence value of `key`, or `undefined` if it is not present at all. */
+function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
+  return entries.findLast(
+    (e): e is Extract<EnvEntry, { kind: "pair" }> => e.kind === "pair" && e.key === key,
+  )?.value;
+}
+
 /**
  * The edit page's `.env` tab: a masked key/value table with reveal-per-row, plus a raw
  * mode for bulk paste.
@@ -68,18 +116,27 @@ function loadErrorMessage(error: unknown): string {
  * request — never a whole-file fetch filtered client-side, which would put every secret
  * in the browser to display one. Raw mode is the one deliberate exception: bulk paste
  * needs the real text, so switching to it fetches the whole file once, through the same
- * `app:secrets`-gated endpoint.
+ * `app:secrets`-gated endpoint — and, per the standard this phase holds to (the browser
+ * must never hold a secret it is not displaying), that fetch is a plain, uncached
+ * `apiFetch`: a second raw-mode open re-asks the server rather than serving a query-cache
+ * hit, and leaving raw mode without an unsaved edit drops the text this tab was holding
+ * rather than keeping it around for the rest of the session. See `loadRaw` and the mode
+ * toggle's own comment.
  *
  * `PUT .../env` carries the same hash guard `ComposeTab` uses and can answer the same
  * 409 — and `.env` is the file that holds secrets, so an SSH edit clobbered here is worse
- * than one in compose. Table edits get the gentler of two responses: since they only ever
- * change specific keys via `upsertEnv`, a 409 there is handled by refetching the file and
- * reapplying those same key edits onto whatever is on disk now, merging both changes
- * without asking — nothing is lost either way, the same guarantee `upsertEnv` already
- * gives untouched lines within a single save. A raw-mode edit cannot be merged like that
- * — it is arbitrary free-form text, not a set of named key changes — so it gets exactly
+ * than one in compose. Table edits get the gentler of two responses, but only when it is
+ * actually safe: since they only ever change specific keys via `upsertEnv`, a 409 there
+ * is handled by refetching the file and reapplying those same key edits onto whatever is
+ * on disk now — *for every key the concurrent edit left alone*. A key the concurrent
+ * edit also touched, or deleted outright, does not get silently resolved that way: doing
+ * so would let this tab's older value quietly win, which for a secrets file is exactly
+ * the credential-rotation-reversion the hash guard exists to prevent. Those keys stop and
+ * ask instead, via `KeyConflict` — see `handleSave`'s retry branch and
+ * `handleResolveKeyConflict`. A raw-mode edit cannot be merged like that at all — it is
+ * arbitrary free-form text, not a set of named key changes — so it gets exactly
  * `ComposeTab`'s explicit, two-choice conflict UI instead: load the disk version, or keep
- * mine and overwrite it deliberately. See `handleSave`, `handleUseDiskVersion` and
+ * mine and overwrite it deliberately. See `handleUseDiskVersion` and
  * `handleKeepMineOverwrite`.
  */
 export function EnvTab() {
@@ -95,6 +152,13 @@ export function EnvTab() {
   // one edit any row sharing that name can produce, regardless of which row's input the
   // user typed into.
   const [edits, setEdits] = useState<Record<string, string>>({});
+  // The value each edited key was revealed as, captured the moment `handleReveal`
+  // succeeds — before the user has typed anything. A row only ever becomes editable
+  // after its own reveal (see the table's `value !== undefined` gate below), so every
+  // key in `edits` is guaranteed to have one of these. It is what `handleSave`'s retry
+  // compares the fresh file against to tell "nobody touched this key" from "someone
+  // else's edit landed on it too" — see the Important findings this exists to fix.
+  const [editBaselines, setEditBaselines] = useState<Record<string, string>>({});
   // Revealed values, keyed by row INDEX rather than key: two rows can share a key (see
   // the "shadowed" note below), and each reveals independently even though both would
   // return the same value.
@@ -106,42 +170,89 @@ export function EnvTab() {
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [confirmingUseDisk, setConfirmingUseDisk] = useState(false);
   const [confirmingOverwrite, setConfirmingOverwrite] = useState(false);
+  const [keyConflict, setKeyConflict] = useState<KeyConflict | null>(null);
+  const [keyResolutions, setKeyResolutions] = useState<Record<string, "mine" | "theirs">>({});
 
-  // Raw mode's own copy of the file, seeded exactly once from `rawQuery` — the same
-  // "seed once, then this state is the only truth" pattern `ComposeTab` uses for its
-  // editor, so a background refetch never overwrites text someone is mid-edit on. Kept
-  // disabled once loaded (see `enabled` below) for a reason specific to this endpoint:
-  // unlike compose.yaml, re-fetching this is another whole-file secret reveal, audited
-  // every time — nothing here should trigger that just because a `staleTime` elapsed.
-  const rawLoadedRef = useRef(false);
+  // Raw mode's own copy of the file. Unlike `ComposeTab`'s `text` (which the query
+  // underneath is allowed to go stale relative to, forever, once seeded), this is
+  // deliberately NOT backed by `useQuery`: re-fetching this is another whole-file secret
+  // reveal, audited every time on the server, and TanStack's own cache would otherwise
+  // keep every secret in `content` retrievable via `queryClient.getQueryData` for its
+  // `gcTime` (~5 minutes by default) after the tab stopped showing it. `loadRaw` below is
+  // a plain `apiFetch` instead — there is nothing here worth caching, and every load
+  // should count as someone looking again.
   const [rawText, setRawText] = useState("");
   const [rawBaseline, setRawBaseline] = useState<string | null>(null);
   const [rawHash, setRawHash] = useState<string | null>(null);
   const [rawLoaded, setRawLoaded] = useState(false);
+  const [rawLoading, setRawLoading] = useState(false);
+  const [rawError, setRawError] = useState<unknown>(null);
 
-  const rawQuery = useQuery({
-    queryKey: [...envKey(appId), "raw"],
-    enabled: mode === "raw" && !rawLoaded,
-    queryFn: () =>
-      apiFetch<RevealAll>(`/api/apps/${appId}/env/reveal`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      }),
-    retry: false,
-  });
+  // Guards every raw-fetch `.then`/`.catch` below: once this tab unmounts (navigating to
+  // another app or another tab), a reveal that was still in flight must not land a real
+  // secret into a component instance nothing will ever render again.
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
+
+  const fetchWhole = useCallback((): Promise<RevealAll> => {
+    return apiFetch<RevealAll>(`/api/apps/${appId}/env/reveal`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }, [appId]);
+
+  const loadRaw = useCallback(async () => {
+    setRawLoading(true);
+    setRawError(null);
+    try {
+      const data = await fetchWhole();
+      if (!mountedRef.current) return;
+      setRawText(data.content);
+      setRawBaseline(data.content);
+      setRawHash(data.hash);
+      setRawLoaded(true);
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setRawError(error);
+    } finally {
+      if (mountedRef.current) setRawLoading(false);
+    }
+  }, [fetchWhole]);
 
   useEffect(() => {
-    if (rawLoadedRef.current) return;
-    if (!rawQuery.data) return;
-    rawLoadedRef.current = true;
-    setRawText(rawQuery.data.content);
-    setRawBaseline(rawQuery.data.content);
-    setRawHash(rawQuery.data.hash);
-    setRawLoaded(true);
-  }, [rawQuery.data]);
+    if (mode !== "raw" || rawLoaded || rawLoading) return;
+    void loadRaw();
+  }, [mode, rawLoaded, rawLoading, loadRaw]);
 
   const rawDirty = rawBaseline !== null && rawText !== rawBaseline;
   const dirty = Object.keys(edits).length > 0 || rawDirty;
+
+  /**
+   * The Table/Raw toggle. Leaving raw mode with nothing unsaved is the moment this tab
+   * stops needing the real file text at all, so that is exactly when it drops it —
+   * clearing `rawLoaded` is what makes the *next* switch back to Raw ask the server
+   * again instead of silently reusing what's still sitting in state. An unsaved raw
+   * edit is the one exception: it is the user's own in-progress work, not a passively
+   * held secret, and dropping it here would silently discard typing the same way a
+   * background refetch must never be allowed to (see `handleSave`'s own comment on
+   * this) — so it survives the switch, same as before, and the table reflects it (see
+   * `entries` below).
+   */
+  function switchMode(next: "table" | "raw") {
+    if (mode === "raw" && next === "table" && !rawDirty) {
+      setRawText("");
+      setRawBaseline(null);
+      setRawHash(null);
+      setRawLoaded(false);
+      setRawError(null);
+    }
+    setMode(next);
+  }
 
   // A `Set` of in-flight row indices, not a single `useMutation` shared across every row.
   // `useMutation` keeps its per-call `onSuccess`/`onError` on one field of the shared
@@ -166,6 +277,7 @@ export function EnvTab() {
         body: JSON.stringify({ key }),
       });
       setRevealed((prev) => ({ ...prev, [index]: data.value }));
+      setEditBaselines((prev) => ({ ...prev, [key]: data.value }));
     } catch (error) {
       setRevealErrors((prev) => ({
         ...prev,
@@ -189,13 +301,6 @@ export function EnvTab() {
     return serialiseEnv(entries);
   }
 
-  function fetchWhole(): Promise<RevealAll> {
-    return apiFetch<RevealAll>(`/api/apps/${appId}/env/reveal`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-  }
-
   function putEnv(content: string, expectedHash: string | null): Promise<{ hash: string }> {
     return apiFetch<{ hash: string }>(`/api/apps/${appId}/env`, {
       method: "PUT",
@@ -205,14 +310,21 @@ export function EnvTab() {
 
   function onSaveSuccess(content: string, hash: string) {
     setEdits({});
+    setEditBaselines({});
     setRevealed({});
     setRevealErrors({});
-    rawLoadedRef.current = true;
-    setRawText(content);
-    setRawBaseline(content);
-    setRawHash(hash);
-    setRawLoaded(true);
     setConflict(null);
+    setKeyConflict(null);
+    setKeyResolutions({});
+    // Only keep tracking the real text if this tab was already doing so (i.e. raw mode
+    // is what produced this save, or a previous raw-mode load is still what's dirty). A
+    // save that started from pure table edits never had the whole file resident before
+    // this — succeeding must not be the thing that first puts it there.
+    if (rawLoaded) {
+      setRawText(content);
+      setRawBaseline(content);
+      setRawHash(hash);
+    }
     void queryClient.invalidateQueries({ queryKey: envKey(appId) });
   }
 
@@ -222,6 +334,7 @@ export function EnvTab() {
   // itself already failed safely either way.
   async function openConflict(error: unknown, mine: string) {
     setConflict({
+      kind: conflictKindFrom(error),
       message: messageFrom(error, "The file changed on disk since you loaded it."),
       disk: null,
       mine,
@@ -270,28 +383,64 @@ export function EnvTab() {
           return;
         }
 
-        // Nothing free-form is at risk here: `base.content` is exactly what this tab
-        // last fetched (the raw snapshot, untouched, or a fetch made moments ago), so
-        // refetching and reapplying `edits` on top of the fresh copy merges the user's
-        // changed keys onto whatever is on disk now instead of clobbering it — the same
-        // guarantee `upsertEnv` already gives untouched lines within one save.
-        // Declared outside the `try` so the `catch` below can still reach whichever
-        // value was last assigned — a plain `const` inside `try` would fall out of
-        // scope at the closing brace before the `catch` ever ran.
-        let retryContent = content;
+        // A table edit only ever changes specific keys, so a 409 here does not
+        // automatically need the user to adjudicate anything: refetch, then check each
+        // key this tab actually touched against the fresh copy. A key the concurrent
+        // edit left alone merges silently underneath, same as `upsertEnv` already
+        // guarantees for untouched LINES within one save. A key the concurrent edit
+        // also changed, or deleted, does not — see the module doc comment.
         try {
           const fresh = await fetchWhole();
-          retryContent = applyEdits(fresh.content);
+          const freshEntries = parseEnv(fresh.content);
+
+          const conflicts: KeyConflictEntry[] = [];
+          const safeEdits: Record<string, string> = {};
+          for (const [key, mine] of Object.entries(edits)) {
+            const theirs = currentValueOf(freshEntries, key);
+            const baseline = editBaselines[key];
+            if (theirs === undefined) {
+              // Gone from the fresh file. `upsertEnv`'s `findLastIndex` would return -1
+              // here and silently APPEND the key again, quietly undoing whatever just
+              // deleted it — never safe to do without asking, regardless of value.
+              conflicts.push({ key, mine, theirs: null });
+            } else if (baseline !== undefined && theirs !== baseline) {
+              // Someone else's edit landed on the exact key this tab also touched.
+              // Applying the browser's older value here would silently revert
+              // whatever they just set — for a secrets file, very often a credential
+              // rotation being undone, which is the one thing the hash guard exists
+              // to prevent.
+              conflicts.push({ key, mine, theirs });
+            } else {
+              safeEdits[key] = mine;
+            }
+          }
+
+          if (conflicts.length > 0) {
+            let safeEntries = freshEntries;
+            for (const [key, value] of Object.entries(safeEdits)) {
+              safeEntries = upsertEnv(safeEntries, key, value);
+            }
+            setKeyConflict({
+              entries: conflicts,
+              safeContent: serialiseEnv(safeEntries),
+              freshHash: fresh.hash,
+            });
+            return;
+          }
+
+          const retryContent = applyEdits(fresh.content);
           const result = await putEnv(retryContent, fresh.hash);
           onSaveSuccess(retryContent, result.hash);
         } catch (retryError) {
           if (retryError instanceof ApiError && retryError.status === 409) {
-            // A second concurrent edit landed between the retry's own fetch and its
-            // PUT — rare, but the merge-and-retry trick can't be repeated forever.
-            // Falls back to the same explicit choice raw edits get. `retryContent`
-            // (the edits merged onto the fresher of the two disk copies seen so far)
-            // is a better "mine" here than the original `content` would be.
-            await openConflict(retryError, retryContent);
+            // Either a second concurrent write landed between the retry's own fetch
+            // and its PUT, or (see the Minor finding) the fetch itself failed because
+            // the file is unreadable rather than because anything is stale. Either
+            // way this is rare enough, and `content` (this tab's own attempted write)
+            // is still a better "mine" than nothing — falls back to the same explicit
+            // whole-file choice raw edits get, with `openConflict` telling the two
+            // causes apart in what it shows.
+            await openConflict(retryError, content);
           } else {
             setSaveError(messageFrom(retryError, "Could not save the .env file."));
           }
@@ -302,10 +451,55 @@ export function EnvTab() {
     }
   }
 
+  function chooseKeyResolution(key: string, resolution: "mine" | "theirs") {
+    setKeyResolutions((prev) => ({ ...prev, [key]: resolution }));
+  }
+
+  function handleCancelKeyConflict() {
+    setKeyConflict(null);
+    setKeyResolutions({});
+  }
+
+  const keyConflictReady = Boolean(
+    keyConflict?.entries.every((entry) => keyResolutions[entry.key] !== undefined),
+  );
+
+  async function handleResolveKeyConflict() {
+    if (!keyConflict) return;
+    let entries = parseEnv(keyConflict.safeContent);
+    for (const entry of keyConflict.entries) {
+      if (keyResolutions[entry.key] === "mine") {
+        entries = upsertEnv(entries, entry.key, entry.mine);
+      }
+      // "theirs" needs no action: `safeContent` was built from the fresh file, so it
+      // already carries whatever is actually there now — the changed value, or the
+      // key's continued absence if it was deleted.
+    }
+    const finalContent = serialiseEnv(entries);
+    setSaveError(null);
+    setSaving(true);
+    try {
+      const result = await putEnv(finalContent, keyConflict.freshHash);
+      onSaveSuccess(finalContent, result.hash);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // Yet another concurrent write landed between this resolution and its own PUT.
+        // Rare enough that looping the per-key dialog again is not worth it — falls
+        // back to the same whole-file choice raw edits get.
+        await openConflict(error, finalContent);
+        setKeyConflict(null);
+        setKeyResolutions({});
+      } else {
+        setSaveError(messageFrom(error, "Could not save the .env file."));
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function handleUseDiskVersion() {
     const disk = conflict?.disk;
     if (!disk) return;
-    rawLoadedRef.current = true;
     setRawText(disk.content);
     setRawBaseline(disk.content);
     setRawHash(disk.hash);
@@ -370,7 +564,7 @@ export function EnvTab() {
       <div className="flex gap-2" role="tablist" aria-label="View">
         <button
           type="button"
-          onClick={() => setMode("table")}
+          onClick={() => switchMode("table")}
           aria-pressed={mode === "table"}
           className={`rounded-lg px-3 py-1.5 text-sm ${
             mode === "table"
@@ -382,7 +576,7 @@ export function EnvTab() {
         </button>
         <button
           type="button"
-          onClick={() => setMode("raw")}
+          onClick={() => switchMode("raw")}
           aria-pressed={mode === "raw"}
           className={`rounded-lg px-3 py-1.5 text-sm ${
             mode === "raw"
@@ -396,7 +590,11 @@ export function EnvTab() {
 
       {conflict && (
         <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          <p className="font-medium">Someone changed this file since you loaded it.</p>
+          <p className="font-medium">
+            {conflict.kind === "env_unreadable"
+              ? "This app's .env file cannot be read right now."
+              : "Someone changed this file since you loaded it."}
+          </p>
           <p className="mt-1">
             {conflict.message} Your edits have not been touched — the save that would have
             overwritten them was refused instead.
@@ -434,6 +632,72 @@ export function EnvTab() {
               className="rounded-lg border border-rose-400 px-2 py-1 text-xs font-medium text-rose-700 disabled:opacity-50 dark:border-rose-700 dark:text-rose-300"
             >
               Keep mine — overwrite the disk version
+            </button>
+          </div>
+        </div>
+      )}
+
+      {keyConflict && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <p className="font-medium">
+            {keyConflict.entries.length === 1
+              ? "Someone else changed this variable while you were editing it."
+              : "Someone else changed some of these variables while you were editing them."}
+          </p>
+          <p className="mt-1">
+            Every other change you made still merges automatically. Only the keys below need your
+            decision — applying your value underneath could silently undo theirs.
+          </p>
+          <ul className="mt-2 flex flex-col gap-2">
+            {keyConflict.entries.map((entry) => (
+              <li
+                key={entry.key}
+                className="rounded-lg border border-amber-200 p-2 dark:border-amber-900"
+              >
+                <p className="font-mono text-xs font-medium">{entry.key}</p>
+                <p className="mt-1 text-xs">
+                  {entry.theirs === null
+                    ? "Removed on disk while you were editing it."
+                    : "Changed on disk while you were editing it."}
+                </p>
+                <div className="mt-2 flex flex-col gap-1 text-xs">
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="radio"
+                      name={`resolve-${entry.key}`}
+                      checked={keyResolutions[entry.key] === "mine"}
+                      onChange={() => chooseKeyResolution(entry.key, "mine")}
+                    />
+                    Keep mine: {entry.mine}
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="radio"
+                      name={`resolve-${entry.key}`}
+                      checked={keyResolutions[entry.key] === "theirs"}
+                      onChange={() => chooseKeyResolution(entry.key, "theirs")}
+                    />
+                    {entry.theirs === null ? "Accept the removal" : `Keep theirs: ${entry.theirs}`}
+                  </label>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleCancelKeyConflict}
+              className="rounded-lg border border-amber-400 px-2 py-1 text-xs font-medium dark:border-amber-700"
+            >
+              Keep editing my version
+            </button>
+            <button
+              type="button"
+              disabled={!keyConflictReady || saving}
+              onClick={handleResolveKeyConflict}
+              className="rounded-lg border border-rose-400 px-2 py-1 text-xs font-medium text-rose-700 disabled:opacity-50 dark:border-rose-700 dark:text-rose-300"
+            >
+              {saving ? "Saving…" : "Save with these choices"}
             </button>
           </div>
         </div>
@@ -547,9 +811,9 @@ export function EnvTab() {
             aria-label=".env file contents"
             className="min-h-64 w-full rounded-2xl border border-slate-200 p-3 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
           />
-        ) : rawQuery.isError ? (
+        ) : rawError ? (
           <p className="p-4 text-sm text-rose-600 dark:text-rose-400">
-            {loadErrorMessage(rawQuery.error)}
+            {loadErrorMessage(rawError)}
           </p>
         ) : (
           <p className="p-4 text-sm text-slate-500 dark:text-slate-400">Loading the whole file…</p>
@@ -559,7 +823,7 @@ export function EnvTab() {
         <button
           type="button"
           onClick={handleSave}
-          disabled={!dirty || saving}
+          disabled={!dirty || saving || keyConflict !== null}
           className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
         >
           {saving ? "Saving…" : "Save"}
