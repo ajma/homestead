@@ -341,6 +341,13 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     events,
     icons: { metadata: iconMetadata, store: iconStore },
     preflight: async () => ({ ok: true }),
+    // Overridable per test the same way `preflight` is (see its comment above): a plain
+    // function property on `app.deps`, read fresh at request time by the Cloudflare
+    // routes rather than captured once at registration. Throws by default so a test that
+    // forgets to override it fails loudly instead of making a real network call.
+    fetch: (async () => {
+      throw new Error("cloudflare fetch should not be called in tests without an override");
+    }) as unknown as typeof fetch,
   });
 
   // Assign each app instance its own source address to avoid rate-limit bucket
