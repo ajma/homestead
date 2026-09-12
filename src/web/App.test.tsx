@@ -342,6 +342,15 @@ describe("the setup route guard", () => {
     expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
   });
 
+  it("has TanStack's default retry behaviour in production, not silently disabled", () => {
+    // Cheap and synchronous, and the reason the test below is allowed to turn retries
+    // off for its own duration: this is what proves production never does. `App.tsx`'s
+    // own `defaultOptions` sets only `refetchOnWindowFocus: false` — if a future change
+    // added `retry: false` there, the test below couldn't catch it (turning retries off
+    // only makes THAT test faster, not fail); this assertion is the one that would.
+    expect(queryClient.getDefaultOptions().queries?.retry).not.toBe(false);
+  });
+
   it("shows the retry screen, not a blank page, when the setup-state fetch fails", async () => {
     // The gap `SetupWizard.test.tsx` used to paper over: that file's own "does not
     // strand the user" test rendered `<SetupWizard>` in isolation, which passes
@@ -359,16 +368,21 @@ describe("the setup route guard", () => {
         return json(200, []);
       }),
     );
-    renderAt("/");
 
-    // No `retry: false` here — this is the real singleton `queryClient` from `App.tsx`,
-    // which (unlike `useSession`'s query) does not opt `useSetupState` out of the
-    // library default of 3 retries with backoff, so this genuinely takes several
-    // seconds to settle into `isError`. Faking that away would be exactly the kind of
-    // shortcut that made the isolated wizard test worthless as proof of real behaviour.
-    await waitFor(() => expect(screen.getByText(/Homestead is unavailable/i)).toBeTruthy(), {
-      timeout: 12_000,
-    });
-    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
-  }, 15_000);
+    // Still the real singleton `queryClient` from `App.tsx` and the real `Routed` route
+    // tree — exported from `App.tsx` for exactly this reason — but with `retry` flipped
+    // off for the duration of this one test, so the assertion below is about WHICH
+    // screen a failure renders, not about waiting out react-query's real backoff to get
+    // there. Restored in `finally` so every other test (and the "default retry
+    // behaviour" test above/below it) keeps proving against the real production default.
+    const defaults = queryClient.getDefaultOptions();
+    queryClient.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retry: false } });
+    try {
+      renderAt("/");
+      await waitFor(() => expect(screen.getByText(/Homestead is unavailable/i)).toBeTruthy());
+      expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    } finally {
+      queryClient.setDefaultOptions(defaults);
+    }
+  });
 });

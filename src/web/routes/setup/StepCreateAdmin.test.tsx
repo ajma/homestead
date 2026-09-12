@@ -24,6 +24,7 @@ function ok(body: unknown = { id: "u1" }, status = 201) {
 function mount(state: SetupState, onComplete = vi.fn(), pending = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
+    client,
     onComplete,
     ...render(
       <QueryClientProvider client={client}>
@@ -91,21 +92,30 @@ describe("StepCreateAdmin", () => {
   });
 
   it("refuses a weak password client-side, with no request", async () => {
+    // Its own fresh stub, not a shared one left behind by an earlier test: this must
+    // prove nothing was ever sent, and a mock inherited with prior calls already
+    // recorded on it would make that assertion meaningless regardless of run order.
+    vi.stubGlobal("fetch", vi.fn());
     mount(FRESH_STATE);
     fillForm({ password: "short", confirmPassword: "short" });
     fireEvent.click(screen.getByRole("button", { name: /Create admin/ }));
 
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.getByText(/at least 12 characters/i)).toBeTruthy();
+    // The whole point of client-side validation is not bothering the server with
+    // something already known to be wrong.
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("refuses a mismatched confirmation client-side, with no request", async () => {
+    vi.stubGlobal("fetch", vi.fn());
     mount(FRESH_STATE);
     fillForm({ password: "correct-horse-battery", confirmPassword: "correct-horse-battery-2" });
     fireEvent.click(screen.getByRole("button", { name: /Create admin/ }));
 
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.getByText(/do not match/i)).toBeTruthy();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("renders the server's error slug as a sentence", async () => {
@@ -151,13 +161,20 @@ describe("StepCreateAdmin", () => {
   it("advances on success without asking the user to log in again", async () => {
     ok();
     const onComplete = vi.fn();
-    mount(FRESH_STATE, onComplete);
+    const { client } = mount(FRESH_STATE, onComplete);
+    // Seeded so `invalidateQueries` has an actual cache entry to mark stale — the thing
+    // this test names is that the session the signup just established gets picked up
+    // without a second login, which lives or dies on this exact call, not on any DOM
+    // element (this component never renders a Sign-in button under any circumstances,
+    // so asserting its absence would hold even if the invalidation were deleted).
+    client.setQueryData(["me"], { id: "stale", role: "viewer" });
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
     fillForm();
     fireEvent.click(screen.getByRole("button", { name: /Create admin/ }));
 
     await waitFor(() => expect(onComplete).toHaveBeenCalled());
-    // No login form appeared in between — the route signs the caller in.
-    expect(screen.queryByRole("button", { name: /Sign in/ })).toBeNull();
+    expect(invalidateSpy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ["me"] }));
+    expect(client.getQueryState(["me"])?.isInvalidated).toBe(true);
   });
 
   it("renders as already-done, with no form, when a user already exists", () => {

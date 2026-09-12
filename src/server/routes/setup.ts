@@ -1,11 +1,29 @@
 import { type HostCheck, SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
 import { eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
+import { audit } from "../audit.js";
 import { requireAdmin } from "../auth/context.js";
 import { setupState, users } from "../db/schema.js";
 
 /** The table has exactly one row, `id: 1`, always upserted rather than inserted fresh. */
 const SETUP_STATE_ROW_ID = 1;
+
+/**
+ * Optional, and only meaningful for `step === "host"`: the wizard's own `StepVerifyHost`
+ * lets someone continue past a failed mount preflight on purpose (see that component's
+ * doc comment), but nothing recorded that they did. The client sends exactly the
+ * `HostCheck.preflight` failure it already showed on screen — this route doesn't
+ * re-run the preflight itself, both because that would double the container cost of a
+ * completion that already ran it once (via `GET /api/setup/host-check`) and because the
+ * point is to record what the user actually SAW, not to re-derive a fresh answer that
+ * might have changed under them.
+ */
+const completeStepBody = z
+  .object({
+    preflightOverride: z.object({ reason: z.string() }).optional(),
+  })
+  .optional();
 
 /**
  * `completed_steps` is a JSON column, and this is the table that decides whether a user
@@ -130,13 +148,25 @@ export async function setupRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { step: string } }>(
     "/api/setup/state/:step/complete",
     async (request, reply) => {
-      requireAdmin(request);
+      const ctx = requireAdmin(request);
 
       const { step } = request.params;
       if (!(SETUP_STEPS as readonly string[]).includes(step)) {
         // Rejected, not stored: a typo in a client must not put a value in `completed_steps`
         // that no reader understands.
         return reply.code(400).send({ error: "unknown_step" });
+      }
+
+      const body = completeStepBody.parse(request.body);
+      if (step === "host" && body?.preflightOverride) {
+        // A breadcrumb, not a gate — this must never block completing the step. The
+        // failure this exists to catch (spec §10: a host-invalid bind source silently
+        // created as an empty directory) can surface weeks later, long after the wizard
+        // is gone; this is what points back at the warning someone clicked past.
+        await audit(db, ctx, {
+          action: "setup.host_preflight_overridden",
+          detail: { reason: body.preflightOverride.reason },
+        });
       }
 
       const { steps: current } = await readStoredSteps();

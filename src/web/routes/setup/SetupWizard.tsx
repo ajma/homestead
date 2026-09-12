@@ -1,5 +1,6 @@
-import { SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
-import { useCompleteStep, useSetupState } from "@web/api/setup";
+import { type HostCheck, SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
+import { useQueryClient } from "@tanstack/react-query";
+import { hostCheckKey, useCompleteStep, useSetupState } from "@web/api/setup";
 import { useRef, useState } from "react";
 import { StepCreateAdmin } from "./StepCreateAdmin";
 import { StepImport } from "./StepImport";
@@ -101,6 +102,7 @@ function stepIndex(step: WizardStep): number {
 export function SetupWizard() {
   const setup = useSetupState();
   const completeStep = useCompleteStep();
+  const queryClient = useQueryClient();
   // Local-only, and deliberately never reflected in the URL or any storage: a reload
   // must forget this and fall back to `resumeStep`. It exists solely so someone can
   // glance back at an earlier, already-completed step — reviewing it must not become
@@ -166,7 +168,17 @@ export function SetupWizard() {
     if (step === "admin") {
       setup.refetch().finally(settle);
     } else {
-      completeStep.mutate(step, { onSettled: settle });
+      // `StepVerifyHost`'s own `useHostCheck` query (`gcTime: 0`) is still active — and
+      // its cached answer still in the shared query client — for as long as that step
+      // stays mounted, which it is right up to the moment its own `onComplete` fires
+      // this. Reading it here, rather than widening `SetupStepProps.onComplete` to carry
+      // a payload every other step would have to ignore, tells the server exactly what
+      // the user saw without re-running the (costly, container-spinning) preflight.
+      const hostCheck =
+        step === "host" ? queryClient.getQueryData<HostCheck>(hostCheckKey) : undefined;
+      const preflightOverride =
+        hostCheck && !hostCheck.preflight.ok ? { reason: hostCheck.preflight.reason } : undefined;
+      completeStep.mutate({ step, preflightOverride }, { onSettled: settle });
     }
   }
 

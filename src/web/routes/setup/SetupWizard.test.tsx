@@ -154,4 +154,69 @@ describe("SetupWizard", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(completeCalls).toHaveLength(1);
   });
+
+  it("reports the failing preflight reason when continuing past a failed mount check", async () => {
+    // Step 2 deliberately allows continuing past a failed preflight (see
+    // `StepVerifyHost`'s own doc comment) — this proves the wizard actually tells the
+    // server what the user saw, rather than the completion looking identical to a clean
+    // pass. `src/server/routes/setup-state.test.ts` covers the server side (that this
+    // becomes an audit entry); this covers the client actually sending it.
+    const failingHostCheck: HostCheck = {
+      composeRoot: "/srv/homestead/apps",
+      docker: { ok: true, version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "arm64" },
+      preflight: { ok: false, reason: "marker not visible from the daemon" },
+    };
+    const completeCalls: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/setup/host-check") return json(200, failingHostCheck);
+        if (url.endsWith("/complete")) {
+          completeCalls.push(init?.body ? JSON.parse(String(init.body)) : undefined);
+          return json(200, { completedSteps: ["admin", "host"], completedAt: null });
+        }
+        return json(200, { completedSteps: ["admin"], completedAt: null });
+      }),
+    );
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Verify host/ })).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText(/marker not visible from the daemon/i)).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    await waitFor(() => expect(completeCalls).toHaveLength(1));
+    expect(completeCalls[0]).toEqual({
+      preflightOverride: { reason: "marker not visible from the daemon" },
+    });
+  });
+
+  it("sends no preflightOverride when the mount check passed", async () => {
+    // The mirror image: proves the wizard isn't sending a payload on every host
+    // completion regardless of outcome, which would make the audit meaningless.
+    const completeCalls: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/setup/host-check") return json(200, HEALTHY_HOST_CHECK);
+        if (url.endsWith("/complete")) {
+          completeCalls.push(init?.body ? JSON.parse(String(init.body)) : undefined);
+          return json(200, { completedSteps: ["admin", "host"], completedAt: null });
+        }
+        return json(200, { completedSteps: ["admin"], completedAt: null });
+      }),
+    );
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Verify host/ })).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("27.3.1")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+
+    await waitFor(() => expect(completeCalls).toHaveLength(1));
+    // No body at all — `useCompleteStep` only attaches one when there's an override to
+    // report, per its own doc comment — not an empty `{}` that would still put a
+    // needless `content-type: application/json` on every ordinary step completion.
+    expect(completeCalls[0]).toBeUndefined();
+  });
 });

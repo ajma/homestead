@@ -1,3 +1,4 @@
+import { auditLog } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
@@ -131,6 +132,66 @@ describe("POST /api/setup/state/:step/complete", () => {
       headers: { cookie: viewer.cookie },
     });
     expect(res.statusCode).toBe(403);
+  });
+
+  it("audits an overridden preflight failure when the host step completes anyway", async () => {
+    // Step 2 deliberately lets someone continue past a failed mount preflight — the
+    // right call, since a wrong bind mount is fixed outside Homestead. But nothing else
+    // records that they did, and the failure this check exists to catch (spec §10) can
+    // surface weeks later. This is the breadcrumb: the client reports exactly the
+    // failing `HostCheck.preflight` it already showed on screen.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/setup/state/host/complete",
+      headers: { cookie },
+      payload: { preflightOverride: { reason: "marker not visible from the daemon" } },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const entries = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "setup.host_preflight_overridden"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.detail).toEqual({ reason: "marker not visible from the daemon" });
+  });
+
+  it("does not audit anything when the host step completes with a passing preflight", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/state/host/complete",
+      headers: { cookie },
+    });
+
+    const entries = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "setup.host_preflight_overridden"));
+    expect(entries).toHaveLength(0);
+  });
+
+  it("ignores a preflightOverride sent for a step other than host", async () => {
+    // The audit exists specifically for the mount preflight — a client sending this
+    // alongside an unrelated step must not fabricate a breadcrumb for a check that was
+    // never run.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    await app.inject({
+      method: "POST",
+      url: "/api/setup/state/import/complete",
+      headers: { cookie },
+      payload: { preflightOverride: { reason: "should be ignored" } },
+    });
+
+    const entries = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "setup.host_preflight_overridden"));
+    expect(entries).toHaveLength(0);
   });
 });
 

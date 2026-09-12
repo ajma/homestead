@@ -30,12 +30,23 @@ export function useSetupState(options: { enabled?: boolean } = {}) {
  * Not how `admin` gets marked done: that step is derived server-side from whether a
  * user exists (see `src/shared/setup.ts`), never recorded through this endpoint. A
  * caller that just created the first admin should refetch `useSetupState` instead.
+ *
+ * `preflightOverride` is optional and only meaningful for the `host` step: it tells the
+ * server the failing `HostCheck.preflight` the user actually saw on screen when they
+ * chose to continue anyway, so it can leave a breadcrumb (`src/server/routes/setup.ts`)
+ * instead of the completion looking identical to a clean pass. Omitted entirely for
+ * every other step, and for `host` when the preflight was passing.
  */
 export function useCompleteStep() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (step: SetupStep) =>
-      apiFetch<SetupState>(`/api/setup/state/${step}/complete`, { method: "POST" }),
+    mutationFn: (variables: { step: SetupStep; preflightOverride?: { reason: string } }) =>
+      apiFetch<SetupState>(`/api/setup/state/${variables.step}/complete`, {
+        method: "POST",
+        ...(variables.preflightOverride
+          ? { body: JSON.stringify({ preflightOverride: variables.preflightOverride }) }
+          : {}),
+      }),
     onSuccess: (state) => queryClient.setQueryData(setupStateKey, state),
   });
 }
