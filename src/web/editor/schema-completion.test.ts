@@ -68,6 +68,18 @@ const SCHEMA = {
         image: { type: "string", description: "The image to start the container from." },
         restart: { type: "string" },
         cgroup: { type: "string", enum: ["private", "host"] },
+        network_mode: { type: "string" },
+        // No `restart` property here — mirrors the real schema, where `deploy` only has
+        // `restart_policy`. Exercises Important 1's `deploy.restart` case.
+        deploy: { properties: { restart_policy: { type: "object" } } },
+        // No `properties` at all — a shell command has no schema-described sub-keys.
+        // Exercises Important 1's block-scalar case: a line inside `command: |` that
+        // happens to read `restart: ` is not the same path as a service's own `restart`.
+        command: { type: "string" },
+        // A property whose name is itself the literal 7-character string `"tag:x"`
+        // (quotes included) — exists only so Minor 4's test can tell the last-unquoted-
+        // colon split apart from a leftmost split by which one it matches.
+        '"tag:x"': { type: "string", enum: ["A", "B"] },
       },
     },
   },
@@ -162,5 +174,80 @@ describe("schemaCompletion", () => {
     const source = schemaCompletion(SCHEMA);
     const text = "nonsense:\n  ";
     expect(await complete(source, contextAt(text, text.length, true))).toBeNull();
+  });
+
+  // Important 1: the curated table must not fire at a path the schema doesn't recognise,
+  // even though the trailing segment matches a curated key.
+  it("offers nothing for restart under deploy, where the real key is restart_policy", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = "services:\n  web:\n    deploy:\n      restart: ";
+    expect(await complete(source, contextAt(text, text.length, true))).toBeNull();
+  });
+
+  it("offers nothing for a 'restart: ' line inside a command block scalar", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = ["services:", "  web:", "    command: |", "      echo hi", "      restart: "].join(
+      "\n",
+    );
+    expect(await complete(source, contextAt(text, text.length, true))).toBeNull();
+  });
+
+  // The binding check that proves the gate fixes rather than disables the feature: a real
+  // `restart:` directly under a service (a path the schema does know) must still offer the
+  // curated list. This is exercised above too by "offers the curated table after a colon
+  // when the schema has no enum", which uses the same service-level position.
+  it("still offers the curated restart values directly under a service", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = "services:\n  web:\n    restart: ";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result?.options.map((o) => o.label)).toEqual([
+      "no",
+      "always",
+      "on-failure",
+      "unless-stopped",
+    ]);
+  });
+
+  // Important 2: network_mode's curated list is genuinely partial (compose also accepts
+  // `service:<name>` and `container:<name>`), so its note must say so rather than reading
+  // as exhaustive.
+  it("marks the network_mode curated list as common values, not the full set", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = "services:\n  web:\n    network_mode: ";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result?.options.map((o) => o.label)).toEqual(["bridge", "host", "none"]);
+    expect(result?.options[0]?.info).toBe(
+      "Hand-maintained value; not present in the vendored schema. These are common values, not the full set compose accepts.",
+    );
+  });
+
+  // Minor 3: YAML only starts a comment at a `#` that opens the line or follows whitespace.
+  // Modeled on a git build-context URL fragment (`...r.git#branch:dir`) — the `#` here sits
+  // mid-token, so it is not a comment starter, and must not suppress completion.
+  it("does not treat a '#' that isn't preceded by whitespace as a comment", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = "services:\n  web:\n    restart: unless-stopped#pinned";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result?.options.map((o) => o.label)).toEqual([
+      "no",
+      "always",
+      "on-failure",
+      "unless-stopped",
+    ]);
+  });
+
+  // Minor 4: the key/value split must use the nearest unquoted colon before the cursor, not
+  // the first colon in the line — otherwise a quoted key containing a colon (e.g. a Traefik
+  // label like `"traefik.http:rule": `) gets split at the colon embedded inside the quotes
+  // instead of the real separator after the closing quote.
+  it("splits on the colon after a closed quoted key, not one embedded inside it", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = 'services:\n  web:\n    "tag:x": ';
+    const result = await complete(source, contextAt(text, text.length, true));
+    // A leftmost split would extract the key as `"tag` (truncated at the embedded colon,
+    // never closed) — matching nothing and returning null. The rightmost, quote-aware
+    // split extracts the whole `"tag:x"`, matching this schema's property of that exact
+    // name and returning its enum.
+    expect(result?.options.map((o) => o.label)).toEqual(["A", "B"]);
   });
 });
