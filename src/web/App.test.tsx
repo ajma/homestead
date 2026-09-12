@@ -50,6 +50,7 @@ const jellyfin: AdminApp = {
   adoptedAt: 1_800_000_000,
   archivedAt: null,
   lastDeployAt: null,
+  runningJobId: null,
 };
 
 /**

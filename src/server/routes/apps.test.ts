@@ -572,6 +572,188 @@ describe("app inventory API", () => {
 
       expect(selectsForThree).toBe(selectsForOne);
     });
+
+    it("never issues its query for a viewer", async () => {
+      // A response-level assertion can't catch the gate going missing: `lastDeployAt`
+      // is stripped from the viewer DTO whether or not this query actually ran, so
+      // asserting on the JSON body passes either way. What has to be observed instead
+      // is the query itself — `deployTimestamps`' own `select({ appId, lastDeployAt })`
+      // shape, which is unique among this handler's queries (the base `apps` select
+      // takes no argument at all, and `runningJobs`' shape is `{ id, appId }`).
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const selectSpy = vi.spyOn(app.deps.db, "select");
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      const ranDeployTimestampsQuery = selectSpy.mock.calls.some(
+        (call) => call[0] !== undefined && "lastDeployAt" in call[0],
+      );
+      selectSpy.mockRestore();
+
+      expect(ranDeployTimestampsQuery).toBe(false);
+      await app.close();
+    });
+  });
+
+  describe("runningJobId", () => {
+    it("shows the running job's id for an admin", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const jobId = ulid();
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: jobId, appId: id, kind: "up", status: "running" });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].runningJobId).toBe(jobId);
+      await app.close();
+    });
+
+    it("is null for an app with no running job", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "succeeded", finishedAt: 100 });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].runningJobId).toBeNull();
+      await app.close();
+    });
+
+    it("is absent from the viewer DTO even while a job is running", async () => {
+      // The security-shaped assertion: a viewer must not receive `runningJobId` at all,
+      // not merely receive it as `null`. Seeding an actually-running job is what makes
+      // this a real test of the field's absence rather than one that would pass anyway
+      // because the fixture happened to have nothing running.
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, adminCookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "running" });
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.json()[0]).not.toHaveProperty("runningJobId");
+      await app.close();
+    });
+
+    it("never issues its query for a viewer", async () => {
+      // Same reasoning as `deployTimestamps`' sibling test above: the field is stripped
+      // from the viewer DTO regardless of whether this query ran, so only observing the
+      // query itself — `runningJobs`' own `select({ id, appId })` shape — can tell the
+      // gate apart from a version that runs it unconditionally.
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const selectSpy = vi.spyOn(app.deps.db, "select");
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      const ranRunningJobsQuery = selectSpy.mock.calls.some(
+        (call) => call[0] !== undefined && "id" in call[0] && "appId" in call[0],
+      );
+      selectSpy.mockRestore();
+
+      expect(ranRunningJobsQuery).toBe(false);
+      await app.close();
+    });
+
+    it("keeps a running job's id when Docker is unreachable, rather than hard-nulling it", async () => {
+      // The `!dockerReachable` branch builds its `AdminApp` from a stub status rather
+      // than a real one, and it would be easy for that branch's own `runningMap.get(...)
+      // ?? null` to get simplified to a bare `null` without anything noticing — every
+      // other test of this branch only checks `status`/`statusDetail`. A job that really
+      // is running is what makes this observe the fallback rather than the case (no job
+      // running) both a correct and a broken version would agree on.
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const jobId = ulid();
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: jobId, appId: id, kind: "up", status: "running" });
+
+      const originalListContainers = app.deps.host.listContainers.bind(app.deps.host);
+      app.deps.host.listContainers = async () => {
+        throw new Error("Cannot connect to the Docker daemon");
+      };
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].runningJobId).toBe(jobId);
+
+      app.deps.host.listContainers = originalListContainers;
+      await app.close();
+    });
+  });
+
+  describe("runningJobId on GET /api/apps/:id", () => {
+    it("shows the running job's id for an admin", async () => {
+      // `GET /api/apps` has its own version of this test; the single-app route builds
+      // its `AdminApp` from a separately-written `runningMap.get(row.id) ?? null`
+      // (`apps.ts:576`) that nothing exercised — a mutation hard-nulling it would pass
+      // every existing test for this route, all of which use apps with no running job.
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const jobId = ulid();
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: jobId, appId: id, kind: "up", status: "running" });
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+      });
+      expect(res.json().runningJobId).toBe(jobId);
+      await app.close();
+    });
+
+    it("is absent from the viewer DTO even while a job is running", async () => {
+      // The list route gates `runningJobId` behind `can(ctx, "app:config")` before ever
+      // computing it; this route's `!can(ctx, "app:config")` branch (`apps.ts:573`)
+      // returns `toViewerApp` — which has no `runningJobId` field at all — before
+      // `deployTimestamps`/`runningJobs` are even called. Proven here rather than just
+      // read off the source, the same way the list route's sibling test is: a viewer
+      // reading this route while a job actually runs must not see the field, not merely
+      // see it as `null`.
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, adminCookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "running" });
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/apps/${id}`,
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).not.toHaveProperty("runningJobId");
+      await app.close();
+    });
   });
 
   it("never shows a viewer the raw output of docker compose config", async () => {

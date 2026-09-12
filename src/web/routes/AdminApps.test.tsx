@@ -40,29 +40,18 @@ class FakeEventSource {
   }
 }
 
-function jobRow(over: Partial<JobRow> = {}): JobRow {
-  return {
-    id: "job-1",
-    appId: "a1",
-    kind: "pull",
-    status: "running",
-    startedAt: 1_800_000_000,
-    finishedAt: null,
-    exitCode: null,
-    output: null,
-    userId: null,
-    createdAt: 1_800_000_000,
-    ...over,
-  };
-}
-
 type ActionResponse = { status: number; body: unknown };
 
 /**
- * Multiplexes one `fetch` double across the list route (`GET /api/apps`), a row's own
- * `GET /api/apps/:id/jobs`, and its `POST /api/apps/:id/actions/:kind` — mirrors
- * `ActionBar.test.tsx`'s `stubFetch`, since a row action goes through the exact same
- * `useAppActions` hook.
+ * Multiplexes one `fetch` double across the list route (`GET /api/apps`) and each row's
+ * `POST /api/apps/:id/actions/:kind` — mirrors `ActionBar.test.tsx`'s `stubFetch`, since a
+ * row action goes through the exact same `useAppActions` hook.
+ *
+ * Still answers `GET /api/apps/:id/jobs` with `extra.jobs` (default `[]`) rather than
+ * dropping the branch: a row no longer calls it (`RowActions` reads `runningJobId` off
+ * its own data — see `running-jobs.ts`), but keeping the stub honest is what makes "no
+ * calls to `/jobs`" a real assertion below rather than one that would pass by accident
+ * because the double never knew how to answer that URL in the first place.
  */
 function stubRowFetch(
   seed: AdminApp[],
@@ -122,6 +111,7 @@ const app = (over: Partial<AdminApp> = {}): AdminApp => ({
   adoptedAt: 1_800_000_000,
   archivedAt: null,
   lastDeployAt: null,
+  runningJobId: null,
   ...over,
 });
 
@@ -312,13 +302,45 @@ describe("AdminApps", () => {
     });
 
     it("disables a row's actions while that app already has a job running, matching ActionBar", async () => {
-      stubRowFetch([app()], {}, { jobs: [jobRow({ id: "existing-job", status: "running" })] });
-      mount([app()]);
+      // `runningJobId` comes straight off the row — `GET /api/apps`'s own grouped query
+      // (`running-jobs.ts`) — not from a per-row `GET .../jobs` fetch. `stubRowFetch`
+      // still answers that endpoint (see its own doc comment on why it must), but this
+      // test seeds no `jobs` extra, so a green result here cannot be masking a row that
+      // secretly still fetched it and just so happened to find a running job.
+      const runningApp = app({ runningJobId: "existing-job" });
+      stubRowFetch([runningApp]);
+      mount([runningApp]);
 
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
       );
       expect(screen.getByRole("button", { name: "Restart" }).hasAttribute("disabled")).toBe(true);
+    });
+
+    it("fetches no row's job history separately when the inventory lists several apps", async () => {
+      // The DOM looks identical whether a row reads `runningJobId` off its own data or
+      // mounts `useJobs(app.id)` to re-derive it — so the only thing that can see this
+      // defect is the request list itself. A twenty-app inventory used to fire twenty
+      // `GET /api/apps/:id/jobs` requests on load; this asserts zero, for three rows.
+      const seed = [
+        app({ id: "a1", slug: "jellyfin" }),
+        app({ id: "a2", slug: "gitea", runningJobId: "existing-job" }),
+        app({ id: "a3", slug: "pihole" }),
+      ];
+      stubRowFetch(seed);
+      mount(seed);
+
+      await waitFor(() =>
+        expect(screen.getAllByRole("button", { name: "Deploy" })).toHaveLength(3),
+      );
+      // Give any errant per-row `useJobs` fetch a chance to fire before asserting its
+      // absence.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const jobsRequests = vi
+        .mocked(fetch)
+        .mock.calls.filter(([url]) => String(url).endsWith("/jobs"));
+      expect(jobsRequests).toHaveLength(0);
     });
 
     it("disables a row's actions once one is started, until the job finishes", async () => {
@@ -353,6 +375,45 @@ describe("AdminApps", () => {
         expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppKey("a1") }),
       );
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: adminAppsKey });
+    });
+
+    it("clears a row's cached runningJobId once its job finishes, so a remount within staleTime doesn't re-disable it", async () => {
+      // Since Task 2, `adminAppsKey` is the only cache holding `runningJobId` — nothing
+      // else writes to it once a job finishes. Before this fix, a finished job's id
+      // lingered in that cache: a remount inside the list's 15s `staleTime` re-read the
+      // dead id, re-disabled Deploy/Restart and re-opened a second `JobOutput` stream for
+      // a job that had already completed. This pins the fix without invalidating the
+      // whole-inventory rollup (the sibling test above already pins that it must not).
+      const seeded = app({ runningJobId: "existing-job" });
+      stubRowFetch([seeded]);
+      const { client, unmount } = mount([seeded]);
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+      );
+
+      act(() => {
+        FakeEventSource.instances[0]?.emit("done", { status: "succeeded", exitCode: 0 });
+      });
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(false),
+      );
+      expect(client.getQueryData<AdminApp[]>(adminAppsKey)?.[0]?.runningJobId).toBeNull();
+
+      unmount();
+      render(
+        <QueryClientProvider client={client}>
+          <MemoryRouter>
+            <AdminApps />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(false),
+      );
+      expect(FakeEventSource.instances).toHaveLength(1);
     });
   });
 });

@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { envKey, useEnv } from "@web/api/admin";
 import { ApiError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
+import { useUnsavedChanges } from "@web/lib/use-unsaved-changes";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
@@ -321,6 +322,12 @@ export function EnvTab() {
   // A deletion needs no value edit to be worth saving — `removeEnv` only needs the key's
   // name, so `deletedKeys` can be non-empty while `edits` stays untouched.
   const dirty = Object.keys(edits).length > 0 || rawDirty || deletedKeys.size > 0;
+
+  // Unlike `ComposeTab`, this tab had NO protection against losing unsaved work before
+  // Task 4 — not even `beforeunload` — despite editing the one file in this app that
+  // holds credentials. `useUnsavedChanges` covers both an in-app tab click (`useBlocker`)
+  // and closing the tab or reloading (`beforeunload`) from a single `dirty` declaration.
+  const { blocked: navBlocked, proceed: proceedNav, cancel: cancelNav } = useUnsavedChanges(dirty);
 
   /**
    * The Table/Raw toggle. Leaving raw mode with nothing unsaved is the moment this tab
@@ -981,6 +988,17 @@ export function EnvTab() {
           destructive
           onConfirm={handleKeepMineOverwrite}
           onClose={() => setConfirmingOverwrite(false)}
+        />
+      )}
+
+      {navBlocked && (
+        <ConfirmDialog
+          title="Leave without saving?"
+          message="This app's .env has unsaved changes. Leaving this tab now discards them — there is no way to get them back afterwards."
+          confirmLabel="Discard changes and leave"
+          destructive
+          onConfirm={proceedNav}
+          onClose={cancelNav}
         />
       )}
 

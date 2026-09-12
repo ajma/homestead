@@ -7,6 +7,7 @@ import { ulid } from "ulid";
 import { z } from "zod";
 import { normaliseProjectName, scanForApps } from "../apps/adoption.js";
 import { deployTimestamps } from "../apps/deploy-timestamps.js";
+import { runningJobs } from "../apps/running-jobs.js";
 import { scaffoldCompose } from "../apps/scaffold.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { currentProjectName, statusFor } from "../apps/status-for.js";
@@ -368,9 +369,12 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // generated here. Composing the scope predicate would return nothing for a scoped
       // principal, so a successful adoption would report an empty `adopted` list.
       const [row] = await db.select().from(apps).where(eq(apps.id, id));
-      // `lastDeployAt` is null, not looked up: this row was inserted in the transaction
-      // just above, in this same request, so no job can exist for it yet.
-      if (row) adopted.push(toAdminApp(row, await statusFor({ host, composeConfig }, row), null));
+      // `lastDeployAt` and `runningJobId` are null, not looked up: this row was inserted
+      // in the transaction just above, in this same request, so no job can exist for it
+      // yet.
+      if (row) {
+        adopted.push(toAdminApp(row, await statusFor({ host, composeConfig }, row), null, null));
+      }
       await audit(db, ctx, {
         action: "app.adopted",
         targetType: "app",
@@ -476,7 +480,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // Just inserted above, in this request — no job can exist for it yet.
     return reply
       .code(201)
-      .send(toAdminApp(row, await statusFor({ host, composeConfig }, row), null));
+      .send(toAdminApp(row, await statusFor({ host, composeConfig }, row), null, null));
   });
 
   app.get("/api/apps", async (request) => {
@@ -493,6 +497,16 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
           rows.map((row) => row.id),
         )
       : new Map<string, number>();
+
+    // Same reasoning, for the same reason: one grouped query for whether each app has a
+    // job running, instead of every row fetching its own job history to answer a
+    // yes-or-no question. Viewers never see `runningJobId`, so they never pay for it.
+    const runningMap = detailed
+      ? await runningJobs(
+          db,
+          rows.map((row) => row.id),
+        )
+      : new Map<string, string>();
 
     // One Docker call for the whole page, partitioned by project. The per-row
     // alternative was a round trip per app on the screen that lists them all.
@@ -524,7 +538,12 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
           if (!dockerReachable) {
             const status = { status: "unknown" as const, detail: "Docker is unreachable" };
             return detailed
-              ? toAdminApp(row, status, deployMap.get(row.id) ?? null)
+              ? toAdminApp(
+                  row,
+                  status,
+                  deployMap.get(row.id) ?? null,
+                  runningMap.get(row.id) ?? null,
+                )
               : toViewerApp(row, status);
           }
           const project = await currentProjectName({ host, composeConfig }, row);
@@ -534,7 +553,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
             byProject.get(project) ?? [],
           );
           return detailed
-            ? toAdminApp(row, status, deployMap.get(row.id) ?? null)
+            ? toAdminApp(row, status, deployMap.get(row.id) ?? null, runningMap.get(row.id) ?? null)
             : toViewerApp(row, status);
         }),
       );
@@ -553,7 +572,8 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const status = await statusFor({ host, composeConfig }, row);
     if (!can(ctx, "app:config")) return toViewerApp(row, status);
     const deployMap = await deployTimestamps(db, [row.id]);
-    return toAdminApp(row, status, deployMap.get(row.id) ?? null);
+    const runningMap = await runningJobs(db, [row.id]);
+    return toAdminApp(row, status, deployMap.get(row.id) ?? null, runningMap.get(row.id) ?? null);
   });
 
   app.patch("/api/apps/:id", async (request, reply) => {
@@ -587,7 +607,8 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: "not_found" });
     const status = await statusFor({ host, composeConfig }, row);
     const deployMap = await deployTimestamps(db, [row.id]);
-    return toAdminApp(row, status, deployMap.get(row.id) ?? null);
+    const runningMap = await runningJobs(db, [row.id]);
+    return toAdminApp(row, status, deployMap.get(row.id) ?? null, runningMap.get(row.id) ?? null);
   });
 
   app.delete("/api/apps/:id", async (request, reply) => {
