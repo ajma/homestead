@@ -18,6 +18,7 @@ import { createHttpRunners } from "./monitoring/http-runner.js";
 import { RetentionTimer } from "./monitoring/retention.js";
 import { Scheduler } from "./monitoring/scheduler.js";
 import { EventBus } from "./routes/events.js";
+import { createShutdown } from "./shutdown.js";
 
 const config = loadConfig(process.env);
 
@@ -29,7 +30,7 @@ if (!config.skipMountPreflight) {
   if (!result.ok) throw new PreflightError(result.reason);
 }
 
-const { db } = await createDb(config.dbPath);
+const { client: dbClient, db } = await createDb(config.dbPath);
 await runMigrations(db);
 
 // Before anything can start a new job. A `running` row at this point is from a previous
@@ -111,13 +112,24 @@ const app = await buildApp({
 scheduler.start();
 retention.start();
 
-// Required shutdown order for the SIGTERM handler the Dockerfile task will add (out of
-// scope here — see the phase carry-forward): stop `scheduler` and `retention` first so
-// no new work starts, then `events.closeAll()` so every open `/api/events` stream ends —
-// `app.close()` measurably does not resolve while one is still open — and only then
-// `app.close()` itself. 1C's launcher streams are permanent for as long as a tab is
-// open, unlike 1B's job streams which ended with their job, so this ordering matters more
-// than it did when the handler was first deferred.
+const shutdown = createShutdown({
+  scheduler,
+  retention,
+  jobs,
+  events,
+  server: { close: () => app.close() },
+  db: { close: () => dbClient.close() },
+});
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => {
+    console.log(`[shutdown] ${signal} received.`);
+    void shutdown().then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
+  });
+}
 
 // A single-process appliance on a NAS should log and keep serving rather than vanish.
 // The JobRunner.finish catch is the real fix for item 1; these are defence in depth so

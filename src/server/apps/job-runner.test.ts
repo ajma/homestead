@@ -325,5 +325,42 @@ describe("JobRunner", () => {
       const { runner } = await seed();
       await expect(runner.shutdown(2000)).resolves.toBeUndefined();
     });
+
+    it("settles done when start()'s insert rejects, rather than making shutdown() wait out its full timeout", async () => {
+      // Coverage gap flagged in the 1H task-3 brief: `start()`'s insert-failure `catch`
+      // calls `settleDone()` so a job that never got a row does not leave `shutdown()`
+      // waiting on a `done` placeholder that nothing will ever resolve. No committed test
+      // exercised that call — remove it from the catch and every other test in this file
+      // still passes, but this one hangs for the full 2000ms below instead of settling
+      // almost immediately.
+      const { db, host, row, userId, runner } = await seed();
+      host.composeResults.set("up -d", { exitCode: 0, stdout: "ok\n", stderr: "" });
+
+      const original = db.insert.bind(db);
+      // biome-ignore lint/suspicious/noExplicitAny: narrow test double over one method
+      (db as any).insert = () => ({
+        values: () =>
+          new Promise((_resolve, reject) => {
+            setTimeout(() => reject(new Error("disk I/O error")), 20);
+          }),
+      });
+
+      // Not awaited: `shutdown()` must race the still-pending insert, not a call that has
+      // already settled.
+      const startPromise = runner.start(row, "up", userId);
+      startPromise.catch(() => {}); // observed now so the eventual rejection is never unhandled
+
+      const started = Date.now();
+      await runner.shutdown(2000);
+      const elapsed = Date.now() - started;
+
+      // biome-ignore lint/suspicious/noExplicitAny: restore
+      (db as any).insert = original;
+      await expect(startPromise).rejects.toThrow("disk I/O error");
+
+      // The failed insert settles `done` within ~20ms. Without `settleDone()` in the catch,
+      // `shutdown()` would still be waiting out its 2000ms budget for a job that never ran.
+      expect(elapsed).toBeLessThan(500);
+    });
   });
 });
