@@ -3,16 +3,33 @@ import { useSession } from "@web/auth/useSession";
 import { AdminApps } from "@web/routes/AdminApps";
 import { AppLayout } from "@web/routes/AppLayout";
 import { EditApp } from "@web/routes/EditApp";
-import { ComposeTab } from "@web/routes/edit/ComposeTab";
 import { ContainersTab } from "@web/routes/edit/ContainersTab";
-import { EnvTab } from "@web/routes/edit/EnvTab";
 import { LogsTab } from "@web/routes/edit/LogsTab";
 import { OverviewTab } from "@web/routes/edit/OverviewTab";
 import { ProbesTab } from "@web/routes/edit/ProbesPanel";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
 import { Placeholder } from "@web/routes/Placeholder";
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+
+// CodeMirror, its schema-driven completions and both lint layers are the largest thing
+// in this app's bundle by far (measured: ~580 kB raw, ~183 kB gzip of the ~930 kB total)
+// — and an admin-only feature a viewer can never even navigate to. The launcher every
+// visitor opens first, and the page the spec requires to render during an outage, has no
+// business paying for it. `React.lazy` defers both editor tabs into their own chunk,
+// fetched only once an admin actually opens `compose` or `env`.
+const ComposeTab = lazy(() =>
+  import("@web/routes/edit/ComposeTab").then((m) => ({ default: m.ComposeTab })),
+);
+const EnvTab = lazy(() => import("@web/routes/edit/EnvTab").then((m) => ({ default: m.EnvTab })));
+
+/** Shown for the brief window the editor chunk takes to download — a route-level
+ * fallback, not a skeleton, matching the plain loading text `ComposeTab`/`EnvTab`
+ * themselves show once mounted while their own data is still in flight. */
+function LoadingEditor() {
+  return <p className="p-4 text-sm text-slate-500 dark:text-slate-400">Loading editor…</p>;
+}
 
 // Exported (not just module-private) so `App.test.tsx` can `queryClient.clear()` between
 // renders of the real `<App>` — the route guard is only meaningful end-to-end, through
@@ -41,8 +58,22 @@ function Routed() {
           <Route path="containers" element={<ContainersTab />} />
           <Route path="logs" element={<LogsTab />} />
           <Route path="probes" element={<ProbesTab />} />
-          <Route path="compose" element={<ComposeTab />} />
-          <Route path="env" element={<EnvTab />} />
+          <Route
+            path="compose"
+            element={
+              <Suspense fallback={<LoadingEditor />}>
+                <ComposeTab />
+              </Suspense>
+            }
+          />
+          <Route
+            path="env"
+            element={
+              <Suspense fallback={<LoadingEditor />}>
+                <EnvTab />
+              </Suspense>
+            }
+          />
         </Route>
         <Route
           path="/settings/*"

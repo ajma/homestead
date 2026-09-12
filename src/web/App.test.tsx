@@ -78,6 +78,16 @@ function stubMe(overrides: Partial<Me> = {}, extra: { apps?: AdminApp[] } = {}) 
       if (url.includes("/api/me")) return json(200, me);
       if (url.includes("/api/launcher")) return json(200, { apps: [] });
       if (url.includes("/containers")) return json(200, { containers: [], dockerReachable: true });
+      // `ComposeTab`/`EnvTab` are loaded behind `React.lazy` now (Important 5 of the 1F
+      // final review) — the "tab data-loading boundary" tests below actually let the
+      // real components mount rather than the fetch merely being fired and abandoned, so
+      // both need a response shaped the way the real endpoint answers, not the catch-all
+      // `[]` below (which `ComposeTab` would otherwise happily destructure into
+      // `content: undefined` and crash `lintYaml` on, well after the test that triggered
+      // it has already finished and torn the tree down).
+      if (url.endsWith("/compose/validate")) return json(200, { valid: true });
+      if (url.endsWith("/compose")) return json(200, { content: "services: {}\n", hash: "h1" });
+      if (url.endsWith("/env")) return json(200, { entries: [], exists: false });
       if (url.endsWith("/api/apps")) return json(200, apps);
       // `EditApp` resolves `:slug` through `GET /api/apps/:id`, which accepts a slug too
       // (Important 3 of the 1E final-fix brief) — a single-app object, not the list.
@@ -217,12 +227,19 @@ describe("the tab data-loading boundary", () => {
     // The mirror image of the test above: proves the assertion is actually discriminating
     // between tabs, not just observing that nothing in this harness ever calls `/compose`.
     stubMe({ role: "admin" }, { apps: [jellyfin] });
-    renderAt("/apps/jellyfin/compose");
+    const { container } = renderAt("/apps/jellyfin/compose");
 
     await waitFor(() => {
       const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
       const urls = calls.map((call) => String(call[0]));
       expect(urls.some((url) => url.includes("/compose"))).toBe(true);
     });
+    // `ComposeTab` is loaded behind `React.lazy` now (Important 5 of the 1F final
+    // review), so this test's own render awaits the fallback and then the real chunk —
+    // without waiting for the actual editor to mount, this test's own cleanup can
+    // unmount the tree while the lazy import or the compose query is still settling,
+    // producing an update on an unmounted component instead of proving anything about
+    // the next test.
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
   });
 });
