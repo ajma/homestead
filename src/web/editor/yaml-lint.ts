@@ -23,7 +23,7 @@ export function lintYaml(text: string, schema: unknown): EditorDiagnostic[] {
   const diagnostics: EditorDiagnostic[] = [];
 
   for (const error of doc.errors) {
-    diagnostics.push(fromRange(error.pos, "error", error.message, text.length));
+    diagnostics.push(fromRange(error.pos, "error", messageFor(error), text.length));
   }
   for (const warning of doc.warnings) {
     diagnostics.push(fromRange(warning.pos, "warning", warning.message, text.length));
@@ -59,6 +59,22 @@ export function lintYaml(text: string, schema: unknown): EditorDiagnostic[] {
     walk(contents, [], schema, diagnostics, text.length);
   }
   return diagnostics;
+}
+
+/**
+ * `parseDocument` reports a `---`-separated file as a `MULTIPLE_DOCS` error with the
+ * message "Source contains multiple documents; please use YAML.parseAllDocuments()" —
+ * accurate for someone calling the `yaml` library from code, meaningless to someone
+ * editing a compose file, who has never heard of `YAML.parseAllDocuments()` and cannot
+ * act on it. Compose itself rejects multi-document files too, so the verdict here is
+ * already right; only the wording needs to speak to the file being edited, not the
+ * library reporting on it.
+ */
+function messageFor(error: { code: string; message: string }): string {
+  if (error.code === "MULTIPLE_DOCS") {
+    return "A compose file must contain a single YAML document — remove the `---` separator.";
+  }
+  return error.message;
 }
 
 function shapeOf(node: unknown): string {

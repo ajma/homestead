@@ -87,6 +87,23 @@ describe("lintYaml", () => {
     }
   });
 
+  it("names the file, not the library, when a compose file has more than one document", () => {
+    // `parseDocument`'s own message for this — "Source contains multiple documents;
+    // please use YAML.parseAllDocuments()" — is a JavaScript API name aimed at someone
+    // calling the `yaml` library from code, not someone editing a compose file. Compose
+    // rejects multi-document files too, so the verdict is already right; only the
+    // wording needs fixing.
+    const text =
+      "services:\n  web:\n    image: nginx\n---\nservices:\n  db:\n    image: postgres\n";
+    const out = lintYaml(text, SCHEMA);
+    const errors = out.filter((d) => d.severity === "error");
+    expect(errors.length).toBeGreaterThan(0);
+    for (const diagnostic of errors) {
+      expect(diagnostic.message).not.toMatch(/parseAllDocuments/);
+    }
+    expect(errors.some((d) => /single YAML document/.test(d.message))).toBe(true);
+  });
+
   it("warns on an unknown service key rather than erroring", () => {
     // A warning, deliberately: the vendored schema is pinned, so a key added upstream is
     // unknown here and would otherwise look like a mistake the user made.
