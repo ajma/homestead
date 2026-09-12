@@ -31,6 +31,7 @@ const app: AdminApp = {
   adoptedAt: 1_800_000_000,
   archivedAt: null,
   lastDeployAt: null,
+  runningJobId: null,
 };
 
 const ORIGINAL = "services:\n  web:\n    image: nginx\n";

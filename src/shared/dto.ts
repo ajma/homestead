@@ -31,4 +31,5 @@ export type AdminApp = ViewerApp & {
   adoptedAt: number;
   archivedAt: number | null;
   lastDeployAt: number | null;
+  runningJobId: string | null;
 };

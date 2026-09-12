@@ -48,16 +48,29 @@ export function describeActionError(error: unknown): string {
  * computes by spawning up to four `docker compose config` processes. Re-fetching all of
  * it to update one row is the mistake 1E already made once and fixed (the 1E final-fix
  * brief, Important 3); a caller reusing this hook cannot reintroduce it.
+ *
+ * `knownRunningJobId` lets a caller that already has the answer — the inventory row,
+ * from `GET /api/apps`'s own `runningJobId` field — skip `useJobs` entirely rather than
+ * mounting a per-row poll of that app's whole job history to re-derive a fact the list
+ * response already carried. Omitting it (as `ActionBar` does) keeps this hook's default
+ * behaviour exactly what it always was: a single-app view has no such list to read from,
+ * so its own `useJobs` poll is the correct, and only, source.
  */
-export function useAppActions(app: Pick<AdminApp, "id" | "slug">) {
+export function useAppActions(
+  app: Pick<AdminApp, "id" | "slug">,
+  options: { knownRunningJobId?: string | null } = {},
+) {
   const queryClient = useQueryClient();
-  const { data: jobs } = useJobs(app.id);
+  const hasKnownRunningJobId = options.knownRunningJobId !== undefined;
+  const { data: jobs } = useJobs(hasKnownRunningJobId ? null : app.id);
 
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const runningJobId = jobs?.find((job) => job.status === "running")?.id ?? null;
+  const runningJobId = hasKnownRunningJobId
+    ? (options.knownRunningJobId ?? null)
+    : (jobs?.find((job) => job.status === "running")?.id ?? null);
 
   // Picks up a job already running when this hook mounts — someone started a `pull` and
   // refreshed the page, or another admin's session did — without stomping on a job this

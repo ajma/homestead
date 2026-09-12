@@ -574,6 +574,57 @@ describe("app inventory API", () => {
     });
   });
 
+  describe("runningJobId", () => {
+    it("shows the running job's id for an admin", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const jobId = ulid();
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: jobId, appId: id, kind: "up", status: "running" });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].runningJobId).toBe(jobId);
+      await app.close();
+    });
+
+    it("is null for an app with no running job", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "succeeded", finishedAt: 100 });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].runningJobId).toBeNull();
+      await app.close();
+    });
+
+    it("is absent from the viewer DTO even while a job is running", async () => {
+      // The security-shaped assertion: a viewer must not receive `runningJobId` at all,
+      // not merely receive it as `null`. Seeding an actually-running job is what makes
+      // this a real test of the field's absence rather than one that would pass anyway
+      // because the fixture happened to have nothing running.
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, adminCookie);
+      await app.deps.db
+        .insert(jobs)
+        .values({ id: ulid(), appId: id, kind: "up", status: "running" });
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.json()[0]).not.toHaveProperty("runningJobId");
+      await app.close();
+    });
+  });
+
   it("never shows a viewer the raw output of docker compose config", async () => {
     // Measured before the split: a viewer's statusDetail read
     // `validating /volume2/docker/jellyfin/compose.yaml: ... invalid value

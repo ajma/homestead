@@ -49,13 +49,23 @@ const ROW_BUTTON_CLASS =
  * action re-fetching all of it to update one row is the mistake 1E already made once and
  * fixed; reusing the hook is what makes it structurally impossible to make again here.
  *
+ * Passes `app.runningJobId` — `GET /api/apps`'s own grouped query, see `running-jobs.ts`
+ * — as `knownRunningJobId`, so this row skips `useAppActions`' default `useJobs` poll of
+ * `GET /api/apps/:id/jobs`. Without it, an inventory of twenty apps fired twenty of those
+ * on load, each fetching one app's entire job history to answer a yes-or-no question
+ * `GET /api/apps` already answered for every row in one query. `ActionBar` does not pass
+ * this — a single-app view has no list row to read it from — so it keeps its own poll,
+ * which is correct there.
+ *
  * Restart is the one that confirms: unlike Deploy (idempotent when nothing changed) or
  * the editor shortcut (pure navigation), it stops and starts the app's containers,
  * interrupting whatever was using it, however briefly.
  */
 function RowActions({ app }: { app: AdminApp }) {
-  const { busy, activeJobId, actionError, setActionError, startJob, handleJobDone } =
-    useAppActions(app);
+  const { busy, activeJobId, actionError, setActionError, startJob, handleJobDone } = useAppActions(
+    app,
+    { knownRunningJobId: app.runningJobId },
+  );
   const [confirmingRestart, setConfirmingRestart] = useState(false);
 
   function handleDeploy() {

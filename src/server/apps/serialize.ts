@@ -60,15 +60,16 @@ export function toViewerApp(row: AppRowLike, status: AppStatusSummary): ViewerAp
 }
 
 /**
- * `lastDeployAt` is a caller-supplied parameter rather than a property read off `row`:
- * it comes from a grouped query over `jobs`, not from the `apps` row itself, and every
- * caller has to look it up (or explicitly decide a fresh row has none) rather than get
- * it silently defaulted to null.
+ * `lastDeployAt` and `runningJobId` are caller-supplied parameters rather than
+ * properties read off `row`: both come from a grouped query over `jobs`, not from the
+ * `apps` row itself, and every caller has to look them up (or explicitly decide a fresh
+ * row has neither) rather than get them silently defaulted to null.
  */
 export function toAdminApp(
   row: AppRowLike,
   status: AppStatusSummary,
   lastDeployAt: number | null,
+  runningJobId: string | null,
 ): AdminApp {
   return {
     ...toViewerApp(row, status),
@@ -86,5 +87,6 @@ export function toAdminApp(
     adoptedAt: row.adoptedAt,
     archivedAt: row.archivedAt,
     lastDeployAt,
+    runningJobId,
   };
 }
