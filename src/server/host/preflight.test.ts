@@ -46,7 +46,11 @@ describe.skipIf(!hasDocker)("runMountPreflight", () => {
   // exercised from a test process that IS the host. It is reachable only when Homestead
   // runs containerised with a mismatched bind mount. The tests below cover the two
   // failure branches that ARE reachable. Do not read green tests as proof that the
-  // path-mismatch detection works; that is verified by deploying.
+  // path-mismatch detection works; that is verified by deploying — run
+  // `scripts/verify-mount-preflight.sh` against a built `homestead:dev` image (see
+  // `docs/deployment.md` §9) after touching this file. `if (!output.includes(token))`
+  // at preflight.ts:121 can be replaced with `if (false)` and every test in this file
+  // stays green; that script is the thing that actually exercises it.
   it("fails when the compose root cannot be written to at all", async () => {
     const result = await runMountPreflight({
       composeRoot: "/definitely/not/mounted/anywhere",

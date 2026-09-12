@@ -133,7 +133,31 @@ deletion. Restarts and stops of Homestead itself have to happen from the NAS ins
 Homestead's own UI: a `down` issued against yourself cannot be undone by the UI that issued it,
 and a `restart` kills the process handling the very request that asked for it.
 
-## 9. Troubleshooting
+## 9. Verifying the mount preflight
+
+`src/server/host/preflight.ts`'s decisive check — that a marker file written inside the
+container is visible back through the daemon's own view of the compose root — can only be
+exercised by actually running Homestead containerised with a mismatched bind mount; a test
+process that IS the Docker host cannot construct the mismatch it exists to catch (see the note
+at `preflight.test.ts:44-49`). `scripts/verify-mount-preflight.sh` is the runnable manual gate
+for that: given a built `homestead:dev` image, it runs the four mount scenarios in the table
+below and asserts each one refuses or passes as expected, cleaning up every container and
+temp directory it creates. Run it after touching `preflight.ts` or the volumes in
+`compose.example.yaml`/`Dockerfile`, before a release:
+
+```bash
+docker build -t homestead:dev .
+./scripts/verify-mount-preflight.sh
+```
+
+| Mount | `HOMESTEAD_COMPOSE_ROOT` | Expected |
+|---|---|---|
+| Identical path both sides | that path | preflight passes |
+| Different container path | the host path | refused |
+| Container path exists on host but is a different directory | the other directory | refused |
+| No compose-root mount at all | any path | refused |
+
+## 10. Troubleshooting
 
 **The preflight refuses to start.** The container exits immediately with a `PreflightError`
 naming the mismatch — for example "the marker file was not visible to the Docker daemon at
