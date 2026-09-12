@@ -1,0 +1,18 @@
+# Development image for the hot-reload deployment (compose.dev.yaml). Unlike the root
+# Dockerfile, this bakes in no source and runs no build: the working tree is bind-mounted at
+# /app, and the entrypoint's watchers (tsx watch, Vite) pick up a file the moment it lands on
+# the host. That is the whole point — a built image would just ignore anything rsynced in
+# afterwards (see scripts/push-to-test.sh).
+FROM node:24-alpine
+
+# Homestead shells out to `docker compose` for mutations (src/server/host/local-host.ts:508);
+# dockerode talking to the socket over HTTP does not replace the CLI. Same reasoning as the
+# production image: the container needs its own client.
+RUN apk add --no-cache docker-cli docker-cli-compose
+
+RUN corepack enable
+WORKDIR /app
+
+# No COPY: everything under /app, including this very entrypoint script, arrives via the
+# bind mount in compose.dev.yaml at container start, not at build time.
+CMD ["sh", "docker/dev-entrypoint.sh"]
