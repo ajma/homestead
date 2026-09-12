@@ -123,6 +123,7 @@ await startServer({
         scheduler,
         retention,
         jobs,
+        stepJobs,
         events,
         server: { close: () => app.close() },
       },

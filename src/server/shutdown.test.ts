@@ -32,14 +32,21 @@ function afterTicks(order: string[], name: string, ticks: number): Promise<void>
 function parts(overrides: Partial<Closeable> = {}): { parts: Closeable; order: string[] } {
   const order: string[] = [];
   const base: Closeable = {
-    scheduler: { stop: () => afterTicks(order, "scheduler", 5) },
-    retention: { stop: () => afterTicks(order, "retention", 4) },
+    scheduler: { stop: () => afterTicks(order, "scheduler", 6) },
+    retention: { stop: () => afterTicks(order, "retention", 5) },
     jobs: {
       // `jobs` is the one stage whose whole point is that a cancelled job's terminal
       // write is awaited before the sequence moves on (job-runner.ts:68-79) — this is
       // the original gap the 1H review measured (shutdown.ts:102), now folded into the
       // same decreasing-ticks scheme as every other stage.
-      shutdown: () => afterTicks(order, "jobs", 3),
+      shutdown: () => afterTicks(order, "jobs", 4),
+    },
+    stepJobs: {
+      // Same reasoning as `jobs` above, for `StepJobRunner`: this is the Phase 2B
+      // whole-branch review's Important 1 — `stepJobs` was absent from `Closeable`
+      // entirely, so nothing ever awaited an in-flight step sequence and `db.close()`
+      // ran out from under it. Folded into the same decreasing-ticks scheme.
+      shutdown: () => afterTicks(order, "stepJobs", 3),
     },
     events: { closeAll: () => afterTicks(order, "events", 2) },
     server: {
@@ -75,6 +82,14 @@ describe("createShutdown", () => {
     expect(order.indexOf("jobs")).toBeLessThan(order.indexOf("events"));
   });
 
+  it("waits for an in-flight step sequence after jobs and before the streams close", async () => {
+    const { parts: p, order } = parts();
+    await createShutdown(p)();
+
+    expect(order.indexOf("jobs")).toBeLessThan(order.indexOf("stepJobs"));
+    expect(order.indexOf("stepJobs")).toBeLessThan(order.indexOf("events"));
+  });
+
   it("closes the database last", async () => {
     const { parts: p, order } = parts();
     await createShutdown(p)();
@@ -91,7 +106,7 @@ describe("createShutdown", () => {
     const { parts: p, order } = parts();
     await createShutdown(p)();
 
-    expect(order).toEqual(["scheduler", "retention", "jobs", "events", "server", "db"]);
+    expect(order).toEqual(["scheduler", "retention", "jobs", "stepJobs", "events", "server", "db"]);
   });
 
   it("runs once however many times it is called", async () => {

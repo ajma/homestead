@@ -24,6 +24,12 @@ function deps(overrides: Partial<StartupDeps<FakeDb>> = {}): {
           order.push("jobs");
         },
       },
+      stepJobs: {
+        shutdown: async () => {
+          await Promise.resolve();
+          order.push("stepJobs");
+        },
+      },
       events: { closeAll: () => void order.push("events") },
       server: {
         close: async () => {
@@ -184,6 +190,7 @@ describe("startServer", () => {
             scheduler: { stop: () => {} },
             retention: { stop: () => {} },
             jobs: { shutdown: async () => {} },
+            stepJobs: { shutdown: async () => {} },
             events: { closeAll: () => {} },
             server: { close: async () => {} },
           },

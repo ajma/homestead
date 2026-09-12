@@ -28,7 +28,50 @@ const OUTPUT_CAP = 256 * 1024;
  * `buildOutput` below puts it first.
  */
 export class StepJobRunner {
+  /**
+   * Every sequence currently between its lock acquisition and its terminal-row write.
+   * `shutdown()` reads this to know what to wait for — there is no per-job registry like
+   * `JobRunner.running` because nothing here is cancellable or streamable yet (see the
+   * class doc); this exists purely so shutdown has something to await.
+   */
+  private readonly inFlight = new Set<Promise<unknown>>();
+
   constructor(private readonly deps: { db: Db; appLock: AppLock }) {}
+
+  /**
+   * Waits for any in-flight sequence to reach its terminal-row write, bounded by
+   * `timeoutMs`.
+   *
+   * This WAITS; it never cancels. `JobRunner.shutdown` can cancel because a compose
+   * child process understands SIGTERM and a partially-applied `docker compose up` is safe
+   * to leave half-done — the next `up` reconciles it. A step sequence has no equivalent:
+   * its steps are calls to an external API (Cloudflare, from 2D onward) that create real
+   * remote resources, and `runSteps`'s rollback is triggered by a *step failing*, not by
+   * the process dying — there is no signal to send that would make an in-flight step
+   * unwind itself. Deciding what SHOULD happen to a half-finished sequence on shutdown —
+   * tear it down via rollback, or leave it for the next boot to resume — is a decision
+   * about Cloudflare state that 2B has no basis to make, since nothing on this branch can
+   * construct a step sequence yet. That decision is explicitly left to whichever phase
+   * (2D) first wires a route to `start`; this method only buys the sequence already
+   * running time to finish writing its own terminal row before `db.close()` runs out from
+   * under it, which is what was actually measured missing (see the whole-branch review's
+   * ruling on the shutdown gap).
+   */
+  async shutdown(timeoutMs = 10_000): Promise<void> {
+    const inFlight = [...this.inFlight];
+    if (inFlight.length === 0) return;
+
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+
+    try {
+      await Promise.race([Promise.allSettled(inFlight), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 
   async start<C>(
     app: AppRow,
@@ -62,25 +105,36 @@ export class StepJobRunner {
       throw error;
     }
 
-    try {
-      const transcript: string[] = [];
-      const outcome = await runSteps(steps, ctx, {
-        onProgress: (event) => transcript.push(describeEvent(event)),
-      });
+    // Registered before the first `await` below and de-registered in the `finally`, so a
+    // `shutdown()` call landing at any point in between sees this sequence and waits for
+    // it.
+    const sequence = (async () => {
+      try {
+        const transcript: string[] = [];
+        const outcome = await runSteps(steps, ctx, {
+          onProgress: (event) => transcript.push(describeEvent(event)),
+        });
 
-      await this.deps.db
-        .update(jobs)
-        .set({
-          status: outcome.ok ? "succeeded" : "failed",
-          finishedAt: Math.floor(Date.now() / 1000),
-          output: cap(buildOutput(outcome, transcript)),
-        })
-        .where(eq(jobs.id, id));
+        await this.deps.db
+          .update(jobs)
+          .set({
+            status: outcome.ok ? "succeeded" : "failed",
+            finishedAt: Math.floor(Date.now() / 1000),
+            output: cap(buildOutput(outcome, transcript)),
+          })
+          .where(eq(jobs.id, id));
+      } finally {
+        // Always — released whether the sequence succeeded, failed, or the write above
+        // threw, or a failed step job wedges the app until restart. Matches
+        // `JobRunner.finish`'s `finally`.
+        this.deps.appLock.release(app.id);
+      }
+    })();
+    this.inFlight.add(sequence);
+    try {
+      await sequence;
     } finally {
-      // Always — released whether the sequence succeeded, failed, or the write above
-      // threw, or a failed step job wedges the app until restart. Matches
-      // `JobRunner.finish`'s `finally`.
-      this.deps.appLock.release(app.id);
+      this.inFlight.delete(sequence);
     }
 
     return { id };
