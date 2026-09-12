@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, Tx } from "../db/client.js";
 import { secrets } from "../db/schema.js";
 
 const ALGORITHM = "aes-256-gcm";
@@ -32,9 +32,17 @@ export function decrypt(key: Buffer, parts: EncryptedParts, aad: string): string
 
 export class SecretStore {
   constructor(
-    private readonly db: Db,
+    private readonly db: Db | Tx,
     private readonly key: Buffer,
   ) {}
+
+  /** The same store, bound to a different handle — a transaction, most often — while
+   * reusing this store's already-derived key. Lets a caller fold a secret write into the
+   * same transaction as other writes, the way `CloudflareCredentialStore.save` does, so a
+   * later write's failure rolls the secret back too instead of orphaning it. */
+  withDb(db: Db | Tx): SecretStore {
+    return new SecretStore(db, this.key);
+  }
 
   async set(name: string, value: string): Promise<void> {
     const parts = encrypt(this.key, value, name);
