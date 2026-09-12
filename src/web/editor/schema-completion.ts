@@ -59,7 +59,20 @@ const CURATED_NOTES: Readonly<Record<string, string>> = {
  * `restart_policy`; or a line inside a `command: |` block scalar that happens to read
  * `restart: `, since a block scalar's body has no schema properties at all) gets nothing,
  * rather than the full curated list endorsing a key that isn't real there.
+ *
+ * That still isn't the whole gate: `services.<name>.depends_on.<name>.restart` is a real,
+ * schema-known path, so `isKnownPath` alone lets it through — but there it's a boolean-ish
+ * flag meaning "restart dependent services", not a restart policy, and offering
+ * `unless-stopped` there would be a wrong list, not an absent one. `isServiceLevelPath`
+ * keys the table on the path's *shape*, not just its trailing key: `restart` (and
+ * `pull_policy`, `network_mode`) only apply at `services.<name>.<key>` itself. A schema
+ * walk of all three curated keys confirmed this is the only such collision in the vendored
+ * schema, so the shape check below can be exact rather than heuristic.
  */
+function isServiceLevelPath(path: string[]): boolean {
+  return path.length === 3 && path[0] === "services";
+}
+
 function valuesFor(schema: unknown, path: string[]): SchemaSuggestion[] {
   const fromSchema = enumsAt(schema, path);
   if (fromSchema.length > 0) return fromSchema;
@@ -67,7 +80,7 @@ function valuesFor(schema: unknown, path: string[]): SchemaSuggestion[] {
   if (!isKnownPath(schema, path)) return [];
 
   const key = path[path.length - 1];
-  const curated = key !== undefined ? CURATED_VALUES[key] : undefined;
+  const curated = key !== undefined && isServiceLevelPath(path) ? CURATED_VALUES[key] : undefined;
   if (!curated) return [];
   const docs = (key !== undefined && CURATED_NOTES[key]) || CURATED_DOCS;
   return curated.map((label) => ({ label, docs }));
@@ -76,10 +89,27 @@ function valuesFor(schema: unknown, path: string[]): SchemaSuggestion[] {
 /**
  * Exported alongside {@link pathAt} so document-completion.ts's declaredNames scan can
  * reuse the same indentation reading instead of re-deriving it.
+ *
+ * A tab counts as two columns of indentation, the same width as this codebase's own
+ * compose examples use per level, rather than as zero. YAML forbids tabs for
+ * indentation — the lint layer already reports that separately — so this is a rough
+ * stand-in, not a claim about what the document's author intended. What it must not do
+ * is read as column zero: a tab-indented child line sharing that value with a genuine
+ * top-level line makes the section-end check below fire on the child, which throws
+ * away every sibling that follows it too. Counting the tab as indentation (some
+ * positive value) is enough to keep the scan going past it.
  */
 export function indentOf(line: string): number {
+  const TAB_WIDTH = 2;
   let count = 0;
-  while (count < line.length && line[count] === " ") count++;
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === " ") count += 1;
+    else if (ch === "\t") count += TAB_WIDTH;
+    else break;
+    i++;
+  }
   return count;
 }
 

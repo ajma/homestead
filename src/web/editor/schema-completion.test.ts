@@ -80,6 +80,20 @@ const SCHEMA = {
         // (quotes included) — exists only so Minor 4's test can tell the last-unquoted-
         // colon split apart from a leftmost split by which one it matches.
         '"tag:x"': { type: "string", enum: ["A", "B"] },
+        // Mirrors the real schema's long-form `depends_on`: a mapping of dependency
+        // service name to a config object with its own `restart` — a boolean meaning
+        // "restart dependent services", unrelated to the service-level restart policy.
+        // Schema-known (so `isKnownPath` alone would let the curated table through) but
+        // not service-level — exercises Minor 5's path-shape gate.
+        depends_on: {
+          type: "object",
+          patternProperties: {
+            "^[a-zA-Z0-9._-]+$": {
+              type: "object",
+              properties: { restart: { type: "boolean" } },
+            },
+          },
+        },
       },
     },
   },
@@ -234,6 +248,17 @@ describe("schemaCompletion", () => {
       "on-failure",
       "unless-stopped",
     ]);
+  });
+
+  // Minor 5: `services.<svc>.depends_on.<svc>.restart` is a real, schema-known path (so
+  // `isKnownPath` alone lets it through), but there `restart` is a boolean flag meaning
+  // "restart dependent services", not a restart policy — offering `unless-stopped` there
+  // would be a wrong list, not an absent one. The curated table must be keyed on the
+  // path's shape (`services.<name>.restart` only), not just its trailing key.
+  it("offers nothing for restart under a depends_on entry, which is a different flag entirely", async () => {
+    const source = schemaCompletion(SCHEMA);
+    const text = "services:\n  web:\n    depends_on:\n      db:\n        restart: ";
+    expect(await complete(source, contextAt(text, text.length, true))).toBeNull();
   });
 
   // Minor 4: the key/value split must use the nearest unquoted colon before the cursor, not

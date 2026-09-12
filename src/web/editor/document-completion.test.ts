@@ -89,6 +89,14 @@ describe("declaredNames", () => {
   it("tolerates a document that is nothing but a dangling key", () => {
     expect(() => declaredNames("services:\n  web\n    ")).not.toThrow();
   });
+
+  it("does not let a tab-indented line stop the scan before a later, correctly space-indented service", () => {
+    // A tab reading as indent 0 makes the section-end check fire on the very first
+    // child line (`\tweb:`), breaking the loop before `db` — indented normally with
+    // spaces two lines later — is ever reached.
+    const doc = "services:\n\tweb:\n\t\timage: nginx\n  db:\n    image: redis\n";
+    expect(declaredNames(doc).services).toContain("db");
+  });
 });
 
 describe("documentCompletion", () => {

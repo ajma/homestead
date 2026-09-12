@@ -98,6 +98,27 @@ describe("envCompletion", () => {
     expect(flagged?.detail).toBe("not defined in .env");
   });
 
+  it("offers nothing after $${, since $$ is compose's escape for a literal $", async () => {
+    const source = envCompletion(() => ["DB_HOST"]);
+    const text = "image: $${";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result).toBeNull();
+  });
+
+  it("still triggers on a plain ${", async () => {
+    const source = envCompletion(() => ["DB_HOST"]);
+    const text = "image: ${";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result?.options.map((o) => o.label)).toEqual(expect.arrayContaining(["DB_HOST"]));
+  });
+
+  it("triggers on $$${, since the first two $ escape each other and the third opens an interpolation", async () => {
+    const source = envCompletion(() => ["DB_HOST"]);
+    const text = "image: $$${";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result?.options.map((o) => o.label)).toEqual(expect.arrayContaining(["DB_HOST"]));
+  });
+
   it("never reaches for anything beyond a key name (no secret values pass through)", async () => {
     // envCompletion's whole contract is that it takes `keys: () => string[]` — plain
     // names, never values. This test exists to make a future signature change (e.g.

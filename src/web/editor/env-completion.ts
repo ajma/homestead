@@ -7,6 +7,23 @@ import type {
 const NOT_DEFINED = "not defined in .env";
 
 /**
+ * The number of consecutive `$` characters ending immediately before `index` (typically the
+ * position of a `{`). Compose treats `$$` as a literal, escaped `$` — so `$${` is a literal
+ * `${`, not the start of an interpolation, while `$$${` is an escaped `$$` followed by a
+ * real `${`. An even run means everything up to `{` has paired off into literal `$`s; an odd
+ * run means one `$` is left over to actually open the interpolation.
+ */
+function dollarRunBefore(text: string, index: number): number {
+  let count = 0;
+  let i = index - 1;
+  while (i >= 0 && text[i] === "$") {
+    count++;
+    i--;
+  }
+  return count;
+}
+
+/**
  * A stable factory, shaped like schema-completion.ts's `schemaCompletion`: call it
  * once and pass the resulting `CompletionSource` into `YamlEditor`'s
  * `extraExtensions` array, which the caller must memoise — see that file's doc
@@ -26,6 +43,11 @@ const NOT_DEFINED = "not defined in .env";
  * itself, so accepting a completion doesn't touch what the user already typed to
  * open it.
  *
+ * Compose treats `$$` as an escaped, literal `$`, so an even number of `$` immediately
+ * before the `{` never opens an interpolation — `$${` is a literal `${`, not a variable
+ * reference, while `$$${` is an escaped `$$` followed by a real one. See
+ * {@link dollarRunBefore}.
+ *
  * A typed name that has fully diverged from every defined key (no defined key even
  * starts with it) is still offered back as its own option, flagged with a `detail`
  * of "not defined in .env" — one of the two things the spec says only the server's
@@ -38,6 +60,10 @@ export function envCompletion(keys: () => string[]): CompletionSource {
   return (context: CompletionContext): CompletionResult | null => {
     const match = context.matchBefore(/\$\{[\w.-]*/);
     if (!match) return null;
+
+    const text = context.state.doc.toString();
+    const bracePos = match.from + 1;
+    if (dollarRunBefore(text, bracePos) % 2 === 0) return null;
 
     const typed = match.text.slice(2);
     const from = match.from + 2;
