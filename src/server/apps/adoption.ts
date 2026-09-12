@@ -1,9 +1,9 @@
 import type { DiscoveredApp, OrphanStack, ScanResult } from "@shared/admin.js";
+import { parseEnv } from "@shared/env-file.js";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { apps } from "../db/schema.js";
 import type { Host } from "../host/types.js";
-import { parseEnv } from "./env-file.js";
 
 export type { DiscoveredApp, OrphanStack, ScanResult };
 

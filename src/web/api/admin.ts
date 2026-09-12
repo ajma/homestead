@@ -40,6 +40,7 @@ export const jobsKey = (id: string) => ["admin", "apps", id, "jobs"] as const;
 export const imagesKey = (id: string) => ["admin", "apps", id, "images"] as const;
 export const probesKey = (id: string) => ["admin", "apps", id, "probes"] as const;
 export const composeKey = (id: string) => ["admin", "apps", id, "compose"] as const;
+export const envKey = (id: string) => ["admin", "apps", id, "env"] as const;
 export const scanKey = ["admin", "scan"] as const;
 
 /**
@@ -49,6 +50,13 @@ export const scanKey = ["admin", "scan"] as const;
  * rather than expecting the server to echo it.
  */
 export type ComposeFile = { content: string; hash: string };
+
+/**
+ * `GET /api/apps/:id/env`'s shape: one masked row per `.env` entry, values never
+ * included — `EnvTab`'s per-row reveal (Task 2's `POST .../env/reveal`) is the only way
+ * to fetch a value, and only ever for one key at a time.
+ */
+export type EnvList = { entries: Array<{ key: string; masked: string }>; exists: boolean };
 
 export function useAdminApps() {
   return useQuery({
@@ -99,6 +107,16 @@ export function useProbes(id: string | null) {
  */
 export function useCompose(id: string | null) {
   return useQuery(perApp<ComposeFile>(composeKey(id ?? ""), id, `/api/apps/${id}/compose`, 15_000));
+}
+
+/**
+ * `EnvTab` seeds its own row list from this on load, same as `useCompose`. Reveal and
+ * save both bypass this hook entirely — a per-row reveal and a whole-file fetch for
+ * raw mode or save both go through `apiFetch` directly, since neither belongs cached
+ * under a query key a background refetch could silently re-trigger.
+ */
+export function useEnv(id: string | null) {
+  return useQuery(perApp<EnvList>(envKey(id ?? ""), id, `/api/apps/${id}/env`, 15_000));
 }
 
 export function useScan(enabled: boolean) {

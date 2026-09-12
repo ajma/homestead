@@ -1,12 +1,12 @@
 import { LibsqlError } from "@libsql/client";
 import type { AdminApp, ViewerApp } from "@shared/dto";
+import { maskEnv, parseEnv } from "@shared/env-file.js";
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
 import { normaliseProjectName, scanForApps } from "../apps/adoption.js";
 import { deployTimestamps } from "../apps/deploy-timestamps.js";
-import { maskEnv, parseEnv } from "../apps/env-file.js";
 import { scaffoldCompose } from "../apps/scaffold.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { currentProjectName, statusFor } from "../apps/status-for.js";

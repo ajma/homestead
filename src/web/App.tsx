@@ -5,6 +5,7 @@ import { AppLayout } from "@web/routes/AppLayout";
 import { EditApp } from "@web/routes/EditApp";
 import { ComposeTab } from "@web/routes/edit/ComposeTab";
 import { ContainersTab } from "@web/routes/edit/ContainersTab";
+import { EnvTab } from "@web/routes/edit/EnvTab";
 import { LogsTab } from "@web/routes/edit/LogsTab";
 import { OverviewTab } from "@web/routes/edit/OverviewTab";
 import { ProbesTab } from "@web/routes/edit/ProbesPanel";
@@ -41,6 +42,7 @@ function Routed() {
           <Route path="logs" element={<LogsTab />} />
           <Route path="probes" element={<ProbesTab />} />
           <Route path="compose" element={<ComposeTab />} />
+          <Route path="env" element={<EnvTab />} />
         </Route>
         <Route
           path="/settings/*"

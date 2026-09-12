@@ -1,4 +1,4 @@
-import { maskEnv, parseEnv, serialiseEnv, upsertEnv } from "@server/apps/env-file";
+import { maskEnv, parseEnv, serialiseEnv, upsertEnv } from "@shared/env-file";
 import { describe, expect, it } from "vitest";
 
 const sample = [
