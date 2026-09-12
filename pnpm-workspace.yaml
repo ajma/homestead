@@ -3,5 +3,7 @@ allowBuilds:
   esbuild: true
   protobufjs: false
   ssh2: false
+# yaml@2.9.1 was published too recently to clear pnpm's default minimumReleaseAge
+# cutoff; without this exclude, `pnpm install` fails with ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION.
 minimumReleaseAgeExclude:
   - yaml@2.9.1

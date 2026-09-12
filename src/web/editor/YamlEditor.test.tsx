@@ -1,10 +1,17 @@
 // @vitest-environment jsdom
+import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { cleanup, render } from "@testing-library/react";
 import { type EditorDiagnostic, YamlEditor } from "@web/editor/YamlEditor";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 afterEach(cleanup);
+
+// A stable reference, deliberately reused across renders in tests that need to isolate
+// one prop's effect: `extraExtensions` reconfigures by identity (see YamlEditor's doc
+// comment), so a fresh `[]` literal on every render would itself cause a `dispatch` and
+// confound assertions aimed at a different effect.
+const NO_EXTENSIONS: Extension[] = [];
 
 /**
  * jsdom does not implement contenteditable, so simulated keyboard/input events never
@@ -90,6 +97,113 @@ describe("YamlEditor", () => {
     rerender(<YamlEditor value="aXb" onChange={onChange} diagnostics={[]} extraExtensions={[]} />);
 
     expect(view.state.selection.main.head).toBe(2);
+  });
+
+  it("keeps a collapsed cursor's position when the external value differs only by a trailing newline", () => {
+    // The equality guard (the previous test) only catches an exact echo. When the value
+    // legitimately differs — even by something as small as a trailing newline, exactly
+    // what a server round trip or an auto-formatter produces — the replace path used to
+    // fall back to CodeMirror's default change-mapping for the selection. Mapping a
+    // position through a single change that spans the *entire* document (a full
+    // delete-and-insert) collapses any interior position to one of the change's two
+    // boundaries, so a cursor at position 2 landed at 0 — the exact symptom the equality
+    // guard exists to prevent, reached by a different route.
+    const onChange = vi.fn();
+    const { container, rerender } = render(
+      <YamlEditor value="aaaa: 1" onChange={onChange} diagnostics={[]} extraExtensions={[]} />,
+    );
+    const view = findView(container);
+    view.dispatch({ selection: { anchor: 2 } });
+    expect(view.state.selection.main.head).toBe(2);
+
+    rerender(
+      <YamlEditor value={"aaaa: 1\n"} onChange={onChange} diagnostics={[]} extraExtensions={[]} />,
+    );
+
+    expect(view.state.doc.toString()).toBe("aaaa: 1\n");
+    expect(view.state.selection.main.anchor).toBe(2);
+    expect(view.state.selection.main.head).toBe(2);
+  });
+
+  it("keeps a range selection's anchor/head order (and clamps it) across an external replace", () => {
+    // Reproduces the reported inversion directly: CodeMirror's default selection mapping
+    // maps a non-empty range's two ends with *opposite* bias (`from` toward the end of
+    // the change, `to` toward the start) so that, across a whole-document replace, a
+    // forward `{ anchor: 1, head: 4 }` selection comes out the other side inverted
+    // (something like `{ anchor: 7, head: 0 }` for a 7-character replacement) rather than
+    // shrinking sanely. Replacing with shorter text than the selection's own head makes
+    // this concrete and checkable: a correct fix clamps each side independently and keeps
+    // anchor before head; a broken one can end up with anchor > head.
+    const { container, rerender } = render(
+      <YamlEditor value="aaaa: 1" onChange={() => {}} diagnostics={[]} extraExtensions={[]} />,
+    );
+    const view = findView(container);
+    view.dispatch({ selection: { anchor: 1, head: 4 } });
+    expect(view.state.selection.main.anchor).toBe(1);
+    expect(view.state.selection.main.head).toBe(4);
+
+    rerender(<YamlEditor value="ab" onChange={() => {}} diagnostics={[]} extraExtensions={[]} />);
+
+    expect(view.state.doc.toString()).toBe("ab");
+    expect(view.state.selection.main.anchor).toBe(1);
+    expect(view.state.selection.main.head).toBe(2);
+    expect(view.state.selection.main.anchor).toBeLessThanOrEqual(view.state.selection.main.head);
+  });
+
+  it("does not replace the document while an IME composition is in progress", () => {
+    // Honesty note: jsdom cannot run a real IME, so this is a proxy test. It does not
+    // exercise actual composed text arriving into the document — it only asserts that
+    // the guard this component reads (`view.compositionStarted`, which CodeMirror's own
+    // built-in `compositionstart`/`compositionend` observers on `contentDOM` maintain,
+    // and which does update correctly from plain synthetic DOM events even in jsdom) is
+    // respected: while it is true, an external value change must not reach the document.
+    const { container, rerender } = render(
+      <YamlEditor value="a: 1" onChange={() => {}} diagnostics={[]} extraExtensions={[]} />,
+    );
+    const view = findView(container);
+
+    view.contentDOM.dispatchEvent(new Event("compositionstart"));
+    expect(view.compositionStarted).toBe(true);
+
+    rerender(<YamlEditor value="b: 2" onChange={() => {}} diagnostics={[]} extraExtensions={[]} />);
+    expect(view.state.doc.toString()).toBe("a: 1");
+
+    view.contentDOM.dispatchEvent(new Event("compositionend"));
+    expect(view.compositionStarted).toBe(false);
+  });
+
+  it("does not re-dispatch diagnostics when a fresh array has the same content", () => {
+    // Diagnostics and extraExtensions both reconfigure through a Compartment keyed on
+    // the effect's dependency array, which React compares by identity. A parent that
+    // constructs `diagnostics={[...]}` fresh every render — never memoising it — used to
+    // cause a real `dispatch` on every single render even when nothing about the
+    // diagnostics actually changed. Comparing content instead of identity fixes that.
+    const { container, rerender } = render(
+      <YamlEditor
+        value="a: 1"
+        onChange={() => {}}
+        diagnostics={[]}
+        extraExtensions={NO_EXTENSIONS}
+      />,
+    );
+    const view = findView(container);
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+
+    // A fresh array, `===`-distinct from the one above but identical in content.
+    // `extraExtensions` stays the same reference so its own (identity-keyed, and
+    // deliberately so — see Important 2 in the task report) effect can't fire and
+    // confound this assertion.
+    rerender(
+      <YamlEditor
+        value="a: 1"
+        onChange={() => {}}
+        diagnostics={[]}
+        extraExtensions={NO_EXTENSIONS}
+      />,
+    );
+
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
   });
 
   it("renders a diagnostic", () => {
