@@ -249,7 +249,7 @@ describe("JobRunner", () => {
         return original(table as never);
       };
 
-      const _job = await runner.start(row, "up", userId);
+      await runner.start(row, "up", userId);
       // Do not await job.done — simulates user closing the log pane before the job finishes.
       // Wait long enough for the job to complete internally.
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -277,6 +277,23 @@ describe("JobRunner", () => {
       const after = await db.select().from(jobs).where(eq(jobs.id, job.id));
       expect(after[0]?.status).toBe("failed");
       expect(after[0]?.finishedAt).not.toBeNull();
+    });
+
+    it("waits out a start() still inside its insert-await window, not the placeholder done", async () => {
+      // Reviewer's reproduction: `start()` is called and NOT awaited, so `shutdown()` runs
+      // while `this.running` holds a slot whose `done` is still the synchronous placeholder
+      // `Promise.resolve()` — set before the row insert, overwritten only after it resolves.
+      // A `shutdown()` that trusts that placeholder returns before the real row write lands.
+      const { db, host, row, userId, runner } = await seed();
+      host.composeResults.set("up -d", { exitCode: 0, stdout: "ok\n", stderr: "" });
+
+      const startPromise = runner.start(row, "up", userId);
+      await runner.shutdown(2000);
+
+      const job = await startPromise;
+      const [saved] = await db.select().from(jobs).where(eq(jobs.id, job.id));
+      expect(saved?.status).not.toBe("running");
+      expect(saved?.finishedAt).not.toBeNull();
     });
 
     it("frees the per-app slot, so nothing is left wedged", async () => {
