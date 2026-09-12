@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useSetupState } from "@web/api/setup";
 import { useSession } from "@web/auth/useSession";
 import { ErrorBoundary } from "@web/components/ErrorBoundary";
 import { AdminApps } from "@web/routes/AdminApps";
@@ -11,6 +12,7 @@ import { ProbesTab } from "@web/routes/edit/ProbesPanel";
 import { Launcher } from "@web/routes/Launcher";
 import { Login } from "@web/routes/Login";
 import { Placeholder } from "@web/routes/Placeholder";
+import { SetupWizard } from "@web/routes/setup/SetupWizard";
 import { type ComponentType, lazy, Suspense, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
@@ -67,14 +69,72 @@ export const queryClient = new QueryClient({
 
 function Routed() {
   const { data: me, isPending } = useSession();
+  const isViewer = me?.role === "viewer";
+  // A viewer can't act on setup — inviting them into the wizard, or stranding them on
+  // an error screen when the check itself fails, would both be wrong — and
+  // `GET /api/setup/state` is admin-only once an admin exists, so firing it for a
+  // viewer only invites a 403 that has nothing to do with what they're allowed to see.
+  // Skipping the fetch entirely, rather than fetching and then ignoring a 403, is the
+  // difference between "never sees the wizard" and "briefly sees an error instead of
+  // one".
+  const needsSetupCheck = !isViewer;
+  const setup = useSetupState({ enabled: !isPending && needsSetupCheck });
 
   if (isPending) return <div className="p-6 text-sm text-slate-500">Loading…</div>;
+  if (needsSetupCheck && setup.isPending) {
+    return <div className="p-6 text-sm text-slate-500">Loading…</div>;
+  }
+  // The route that decides whether anyone can use the product at all must not strand a
+  // visitor on a blank page just because this one check failed.
+  if (needsSetupCheck && setup.isError) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center p-6">
+        <div className="max-w-sm space-y-3 text-center">
+          <h1 className="text-lg font-semibold">Homestead is unavailable</h1>
+          <p className="text-sm text-slate-500">
+            Could not check setup status. Nothing has been lost — try again.
+          </p>
+          <button
+            type="button"
+            onClick={() => setup.refetch()}
+            className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const setupComplete = !needsSetupCheck || setup.data?.completedAt != null;
+
+  // The two-way guard, above the admin check below on purpose: a machine with no users
+  // has no admin to authorise anything, so the wizard has to be reachable
+  // unauthenticated for its first step, and only needs a session from the second step
+  // on. Incomplete setup pulls every other route to `/setup`; a viewer is the one
+  // exception, since they can't complete it and must not be trapped by it either.
+  if (!setupComplete) {
+    return (
+      <Routes>
+        <Route path="/setup" element={<SetupWizard />} />
+        <Route path="*" element={<Navigate to="/setup" replace />} />
+      </Routes>
+    );
+  }
+
   if (!me) return <Login />;
 
   const isAdmin = me.role === "admin";
 
   return (
     <Routes>
+      {/* Setup is complete (or this is a viewer, for whom it's moot) — re-entering the
+          wizard would offer "create the first admin" to a second admin, which is why
+          completion is one-way. Written out explicitly rather than left to the
+          catch-all below: that generic 404 fallback would currently redirect `/setup`
+          to the same place, but it exists for unrelated reasons (a typo'd URL), and
+          this rule needs to keep holding even if that one's target ever changes. */}
+      <Route path="/setup" element={<Navigate to="/" replace />} />
       <Route element={<AppLayout me={me} />}>
         <Route path="/" element={<Launcher />} />
         <Route path="/apps" element={isAdmin ? <AdminApps /> : <Navigate to="/" replace />} />

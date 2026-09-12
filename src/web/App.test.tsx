@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
+import { SETUP_STEPS, type SetupState } from "@shared/setup.js";
 import { render, screen, waitFor } from "@testing-library/react";
 import { App, queryClient } from "@web/App";
 import type { Me } from "@web/auth/useSession";
@@ -76,6 +77,12 @@ function stubMe(overrides: Partial<Me> = {}, extra: { apps?: AdminApp[] } = {}) 
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/me")) return json(200, me);
+      // Every test in this file that reaches here predates the setup wizard and assumes
+      // a fully onboarded instance — the setup route guard's own behaviour is exercised
+      // separately, below, with its own fetch stub.
+      if (url.includes("/api/setup/state")) {
+        return json(200, { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 });
+      }
       if (url.includes("/api/launcher")) return json(200, { apps: [] });
       if (url.includes("/containers")) return json(200, { containers: [], dockerReachable: true });
       // `ComposeTab`/`EnvTab` are loaded behind `React.lazy` now (Important 5 of the 1F
@@ -241,5 +248,97 @@ describe("the tab data-loading boundary", () => {
     // producing an update on an unmounted component instead of proving anything about
     // the next test.
     await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+  });
+});
+
+/**
+ * `stubMe` above assumes a fully onboarded instance, which is right for every test
+ * above it but wrong for these — the setup route guard is precisely the behaviour that
+ * assumption would hide. `me: null` renders as a 401 from `/api/me`, matching how the
+ * real endpoint answers when nobody is signed in yet, which is the state a fresh
+ * install boots into.
+ */
+function stubSetupGuard(me: Me | null, setup: SetupState) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/me")) {
+        return me ? json(200, me) : json(401, { error: "unauthenticated" });
+      }
+      if (url.includes("/api/setup/state")) return json(200, setup);
+      if (url.includes("/api/launcher")) return json(200, { apps: [] });
+      return json(200, []);
+    }),
+  );
+}
+
+describe("the setup route guard", () => {
+  it("pulls an anonymous visitor into the wizard while setup is incomplete", async () => {
+    // The reverse guard: nobody has to be signed in yet for step 1, since a machine
+    // with no users has no admin to authorise anything.
+    stubSetupGuard(null, { completedSteps: [], completedAt: null });
+    renderAt("/");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Create admin/ })).toBeTruthy());
+  });
+
+  it("pulls a signed-in admin into the wizard too, not just an anonymous visitor", async () => {
+    stubSetupGuard(
+      {
+        id: "u1",
+        email: "admin@example.com",
+        name: "Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: ["admin"], completedAt: null },
+    );
+    renderAt("/apps");
+
+    // Landed on the wizard's own resume point, not the inventory it asked for.
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Verify host/ })).toBeTruthy());
+  });
+
+  it("pushes a completed setup off /setup and onto the launcher", async () => {
+    // Completion is one-way: re-entering would offer "create the first admin" to a
+    // second admin.
+    stubSetupGuard(
+      {
+        id: "u1",
+        email: "admin@example.com",
+        name: "Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+  });
+
+  it("never sends a viewer into the wizard, even mid-setup", async () => {
+    stubSetupGuard(
+      {
+        id: "u2",
+        email: "viewer@example.com",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: [], completedAt: null },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    // Not merely "landed elsewhere" — a viewer must never even ask. GET /api/setup/state
+    // is admin-only once an admin exists, so calling it here would risk a viewer seeing
+    // a spurious error screen instead of simply not needing the answer.
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
   });
 });
