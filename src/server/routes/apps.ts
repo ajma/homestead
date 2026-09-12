@@ -673,7 +673,16 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/apps/:id/env/reveal", async (request, reply) => {
     const ctx = requireCapability(request, "app:secrets");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const body = z.object({ key: z.string().max(256).optional() }).parse(request.body ?? {});
+    const body = z
+      .object({
+        key: z.string().max(256).optional(),
+        // A closed set, not free text: this lands straight in an audit row, and the
+        // caveat this fixes only holds if that row records a caller-chosen category, not
+        // a caller-chosen sentence. See `RevealAllReason` in `EnvTab.tsx` for what the
+        // two values mean and who sends which.
+        reason: z.enum(["raw-edit", "save-merge"]).optional(),
+      })
+      .parse(request.body ?? {});
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
 
@@ -709,17 +718,21 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // saying a secret was revealed when it was not is worse than none.
     //
     // `detail: { scope: "all" }` is what makes this line distinguishable from the
-    // per-key branch above, which records the one key it revealed. Without it, a table
-    // save (which currently fetches the whole file to reapply changed keys through
-    // `upsertEnv` — see `EnvTab.tsx`'s module doc comment) writes an audit line
-    // byte-identical to someone deliberately dumping every secret via Raw mode. The
-    // audit log's only job is telling those two apart.
+    // per-key branch above, which records the one key it revealed. But `scope: "all"`
+    // alone does not distinguish the two whole-file callers from each other: a table
+    // save (which fetches the whole file to reapply changed keys through `upsertEnv` —
+    // see `EnvTab.tsx`'s module doc comment) used to write a line byte-identical to
+    // someone deliberately dumping every secret via Raw mode. `reason` is the client's
+    // own account of which one this was — validated above against a closed set, so nothing
+    // free-text ever lands here — and is what actually lets an auditor tell them apart.
+    // It is optional (older or non-browser callers may not send it) so its absence is
+    // itself informative rather than a validation failure.
     await audit(db, ctx, {
       action: "app.env_revealed",
       targetType: "app",
       targetId: id,
       ip: request.ip,
-      detail: { scope: "all" },
+      detail: body.reason ? { scope: "all", reason: body.reason } : { scope: "all" },
     });
     return { content: file.content, hash: file.hash, exists: file.state === "present" };
   });

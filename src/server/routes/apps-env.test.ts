@@ -104,6 +104,53 @@ describe(".env API", () => {
     await app.close();
   });
 
+  it("records why a whole-file reveal happened, so a raw-mode dump reads differently from a save's merge fetch", async () => {
+    // `detail: { scope: "all" }` alone told a whole-file reveal apart from a per-key one,
+    // but not the two whole-file callers from EACH OTHER: a deliberate Raw-mode dump and
+    // the fetch a table save makes to reapply changed keys both hit this same branch and,
+    // without a `reason`, wrote byte-identical audit rows.
+    const { app, cookie, id } = await withEnv();
+    await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { reason: "raw-edit" },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { reason: "save-merge" },
+    });
+
+    const entries = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "app.env_revealed"));
+    expect(entries).toHaveLength(2);
+    expect(entries[0]?.detail).toEqual({ scope: "all", reason: "raw-edit" });
+    expect(entries[1]?.detail).toEqual({ scope: "all", reason: "save-merge" });
+    await app.close();
+  });
+
+  it("rejects a reason outside the closed set, rather than letting free text into an audit row", async () => {
+    const { app, cookie, id } = await withEnv();
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { reason: "because I felt like it" },
+    });
+    expect(res.statusCode).toBe(400);
+
+    const entries = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "app.env_revealed"));
+    expect(entries).toHaveLength(0);
+    await app.close();
+  });
+
   it("refuses to touch a .env it cannot read, rather than replacing it", async () => {
     // The worst outcome available here. `.env` files are routinely chmod 600, so a
     // Homestead running as another uid gets EACCES — and if that read short-circuits to

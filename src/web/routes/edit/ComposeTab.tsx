@@ -355,12 +355,6 @@ export function ComposeTab() {
           actually got an answer. Without this, fixing the typo that caused `serverMessage`
           leaves the same red banner on screen with nothing saying a new check is even
           running, let alone that it might have failed to reach the server at all. */}
-      {/* The one place layer one and layer two can visibly disagree: layer one's
-          diagnostics are always current (they're recomputed synchronously from `text`),
-          but `serverMessage` above is only ever as fresh as the last round trip that
-          actually got an answer. Without this, fixing the typo that caused `serverMessage`
-          leaves the same red banner on screen with nothing saying a new check is even
-          running, let alone that it might have failed to reach the server at all. */}
       {checking && (
         <p className="text-xs italic text-slate-500 dark:text-slate-400">
           Checking with the server… Any message above may be stale until this finishes.

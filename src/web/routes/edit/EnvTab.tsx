@@ -14,6 +14,18 @@ type RevealOne = { key: string; value: string };
 /** `POST /api/apps/:id/env/reveal` with no `key`: the whole file, for raw mode and for save. */
 type RevealAll = { content: string; hash: string | null; exists: boolean };
 
+/**
+ * Why a whole-file reveal is happening — sent to the server so the audit row it writes
+ * says which of the two it was, rather than leaving both indistinguishable "scope: all"
+ * lines for the reader to guess between (see the Important finding this exists to fix).
+ * `"raw-edit"` is `loadRaw`'s own deliberate reveal, for bulk paste. `"save-merge"` is
+ * every other caller here — `handleSave`'s own fetch, its 409 retry, and `openConflict`'s
+ * best-effort disk copy — all triggered by clicking Save, never by the user asking to see
+ * the file. Closed set on purpose: the server validates against it, so nothing free-text
+ * ever lands in an audit row.
+ */
+type RevealAllReason = "raw-edit" | "save-merge";
+
 /** The two 409 causes this tab can hit — see `conflictKindFrom` for how they're told apart. */
 type ConflictKind = "stale_hash" | "env_unreadable" | "unknown";
 
@@ -160,8 +172,9 @@ function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
  * server-side (`upsertEnv` is importable from `src/shared` in both zones); this phase's
  * final fix wave chose not to make that contract change to the file holding credentials
  * under time pressure, and did the smaller, safe half instead: the audit log now records
- * `detail: { scope: "all" }` on this path (see `apps.ts`) so it reads differently from a
- * deliberate Raw-mode dump, even though the underlying transfer is the same. The guard
+ * `detail: { scope: "all", reason: "save-merge" }` on this path (see `apps.ts` and
+ * `RevealAllReason` above) so it reads differently from a deliberate Raw-mode dump
+ * (`reason: "raw-edit"`), even though the underlying transfer is the same. The guard
  * in `onSaveSuccess` below (`if (rawLoaded)`) keeps that fetched copy from also becoming
  * *durable* in this component's state when only table mode triggered it — see Important
  * 2 in the phase's final review — but the transient exposure on the wire and in memory
@@ -265,18 +278,21 @@ export function EnvTab() {
     [],
   );
 
-  const fetchWhole = useCallback((): Promise<RevealAll> => {
-    return apiFetch<RevealAll>(`/api/apps/${appId}/env/reveal`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-  }, [appId]);
+  const fetchWhole = useCallback(
+    (reason: RevealAllReason): Promise<RevealAll> => {
+      return apiFetch<RevealAll>(`/api/apps/${appId}/env/reveal`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      });
+    },
+    [appId],
+  );
 
   const loadRaw = useCallback(async () => {
     setRawLoading(true);
     setRawError(null);
     try {
-      const data = await fetchWhole();
+      const data = await fetchWhole("raw-edit");
       if (!mountedRef.current) return;
       setRawText(data.content);
       setRawBaseline(data.content);
@@ -413,7 +429,9 @@ export function EnvTab() {
       mine,
     });
     try {
-      const disk = await fetchWhole();
+      // Always in service of a save that just got refused — never a deliberate raw-mode
+      // reveal, even when what triggered the conflict was raw mode's own dirty text.
+      const disk = await fetchWhole("save-merge");
       setConflict((prev) => (prev ? { ...prev, disk } : prev));
     } catch {
       // Best effort — see the comment above.
@@ -432,7 +450,7 @@ export function EnvTab() {
       if (rawLoaded) {
         base = { content: rawText, hash: rawHash };
       } else {
-        const whole = await fetchWhole();
+        const whole = await fetchWhole("save-merge");
         base = { content: whole.content, hash: whole.hash };
       }
       const content = applyEdits(base.content);
@@ -469,7 +487,7 @@ export function EnvTab() {
         // guarantees for untouched LINES within one save. A key the concurrent edit
         // also changed, or deleted, does not — see the module doc comment.
         try {
-          const fresh = await fetchWhole();
+          const fresh = await fetchWhole("save-merge");
           const freshEntries = parseEnv(fresh.content);
 
           const conflicts: KeyConflictEntry[] = [];
@@ -584,6 +602,23 @@ export function EnvTab() {
     setRawHash(disk.hash);
     setRawLoaded(true);
     setConflict(null);
+    // The confirm dialog promises "what you've typed here will be gone" — so every piece
+    // of pending table state has to go too, not just the conflict banner. Leaving any of
+    // these behind would let it silently reapply on top of the disk content the user just
+    // chose to adopt: a stale `edits` entry rewrites a key on the next save, a leftover
+    // `deletedKeys` entry removes one that was never actually deleted here, and a pending
+    // `addedKeys` entry reinserts something that no longer belongs. This was the Critical
+    // finding: a pending delete on this table survived a "load the disk version" and the
+    // next save carried it out anyway, deleting a credential from the file the user had
+    // just told this tab to treat as authoritative.
+    setEdits({});
+    setEditBaselines({});
+    setAddedKeys(new Set());
+    setDeletedKeys(new Set());
+    setRevealed({});
+    setRevealErrors({});
+    setKeyConflict(null);
+    setKeyResolutions({});
     void queryClient.invalidateQueries({ queryKey: envKey(appId) });
   }
 

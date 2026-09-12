@@ -293,7 +293,10 @@ describe("EnvTab", () => {
     expect((screen.getByLabelText(".env file contents") as HTMLTextAreaElement).value).toBe(
       FILE_CONTENT,
     );
-    expect(revealCalls()).toEqual([{}]);
+    // Raw mode's own reveal is the "deliberate reveal" the audit's `reason` exists to
+    // distinguish from a save's merge fetch — see the `reason` findings in apps.ts /
+    // EnvTab.tsx.
+    expect(revealCalls()).toEqual([{ reason: "raw-edit" }]);
 
     fireEvent.change(screen.getByLabelText(".env file contents"), {
       target: { value: `${FILE_CONTENT}NEW_KEY=added\n` },
@@ -499,6 +502,186 @@ describe("EnvTab", () => {
     await waitFor(() =>
       expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull(),
     );
+  });
+
+  it("does not silently reapply a pending delete once the disk version has been loaded", async () => {
+    // Critical from the final review: `handleUseDiskVersion` used to leave `deletedKeys`
+    // (and every other bit of pending table state) untouched. The confirm dialog promises
+    // "what you've typed here will be gone" — but a pending delete surviving that reload
+    // meant the NEXT save carried it out anyway, deleting a credential from the disk
+    // content the user had just chosen to adopt.
+    const base = "DB_PASSWORD=hunter2\nPUID=1000\n";
+    const diskContent = "DB_PASSWORD=hunter2\nPUID=1000\nEXTRA=fromssh\n";
+    let wholeCalls = 0;
+    mockApi({
+      env: {
+        status: 200,
+        body: {
+          entries: [
+            { key: "DB_PASSWORD", masked: MASK },
+            { key: "PUID", masked: MASK },
+          ],
+          exists: true,
+        },
+      },
+      reveal: () => {
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: base, hash: "h1", exists: true } }
+          : { status: 200, body: { content: diskContent, hash: "h2", exists: true } };
+      },
+      put: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h3" } },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    const dbRow = screen.getByText("DB_PASSWORD").closest("tr");
+    if (!dbRow) throw new Error("row not found");
+    fireEvent.click(within(dbRow).getByRole("button", { name: "Delete" }));
+    expect(screen.getByText("Will be removed on save.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Someone changed this file since you loaded it/);
+
+    fireEvent.click(screen.getByText("Show the version currently on disk"));
+    const useDiskButton = screen.getByRole("button", { name: "Load the version on disk instead" });
+    await waitFor(() => expect(useDiskButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(useDiskButton);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Load it" }));
+
+    // The pending delete is gone: DB_PASSWORD is back to a normal row.
+    await waitFor(() => expect(screen.queryByText("Will be removed on save.")).toBeNull());
+    // Nothing left pending — the save button reflects that directly.
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+
+    // A fresh, unrelated edit should be the ONLY thing the next save carries.
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "NEWKEY" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "y" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const body = JSON.parse(puts()[1]?.body as string);
+    expect(body).toEqual({
+      content: `${diskContent}NEWKEY=y\n`,
+      expectedHash: "h2",
+    });
+  });
+
+  it("does not silently reapply a stale value edit once the disk version has been loaded", async () => {
+    const base = "DB_PASSWORD=hunter2\n";
+    const fresh = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
+    const diskContent = "DB_PASSWORD=hunter2\nEXTRA=fromssh\nMORE=1\n";
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: (key) => {
+        if (key) return { status: 200, body: { key, value: "hunter2" } };
+        wholeCalls++;
+        if (wholeCalls === 1)
+          return { status: 200, body: { content: base, hash: "h1", exists: true } };
+        if (wholeCalls === 2)
+          return { status: 200, body: { content: fresh, hash: "h2", exists: true } };
+        return { status: 200, body: { content: diskContent, hash: "h3", exists: true } };
+      },
+      put: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h4" } },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    await waitFor(() => expect(screen.getByDisplayValue("hunter2")).toBeTruthy());
+    fireEvent.change(screen.getByDisplayValue("hunter2"), { target: { value: "newpass" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // The per-key merge's own retry also conflicts (a second concurrent write), which is
+    // the fallback path that lands on the same whole-file conflict raw edits get.
+    await screen.findByText(/Someone changed this file since you loaded it/);
+
+    fireEvent.click(screen.getByText("Show the version currently on disk"));
+    const useDiskButton = screen.getByRole("button", { name: "Load the version on disk instead" });
+    await waitFor(() => expect(useDiskButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(useDiskButton);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Load it" }));
+
+    // The stale edit is gone: the row shows the masked disk value again, not "newpass".
+    await waitFor(() => expect(screen.queryByDisplayValue("newpass")).toBeNull());
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "NEWKEY" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "z" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(3));
+    const body = JSON.parse(puts()[2]?.body as string);
+    expect(body).toEqual({
+      content: `${diskContent}NEWKEY=z\n`,
+      expectedHash: "h3",
+    });
+  });
+
+  it("does not silently reapply a pending add once the disk version has been loaded", async () => {
+    const base = "DB_PASSWORD=hunter2\n";
+    const diskContent = "DB_PASSWORD=hunter2\nEXTRA=fromssh\n";
+    let wholeCalls = 0;
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: "DB_PASSWORD", masked: MASK }], exists: true } },
+      reveal: () => {
+        wholeCalls++;
+        return wholeCalls === 1
+          ? { status: 200, body: { content: base, hash: "h1", exists: true } }
+          : { status: 200, body: { content: diskContent, hash: "h2", exists: true } };
+      },
+      put: [
+        { status: 409, body: { error: "stale_hash", message: "Changed on disk." } },
+        { status: 200, body: { hash: "h3" } },
+      ],
+    });
+    mount();
+    await waitFor(() => expect(screen.getByText("DB_PASSWORD")).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "NEWVAR" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "temp" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    expect(screen.getByText("NEWVAR")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText(/Someone changed this file since you loaded it/);
+
+    fireEvent.click(screen.getByText("Show the version currently on disk"));
+    const useDiskButton = screen.getByRole("button", { name: "Load the version on disk instead" });
+    await waitFor(() => expect(useDiskButton.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(useDiskButton);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Load it" }));
+
+    // The pending add is gone: no more pending "NEWVAR" row.
+    await waitFor(() => expect(screen.queryByText("NEWVAR")).toBeNull());
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "OTHERVAR" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(puts()).toHaveLength(2));
+    const body = JSON.parse(puts()[1]?.body as string);
+    expect(body).toEqual({
+      content: `${diskContent}OTHERVAR=x\n`,
+      expectedHash: "h2",
+    });
+    // The abandoned add never made it into the save that actually landed.
+    expect(body.content).not.toContain("NEWVAR");
   });
 
   it("says the file exists but cannot be read, distinctly from having none", async () => {
