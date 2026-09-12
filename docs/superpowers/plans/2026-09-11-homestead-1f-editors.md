@@ -44,7 +44,7 @@
 
 ## File Structure
 
-**Server — new:** `scripts/vendor-compose-schema.ts` (refresh the pinned schema), `src/server/schema/compose-spec.json` (vendored, checked in), `src/server/schema/PINNED.md` (the SHA and how to refresh).
+**Server — new:** `scripts/vendor-compose-schema.ts` (refresh the pinned schema), `src/shared/schema/compose-spec.json` (vendored, checked in), `src/shared/schema/PINNED.md` (the SHA and how to refresh).
 
 **Server — modified:** `src/server/routes/apps.ts` (per-key reveal).
 
@@ -71,11 +71,11 @@
 ### Task 1: Vendor the compose schema at a pinned commit
 
 **Files:**
-- Create: `scripts/vendor-compose-schema.ts`, `src/server/schema/compose-spec.json`, `src/server/schema/PINNED.md`
+- Create: `scripts/vendor-compose-schema.ts`, `src/shared/schema/compose-spec.json`, `src/shared/schema/PINNED.md`
 - Test: `src/shared/compose-schema-vendored.test.ts`
 
 **Interfaces:**
-- Produces: `src/server/schema/compose-spec.json`, importable as JSON; `PINNED.md` recording the upstream commit.
+- Produces: `src/shared/schema/compose-spec.json`, importable as JSON; `PINNED.md` recording the upstream commit.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -85,7 +85,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const schema = JSON.parse(readFileSync("src/server/schema/compose-spec.json", "utf8"));
+const schema = JSON.parse(readFileSync("src/shared/schema/compose-spec.json", "utf8"));
 
 describe("the vendored compose schema", () => {
   it("is JSON Schema draft 2020-12", () => {
@@ -113,14 +113,14 @@ describe("the vendored compose schema", () => {
   it("records the commit it was vendored from", () => {
     // Not fetched at runtime: the NAS may be offline, and an upstream edit must not
     // silently change editor behaviour. The pin is what makes that true.
-    const pinned = readFileSync("src/server/schema/PINNED.md", "utf8");
+    const pinned = readFileSync("src/shared/schema/PINNED.md", "utf8");
     expect(pinned).toMatch(/[0-9a-f]{40}/);
   });
 
   it("is small enough to ship to a browser", () => {
     // Roughly 76 KB. An order of magnitude larger would mean upstream restructured and
     // the walk in `@shared/compose-schema` probably needs revisiting too.
-    expect(readFileSync("src/server/schema/compose-spec.json").byteLength).toBeLessThan(300_000);
+    expect(readFileSync("src/shared/schema/compose-spec.json").byteLength).toBeLessThan(300_000);
   });
 });
 ```
@@ -147,7 +147,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const REPO = "compose-spec/compose-spec";
-const OUT = resolve("src/server/schema/compose-spec.json");
+const OUT = resolve("src/shared/schema/compose-spec.json");
 
 async function main() {
   const ref = process.argv[2] ?? "main";
@@ -210,7 +210,7 @@ Run: `pnpm build`, then grep the script for any import of it from `src/`. Nothin
 - [ ] **Step 7: Commit**
 
 ```bash
-git add scripts/vendor-compose-schema.ts src/server/schema/ src/shared/compose-schema-vendored.test.ts
+git add scripts/vendor-compose-schema.ts src/shared/schema/ src/shared/compose-schema-vendored.test.ts
 git commit -m "Vendor the compose schema at a pinned commit, so an offline NAS still completes"
 ```
 

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const schema = JSON.parse(readFileSync("src/server/schema/compose-spec.json", "utf8"));
+const schema = JSON.parse(readFileSync("src/shared/schema/compose-spec.json", "utf8"));
 
 describe("the vendored compose schema", () => {
   it("is JSON Schema draft 2020-12", () => {
@@ -26,16 +26,33 @@ describe("the vendored compose schema", () => {
     expect(described.length).toBeGreaterThan(Object.keys(service).length * 0.8);
   });
 
+  it("wires services through patternProperties into $defs.service", () => {
+    // The exact shape `@shared/compose-schema`'s walk depends on. Without this, upstream
+    // could swap `patternProperties` for something else, leave `$defs.service` untouched,
+    // and every other assertion here would still pass while the editor silently offered
+    // no completions inside a service — the outage this file exists to prevent.
+    const services = schema.properties?.services;
+    const patterns = services?.patternProperties ?? {};
+    const refs = Object.values(patterns).map((v) => (v as { $ref?: string }).$ref);
+    expect(refs).toContain("#/$defs/service");
+  });
+
+  it("keeps the enum the editor completes restart values from", () => {
+    // One concrete enum, so a restructure that flattens enums out is caught here rather
+    // than as an empty dropdown nobody reports.
+    expect(schema.$defs?.service?.properties?.restart).toBeTruthy();
+  });
+
   it("records the commit it was vendored from", () => {
     // Not fetched at runtime: the NAS may be offline, and an upstream edit must not
     // silently change editor behaviour. The pin is what makes that true.
-    const pinned = readFileSync("src/server/schema/PINNED.md", "utf8");
+    const pinned = readFileSync("src/shared/schema/PINNED.md", "utf8");
     expect(pinned).toMatch(/[0-9a-f]{40}/);
   });
 
   it("is small enough to ship to a browser", () => {
     // Roughly 76 KB. An order of magnitude larger would mean upstream restructured and
     // the walk in `@shared/compose-schema` probably needs revisiting too.
-    expect(readFileSync("src/server/schema/compose-spec.json").byteLength).toBeLessThan(300_000);
+    expect(readFileSync("src/shared/schema/compose-spec.json").byteLength).toBeLessThan(300_000);
   });
 });

@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   "files": {
-    "includes": ["src/**", "*.config.ts", "!src/server/schema/compose-spec.json"]
+    "includes": ["src/**", "*.config.ts", "!src/shared/schema/compose-spec.json"]
   },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": {

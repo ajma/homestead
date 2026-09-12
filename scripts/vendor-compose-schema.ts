@@ -10,7 +10,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const REPO = "compose-spec/compose-spec";
-const OUT = resolve("src/server/schema/compose-spec.json");
+const OUT = resolve("src/shared/schema/compose-spec.json");
 
 async function main() {
   const ref = process.argv[2] ?? "main";
