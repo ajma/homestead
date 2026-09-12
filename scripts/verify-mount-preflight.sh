@@ -35,7 +35,9 @@ DIRS=()
 
 cleanup() {
   for c in "${CONTAINERS[@]:-}"; do
-    [ -n "$c" ] && docker rm -f "$c" >/dev/null 2>&1 || true
+    # -v also removes the anonymous /app/data volume Docker creates for each container;
+    # without it, `docker rm -f` leaves one orphaned volume behind per run of this script.
+    [ -n "$c" ] && docker rm -fv "$c" >/dev/null 2>&1 || true
   done
   for d in "${DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d" || true

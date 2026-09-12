@@ -1,28 +1,49 @@
 import { describe, expect, it, vi } from "vitest";
 import { type Closeable, createShutdown } from "./shutdown.js";
 
+// Resolves `name` onto `order` after `ticks` microtask hops rather than on invocation.
+// `scheduler.stop`/`retention.stop`/`events.closeAll` are synchronous in the real
+// `Closeable` type, but `shutdown.ts` awaits every stage through its `stage`/
+// `stageWithTimeout` helper regardless of whether the real implementation is sync or
+// async: `await run()` awaits whatever `run()` actually returns at runtime, even though
+// the static type says `void`. Returning a promise here is exactly what TS's
+// void-returning-function compatibility rule permits.
+//
+// A single microtask hop is not enough: if stage K's fake and stage K+1's fake both push
+// after exactly one hop, a dropped `await` on stage K still leaves the two pushes in
+// invocation order, because both hops land in the same microtask "round" and FIFO
+// ordering alone preserves the correct sequence — invisible to every assertion below.
+// Giving each stage strictly FEWER hops than the one before it means that when a dropped
+// `await` lets stage K+1 start in that same round as stage K, K+1's shorter chain
+// resolves — and pushes — before K's longer one does, which is exactly the visible
+// reordering a missing `await` should produce. When every stage IS properly awaited, the
+// tick counts don't matter: stage K+1 never even starts until stage K's promise has
+// already resolved, so the order is scheduler, retention, jobs, events, server regardless.
+function afterTicks(order: string[], name: string, ticks: number): Promise<void> {
+  let settled: Promise<void> = Promise.resolve();
+  for (let i = 0; i < ticks; i++) {
+    settled = settled.then(() => {});
+  }
+  return settled.then(() => {
+    order.push(name);
+  });
+}
+
 function parts(overrides: Partial<Closeable> = {}): { parts: Closeable; order: string[] } {
   const order: string[] = [];
   const base: Closeable = {
-    scheduler: { stop: () => void order.push("scheduler") },
-    retention: { stop: () => void order.push("retention") },
+    scheduler: { stop: () => afterTicks(order, "scheduler", 5) },
+    retention: { stop: () => afterTicks(order, "retention", 4) },
     jobs: {
-      // Genuinely asynchronous, and pushes its marker on COMPLETION rather than on
-      // invocation. `jobs` is the one stage whose whole point is that a cancelled job's
-      // terminal write is awaited before the sequence moves on (job-runner.ts:68-79) — a
-      // fake that pushes synchronously on invocation would pass every ordering assertion
-      // below even if the code dropped the `await` on this stage entirely, which is
-      // exactly the gap the 1H review measured (shutdown.ts:102).
-      shutdown: async () => {
-        await Promise.resolve();
-        order.push("jobs");
-      },
+      // `jobs` is the one stage whose whole point is that a cancelled job's terminal
+      // write is awaited before the sequence moves on (job-runner.ts:68-79) — this is
+      // the original gap the 1H review measured (shutdown.ts:102), now folded into the
+      // same decreasing-ticks scheme as every other stage.
+      shutdown: () => afterTicks(order, "jobs", 3),
     },
-    events: { closeAll: () => void order.push("events") },
+    events: { closeAll: () => afterTicks(order, "events", 2) },
     server: {
-      close: async () => {
-        order.push("server");
-      },
+      close: () => afterTicks(order, "server", 1),
     },
     db: { close: () => void order.push("db") },
     ...overrides,
