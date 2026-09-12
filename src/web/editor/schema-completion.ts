@@ -178,8 +178,13 @@ export function pathAt(text: string, pos: number): string[] {
  * by whitespace — mid-token, it's just a character. Treating every unquoted `#` as a
  * comment starter would blind completion inside a bare (unquoted) scalar that legitimately
  * contains one, such as a git build-context URL (`https://github.com/u/r.git#branch:dir`).
+ *
+ * Exported so `env-completion.ts` can reuse it: `${` interpolation is never expanded
+ * inside a single-quoted YAML scalar (compose's own rule, not this codebase's), so a
+ * `${` typed inside `'literal ${FOO}'` should get no popup either — the same class of
+ * false trigger this already exists to prevent for schema completion.
  */
-function blockedByCommentOrQuote(beforeCursor: string): boolean {
+export function blockedByCommentOrQuote(beforeCursor: string): boolean {
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < beforeCursor.length; i++) {

@@ -39,7 +39,16 @@ export const containersKey = (id: string) => ["admin", "apps", id, "containers"]
 export const jobsKey = (id: string) => ["admin", "apps", id, "jobs"] as const;
 export const imagesKey = (id: string) => ["admin", "apps", id, "images"] as const;
 export const probesKey = (id: string) => ["admin", "apps", id, "probes"] as const;
+export const composeKey = (id: string) => ["admin", "apps", id, "compose"] as const;
 export const scanKey = ["admin", "scan"] as const;
+
+/**
+ * `GET /api/apps/:id/compose`'s shape. Distinct from the PUT response (`{ hash }` only,
+ * no `content` — see `apps.ts`'s route) because a save doesn't hand back the text it was
+ * just given; `ComposeTab` folds the hash it gets back into its own copy of `content`
+ * rather than expecting the server to echo it.
+ */
+export type ComposeFile = { content: string; hash: string };
 
 export function useAdminApps() {
   return useQuery({
@@ -80,6 +89,16 @@ export function useImages(id: string | null) {
 
 export function useProbes(id: string | null) {
   return useQuery(perApp<ProbeRow[]>(probesKey(id ?? ""), id, `/api/apps/${id}/probes`, 15_000));
+}
+
+/**
+ * `ComposeTab` seeds its own editable copy of `content`/hash from this exactly once
+ * (see that component's doc comment) — a background refetch here must never overwrite
+ * text someone is mid-edit on, which is why this stays a plain read-only query rather
+ * than something the tab treats as the live source of truth after the first load.
+ */
+export function useCompose(id: string | null) {
+  return useQuery(perApp<ComposeFile>(composeKey(id ?? ""), id, `/api/apps/${id}/compose`, 15_000));
 }
 
 export function useScan(enabled: boolean) {

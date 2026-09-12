@@ -3,6 +3,7 @@ import { useSession } from "@web/auth/useSession";
 import { AdminApps } from "@web/routes/AdminApps";
 import { AppLayout } from "@web/routes/AppLayout";
 import { EditApp } from "@web/routes/EditApp";
+import { ComposeTab } from "@web/routes/edit/ComposeTab";
 import { ContainersTab } from "@web/routes/edit/ContainersTab";
 import { LogsTab } from "@web/routes/edit/LogsTab";
 import { OverviewTab } from "@web/routes/edit/OverviewTab";
@@ -39,6 +40,7 @@ function Routed() {
           <Route path="containers" element={<ContainersTab />} />
           <Route path="logs" element={<LogsTab />} />
           <Route path="probes" element={<ProbesTab />} />
+          <Route path="compose" element={<ComposeTab />} />
         </Route>
         <Route
           path="/settings/*"

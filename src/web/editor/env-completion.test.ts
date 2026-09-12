@@ -119,6 +119,16 @@ describe("envCompletion", () => {
     expect(result?.options.map((o) => o.label)).toEqual(expect.arrayContaining(["DB_HOST"]));
   });
 
+  it("offers nothing inside a single-quoted scalar, since compose never interpolates there", async () => {
+    // Docker Compose's own documented rule: a single-quoted value is taken literally,
+    // never substituted. A popup offering `.env` keys inside `'literal ${FOO}'` would be
+    // advertising a completion for something that can never actually resolve.
+    const source = envCompletion(() => ["DB_HOST"]);
+    const text = "command: 'literal ${";
+    const result = await complete(source, contextAt(text, text.length, true));
+    expect(result).toBeNull();
+  });
+
   it("never reaches for anything beyond a key name (no secret values pass through)", async () => {
     // envCompletion's whole contract is that it takes `keys: () => string[]` — plain
     // names, never values. This test exists to make a future signature change (e.g.

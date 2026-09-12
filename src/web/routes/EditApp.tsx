@@ -22,9 +22,9 @@ const STATUS_FALLBACK: Record<AppStatus, string> = {
 };
 
 /**
- * `overview`, `containers`, `logs`, `probes` today; Phase 1F adds `compose` and `env`. A
- * list rather than literals scattered across the nav markup, so a later tab is one entry
- * here plus one child `<Route>` in `App.tsx` — not a hunt through JSX.
+ * `overview`, `containers`, `logs`, `probes`, `compose` today; Phase 1F still owes
+ * `env`. A list rather than literals scattered across the nav markup, so a later tab is
+ * one entry here plus one child `<Route>` in `App.tsx` — not a hunt through JSX.
  *
  * Deliberately no `exposure` entry: Cloudflare is Phase 2.
  */
@@ -33,6 +33,7 @@ const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "containers", label: "Containers" },
   { to: "logs", label: "Logs" },
   { to: "probes", label: "Probes" },
+  { to: "compose", label: "Compose" },
 ];
 
 /**

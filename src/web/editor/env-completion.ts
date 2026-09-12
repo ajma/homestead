@@ -3,6 +3,7 @@ import type {
   CompletionResult,
   CompletionSource,
 } from "@codemirror/autocomplete";
+import { blockedByCommentOrQuote } from "./schema-completion";
 
 const NOT_DEFINED = "not defined in .env";
 
@@ -55,11 +56,21 @@ function dollarRunBefore(text: string, index: number): number {
  * `depends_on` target), surfaced here for free instead of waiting on a debounced
  * round trip. A name that is still a valid prefix of some real key (`DB_` while
  * `DB_HOST` exists) is left unflagged, since it isn't wrong yet — only typed so far.
+ *
+ * `blockedByCommentOrQuote` (shared with schema-completion.ts) is checked against the
+ * cursor's line before anything else: compose never interpolates `${...}` inside a
+ * single-quoted scalar, so `'literal ${FOO}'` typed with the cursor after the brace
+ * must not offer a popup for a variable reference that will never be expanded — the
+ * same class of false trigger `$$` already gets a dedicated check for below.
  */
 export function envCompletion(keys: () => string[]): CompletionSource {
   return (context: CompletionContext): CompletionResult | null => {
     const match = context.matchBefore(/\$\{[\w.-]*/);
     if (!match) return null;
+
+    const line = context.state.doc.lineAt(context.pos);
+    const beforeCursor = line.text.slice(0, context.pos - line.from);
+    if (blockedByCommentOrQuote(beforeCursor)) return null;
 
     const text = context.state.doc.toString();
     const bracePos = match.from + 1;
