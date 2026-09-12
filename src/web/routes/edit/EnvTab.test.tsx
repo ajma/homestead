@@ -2,11 +2,17 @@
 
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { envKey } from "@web/api/admin";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { EnvTab, nextRawState } from "@web/routes/edit/EnvTab";
-import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import {
+  createMemoryRouter,
+  createRoutesFromElements,
+  Outlet,
+  Route,
+  RouterProvider,
+} from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const app: AdminApp = {
@@ -42,22 +48,30 @@ const MASK = "••••••••";
 const FILE_CONTENT = "# Database\nDB_PASSWORD=hunter2\nPUID=1000 # keep this note\n";
 const FILE_HASH = "h1";
 
+/**
+ * `createMemoryRouter`/`RouterProvider`, not the plain `MemoryRouter`/`Routes` tree this
+ * file used before Task 4: `EnvTab` now calls `useUnsavedChanges`, which calls
+ * `useBlocker`, and `useBlocker` throws outside a data router. The extra `overview`
+ * sibling route exists only so the navigation-blocking tests below have somewhere to
+ * navigate to that isn't `env` itself.
+ */
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createMemoryRouter(
+    createRoutesFromElements(
+      <Route path="/apps/:slug/*" element={<Outlet context={{ app } satisfies EditAppContext} />}>
+        <Route path="env" element={<EnvTab />} />
+        <Route path="overview" element={<p>Overview tab</p>} />
+      </Route>,
+    ),
+    { initialEntries: ["/apps/jellyfin/env"] },
+  );
   return {
     client,
+    router,
     ...render(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/apps/jellyfin/env"]}>
-          <Routes>
-            <Route
-              path="/apps/:slug/*"
-              element={<Outlet context={{ app } satisfies EditAppContext} />}
-            >
-              <Route path="env" element={<EnvTab />} />
-            </Route>
-          </Routes>
-        </MemoryRouter>
+        <RouterProvider router={router} />
       </QueryClientProvider>,
     ),
   };
@@ -1189,5 +1203,68 @@ describe("EnvTab", () => {
 
     expect(screen.queryByText(/Someone changed this file since you loaded it/)).toBeNull();
     expect(puts()).toHaveLength(1);
+  });
+
+  // Everything `useUnsavedChanges` itself covers in depth (clean vs dirty, proceed,
+  // cancel, releasing mid-dialog) lives in `use-unsaved-changes.test.tsx` against the
+  // hook directly. These two only check that THIS component — which had no protection
+  // against losing unsaved edits at all before Task 4 — actually wires the hook up to a
+  // real in-app navigation and to `ConfirmDialog`.
+  it("blocks an in-app tab switch with an unsaved add, and lets it through on confirm", async () => {
+    mockApi({ env: { status: 200, body: { entries: [], exists: false } } });
+    const { router } = mount();
+    await waitFor(() => expect(screen.getByText(/no \.env file yet/i)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "TZ" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "Europe/London" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+
+    expect(router.state.location.pathname).toBe("/apps/jellyfin/env");
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/unsaved changes/)).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard changes and leave" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/apps/jellyfin/overview"));
+  });
+
+  it("does not block an in-app tab switch once the change is saved, and staying cancels the switch", async () => {
+    mockApi({ env: { status: 200, body: { entries: [], exists: false } } });
+    const { router } = mount();
+    await waitFor(() => expect(screen.getByText(/no \.env file yet/i)).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("New variable name"), { target: { value: "TZ" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "Europe/London" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+    const dialog = screen.getByRole("dialog");
+
+    // Cancel — the default-focused button, per `ConfirmDialog`'s own doc comment — leaves
+    // the user right where they were, still editing.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(router.state.location.pathname).toBe("/apps/jellyfin/env");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // Waiting on the PUT being *sent* (`puts()`) isn't enough here: the mock records the
+    // call the instant `fetch` is invoked, before its response — and therefore
+    // `onSaveSuccess`'s state clears — have actually run. Waiting for Save to disable is
+    // waiting for `dirty` itself to have settled false, which is what this test needs
+    // before the next navigate.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true),
+    );
+
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+    expect(router.state.location.pathname).toBe("/apps/jellyfin/overview");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

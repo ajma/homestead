@@ -6,7 +6,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { ComposeTab } from "@web/routes/edit/ComposeTab";
-import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
+import {
+  createMemoryRouter,
+  createRoutesFromElements,
+  Outlet,
+  Route,
+  RouterProvider,
+} from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const app: AdminApp = {
@@ -36,22 +42,30 @@ const app: AdminApp = {
 
 const ORIGINAL = "services:\n  web:\n    image: nginx\n";
 
+/**
+ * `createMemoryRouter`/`RouterProvider`, not the plain `MemoryRouter`/`Routes` tree this
+ * file used before Task 4: `ComposeTab` now calls `useUnsavedChanges`, which calls
+ * `useBlocker`, and `useBlocker` throws outside a data router. The extra `overview`
+ * sibling route exists only so the navigation-blocking tests below have somewhere to
+ * navigate to that isn't `compose` itself.
+ */
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const router = createMemoryRouter(
+    createRoutesFromElements(
+      <Route path="/apps/:slug/*" element={<Outlet context={{ app } satisfies EditAppContext} />}>
+        <Route path="compose" element={<ComposeTab />} />
+        <Route path="overview" element={<p>Overview tab</p>} />
+      </Route>,
+    ),
+    { initialEntries: ["/apps/jellyfin/compose"] },
+  );
   return {
     client,
+    router,
     ...render(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/apps/jellyfin/compose"]}>
-          <Routes>
-            <Route
-              path="/apps/:slug/*"
-              element={<Outlet context={{ app } satisfies EditAppContext} />}
-            >
-              <Route path="compose" element={<ComposeTab />} />
-            </Route>
-          </Routes>
-        </MemoryRouter>
+        <RouterProvider router={router} />
       </QueryClientProvider>,
     ),
   };
@@ -372,6 +386,60 @@ describe("ComposeTab", () => {
     const dirty = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(dirty);
     expect(dirty.defaultPrevented).toBe(true);
+  });
+
+  // Everything `useUnsavedChanges` itself covers in depth (clean vs dirty, proceed,
+  // cancel, releasing mid-dialog) lives in `use-unsaved-changes.test.tsx` against the
+  // hook directly. These two only check that THIS component actually wires the hook up
+  // to a real in-app navigation and to `ConfirmDialog` — the integration, not the logic.
+  it("blocks an in-app tab switch with unsaved changes, and lets it through on confirm", async () => {
+    mockApi();
+    const { container, router } = mount();
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+    typeInto(findView(container), "\n# unsaved\n");
+
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+
+    expect(router.state.location.pathname).toBe("/apps/jellyfin/compose");
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/unsaved changes/)).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard changes and leave" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/apps/jellyfin/overview"));
+  });
+
+  it("does not block an in-app tab switch once the changes are saved, and staying cancels the switch", async () => {
+    mockApi();
+    const { container, router } = mount();
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+    typeInto(findView(container), "\n# unsaved\n");
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+    const dialog = screen.getByRole("dialog");
+
+    // Cancel — the default-focused button, per `ConfirmDialog`'s own doc comment — leaves
+    // the user right where they were, still editing.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(router.state.location.pathname).toBe("/apps/jellyfin/compose");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Saving clears `dirty`; a later navigation attempt should go straight through with
+    // no dialog at all.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true),
+    );
+
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+    expect(router.state.location.pathname).toBe("/apps/jellyfin/overview");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("says the file is unreadable rather than showing an empty editor", async () => {

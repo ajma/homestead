@@ -12,6 +12,7 @@ import { schemaCompletion } from "@web/editor/schema-completion";
 import { useServerValidate } from "@web/editor/use-server-validate";
 import { YamlEditor } from "@web/editor/YamlEditor";
 import { lintYaml } from "@web/editor/yaml-lint";
+import { useUnsavedChanges } from "@web/lib/use-unsaved-changes";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
@@ -165,22 +166,12 @@ export function ComposeTab() {
     performSave(text, conflict.disk.hash);
   }
 
-  // A ref, read from a `beforeunload` listener installed once on mount. Rebuilding the
-  // listener on every keystroke (the naive `[dirty]` dependency) would work too, but
-  // this way there is exactly one add/remove pair for the component's whole lifetime.
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
-  useEffect(() => {
-    function handler(event: BeforeUnloadEvent) {
-      if (!dirtyRef.current) return;
-      event.preventDefault();
-      // Chrome ignores `preventDefault` alone and still requires `returnValue` set to
-      // something truthy to show its own confirmation prompt.
-      event.returnValue = "";
-    }
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, []);
+  // Both ways this tab's edits can otherwise vanish silently: an in-app tab click
+  // (`useBlocker`, data-router-only since Task 3) and closing the tab or reloading
+  // (`beforeunload`, which no router can see). See `useUnsavedChanges`'s own doc comment
+  // for the ref-based `beforeunload` pattern this replaces — `ComposeTab` used to
+  // implement that alone, uniquely among the editors, and nothing here duplicates it now.
+  const { blocked: navBlocked, proceed: proceedNav, cancel: cancelNav } = useUnsavedChanges(dirty);
 
   // Computed once per mount, not re-read on resize — a popup that was absent when this
   // tab opened staying absent through a later resize is an acceptable simplification;
@@ -340,6 +331,17 @@ export function ComposeTab() {
           destructive
           onConfirm={handleKeepMineOverwrite}
           onClose={() => setConfirmingOverwrite(false)}
+        />
+      )}
+
+      {navBlocked && (
+        <ConfirmDialog
+          title="Leave without saving?"
+          message="compose.yaml has unsaved changes. Leaving this tab now discards them — there is no way to get them back afterwards."
+          confirmLabel="Discard changes and leave"
+          destructive
+          onConfirm={proceedNav}
+          onClose={cancelNav}
         />
       )}
 
