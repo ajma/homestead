@@ -40,14 +40,21 @@ function valuesFor(schema: unknown, path: string[]): SchemaSuggestion[] {
   return curated.map((label) => ({ label, docs: CURATED_DOCS }));
 }
 
-function indentOf(line: string): number {
+/**
+ * Exported alongside {@link pathAt} so document-completion.ts's declaredNames scan can
+ * reuse the same indentation reading instead of re-deriving it.
+ */
+export function indentOf(line: string): number {
   let count = 0;
   while (count < line.length && line[count] === " ") count++;
   return count;
 }
 
-/** A key line's key, or `null` if the trimmed text isn't shaped like `key:` / `key: value`. */
-function keyOf(trimmed: string): string | null {
+/**
+ * A key line's key, or `null` if the trimmed text isn't shaped like `key:` / `key: value`.
+ * Exported for the same reason as {@link indentOf}.
+ */
+export function keyOf(trimmed: string): string | null {
   const match = /^([^:#]+):(\s|$)/.exec(trimmed);
   if (!match) return null;
   return (match[1] ?? "").trim();
