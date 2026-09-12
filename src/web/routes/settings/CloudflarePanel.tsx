@@ -25,9 +25,12 @@ const VERIFIED_AT_FORMATTER = new Intl.DateTimeFormat("en-US", {
  * in the browser is this component's own `token` state between being typed and the PUT
  * either succeeding (state is cleared) or failing (state is kept, so a 40-character token
  * doesn't need retyping because the account id next to it had one wrong character).
- * `useSaveCloudflareCredentials`'s cached mutation result is the verified `CloudflareStatus`
- * response, never the request body — Phase 1F's defect was raw `.env` values sitting in
- * the query cache for five minutes; nothing here puts the token in a query at all.
+ * `useSaveCloudflareCredentials` deliberately does not go through `useMutation` — see its
+ * doc comment in `src/web/api/cloudflare.ts` — specifically because `useMutation` would
+ * keep this token as `state.variables` in the app-wide `QueryClient`'s `MutationCache`
+ * for five minutes after this component unmounts, on success and on failure alike. That
+ * was Phase 1F's `.env`-in-the-query-cache defect recurring one layer down, in the
+ * mutation cache; a plain `apiFetch` call has no such cache to land in.
  *
  * Configured and not-configured render two disjoint things, not one form with a
  * conditionally-filled token field: once configured, there is no token input on screen at
@@ -40,18 +43,16 @@ export function CloudflarePanel() {
   const status = useCloudflareStatus();
   const configured = status.data?.configured === true;
   const zones = useCloudflareZones(configured);
-  const saveMutation = useSaveCloudflareCredentials();
+  const saveCredentials = useSaveCloudflareCredentials();
   const deleteMutation = useDeleteCloudflareCredentials();
 
   const [accountId, setAccountId] = useState("");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // Plain state, set synchronously before `mutate` — not derived from
-  // `saveMutation.isPending`, which TanStack's `notifyManager` defers through
-  // `setTimeout(fn, 0)` (see `StepCreateAdmin` for the same reasoning applied to a
-  // double-submit guard). Not load-bearing for correctness here the way it is there —
-  // there is no double-request hazard from a second click landing before the button
-  // disables — but consistent with every other form in this codebase.
+  // Plain state, set synchronously before the save call — there is no double-request
+  // hazard from a second click landing before the button disables here (unlike
+  // `StepCreateAdmin`'s `notifyManager`-deferred guard), but consistent with every other
+  // form in this codebase.
   const [saving, setSaving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
 
@@ -59,21 +60,22 @@ export function CloudflarePanel() {
     event.preventDefault();
     setError(null);
     setSaving(true);
-    saveMutation.mutate(
-      { token, accountId },
-      {
-        onSuccess: () => {
-          setSaving(false);
-          // The one place the token is deliberately forgotten: the save succeeded, the
-          // server verified and stored it, and this component has no further reason to
-          // hold it in memory for the rest of the tab's lifetime.
-          setToken("");
-        },
-        onError: (mutationError) => {
-          setSaving(false);
-          setError(describeCloudflareError(mutationError, "Could not save these credentials."));
-          // `accountId` and `token` are deliberately left exactly as typed here.
-        },
+    saveCredentials({ token, accountId }).then(
+      () => {
+        setSaving(false);
+        // The one place the token is deliberately forgotten: the save succeeded, the
+        // server verified and stored it, and this component has no further reason to
+        // hold it in memory for the rest of the tab's lifetime. Load-bearing beyond just
+        // this render: `data.configured` can flip back to `false` later (another tab
+        // removing credentials, a failed background refetch) and re-show this form, and
+        // when it does, `token` must already be empty rather than still holding what was
+        // just saved.
+        setToken("");
+      },
+      (mutationError: unknown) => {
+        setSaving(false);
+        setError(describeCloudflareError(mutationError, "Could not save these credentials."));
+        // `accountId` and `token` are deliberately left exactly as typed here.
       },
     );
   }

@@ -84,32 +84,43 @@ export function describeCloudflareError(error: unknown, fallback: string): strin
 }
 
 /**
- * `PUT /api/cloudflare/credentials` returns the freshly-verified `CloudflareStatus`, so
- * a success here writes straight into `cloudflareStatusKey`'s cache — the same
- * write-the-response-back shape `useCompleteStep` and `useFinishSetup` already use —
- * rather than triggering a second round trip through `invalidateQueries`. The token
- * itself is never part of this mutation's cached result: the response body has no such
- * field (`CloudflareStatus` carries only `tokenHint`), so there is nothing here for
- * Phase 1F's defect (a secret sitting in the query cache) to recur as.
+ * Deliberately NOT `useMutation`. `useMutation` stores whatever is passed to `mutate()`
+ * as `state.variables` on the `Mutation` object it tracks inside the `QueryClient`'s
+ * `MutationCache` — and `src/web/App.tsx`'s `QueryClient` is an app-wide singleton with
+ * the default 5-minute `gcTime`. A `{ token, accountId }` variables object would sit
+ * there in plaintext, reachable via `queryClient.getMutationCache()`, on success AND on
+ * failure, surviving this panel's unmount for five minutes. That is Phase 1F's defect
+ * (raw `.env` values left in the query cache) recurring one layer down — the mutation
+ * cache, not the query cache — which is exactly why `EnvTab`'s reveal and save
+ * (`src/web/routes/edit/EnvTab.tsx`) already bypass `useMutation` for the same reason:
+ * "there is nothing here worth caching". A plain `apiFetch` call has no cache to leak
+ * into at all.
  *
- * `cloudflareZonesKey` is invalidated, not written directly: this mutation's own
- * response never carries zones, only `CloudflarePanel`'s separate `useCloudflareZones`
- * fetch does, and a stale or absent zones list left over from before this save would be
- * a lie the moment the panel calls this "configured" for a different account.
+ * `PUT /api/cloudflare/credentials` returns the freshly-verified `CloudflareStatus`, so a
+ * success here writes straight into `cloudflareStatusKey`'s cache — the same
+ * write-the-response-back shape `useCompleteStep` and `useFinishSetup` use via
+ * `useMutation`'s `onSuccess`, done here by hand instead. The token itself is never part
+ * of that written result: `CloudflareStatus` carries only `tokenHint`.
+ *
+ * `cloudflareZonesKey` is invalidated, not written directly: this call's own response
+ * never carries zones, only `CloudflarePanel`'s separate `useCloudflareZones` fetch does,
+ * and a stale or absent zones list left over from before this save would be a lie the
+ * moment the panel calls this "configured" for a different account.
  */
 export function useSaveCloudflareCredentials() {
   const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { token: string; accountId: string }) =>
-      apiFetch<CloudflareStatus>("/api/cloudflare/credentials", {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      }),
-    onSuccess: (status) => {
-      queryClient.setQueryData(cloudflareStatusKey, status);
-      queryClient.invalidateQueries({ queryKey: cloudflareZonesKey });
-    },
-  });
+  return async function saveCloudflareCredentials(payload: {
+    token: string;
+    accountId: string;
+  }): Promise<CloudflareStatus> {
+    const status = await apiFetch<CloudflareStatus>("/api/cloudflare/credentials", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    queryClient.setQueryData(cloudflareStatusKey, status);
+    queryClient.invalidateQueries({ queryKey: cloudflareZonesKey });
+    return status;
+  };
 }
 
 /** `DELETE /api/cloudflare/credentials` answers 204 with no body, so unlike the save

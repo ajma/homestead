@@ -2,6 +2,7 @@
 import type { CloudflareStatus, CloudflareZone } from "@shared/cloudflare.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cloudflareStatusKey } from "@web/api/cloudflare";
 import { CloudflarePanel } from "@web/routes/settings/CloudflarePanel";
 import { describe, expect, it, vi } from "vitest";
 
@@ -29,6 +30,18 @@ function mount() {
       <CloudflarePanel />
     </QueryClientProvider>,
   );
+}
+
+/** Same as `mount`, but also hands back the `QueryClient` — needed by tests that inspect
+ * the cache directly rather than the DOM. */
+function mountWithClient() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const result = render(
+    <QueryClientProvider client={client}>
+      <CloudflarePanel />
+    </QueryClientProvider>,
+  );
+  return { ...result, client };
 }
 
 /** A fetch stub whose credentials/zones answers can change mid-test — `configured` and
@@ -160,5 +173,71 @@ describe("CloudflarePanel", () => {
     expect(
       fetchMock.mock.calls.some(([, init]) => (init as RequestInit)?.method === "DELETE"),
     ).toBe(false);
+  });
+
+  it("never puts the token in the mutation cache, on success or on failure", async () => {
+    // The DOM looks identical whether or not this holds — that is exactly why the token
+    // leak here survived review. Inspects `queryClient.getMutationCache()` directly
+    // instead.
+    stubFetch({ initiallyConfigured: false });
+    const success = mountWithClient();
+    await waitFor(() => expect(success.getByLabelText(/Account ID/)).toBeTruthy());
+    fireEvent.change(success.getByLabelText(/Account ID/), { target: { value: "acct-1" } });
+    fireEvent.change(success.getByLabelText(/API token/), { target: { value: TOKEN } });
+    fireEvent.click(success.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(success.getByText("example.com")).toBeTruthy());
+
+    const successCache = JSON.stringify(success.client.getMutationCache().getAll());
+    expect(successCache).not.toContain(TOKEN);
+
+    stubFetch({
+      initiallyConfigured: false,
+      put: () => json(422, { error: "verification_failed", fault: "auth" }),
+    });
+    const failure = mountWithClient();
+    await waitFor(() => expect(failure.getByLabelText(/Account ID/)).toBeTruthy());
+    fireEvent.change(failure.getByLabelText(/Account ID/), { target: { value: "acct-1" } });
+    fireEvent.change(failure.getByLabelText(/API token/), { target: { value: TOKEN } });
+    fireEvent.click(failure.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(failure.getByRole("alert")).toBeTruthy());
+
+    const failureCache = JSON.stringify(failure.client.getMutationCache().getAll());
+    expect(failureCache).not.toContain(TOKEN);
+  });
+
+  it("does not resurrect the saved token in the field if a post-save status refetch reports not configured", async () => {
+    // The reviewer's scenario: another admin removes the credentials in a second tab (or
+    // the write itself failed after this tab already believed it succeeded), and this
+    // tab's status query refetches and comes back `configured: false`. The form
+    // reappears, and it must not come back pre-filled with the token this tab just typed.
+    let configuredAfterSave = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/cloudflare/credentials" && method === "GET") {
+        return json(200, configuredAfterSave ? CONFIGURED : NOT_CONFIGURED);
+      }
+      if (url === "/api/cloudflare/credentials" && method === "PUT") {
+        configuredAfterSave = true;
+        return json(200, CONFIGURED);
+      }
+      if (url === "/api/cloudflare/zones" && method === "GET") {
+        return json(200, ZONES);
+      }
+      throw new Error(`unhandled request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { client, ...view } = mountWithClient();
+    await waitFor(() => expect(view.getByLabelText(/Account ID/)).toBeTruthy());
+    fillForm();
+    fireEvent.click(view.getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(view.getByText("example.com")).toBeTruthy());
+
+    configuredAfterSave = false;
+    await client.invalidateQueries({ queryKey: cloudflareStatusKey });
+
+    await waitFor(() => expect(view.getByLabelText(/API token/)).toBeTruthy());
+    expect((view.getByLabelText(/API token/) as HTMLInputElement).value).toBe("");
   });
 });
