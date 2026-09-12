@@ -98,6 +98,8 @@ const app = await buildApp({
   scheduler,
   events,
   icons: { metadata: iconMetadata, store: iconStore },
+  preflight: () =>
+    runMountPreflight({ composeRoot: config.composeRoot, dockerSocket: config.dockerSocket }),
 });
 
 scheduler.start();

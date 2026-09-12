@@ -5,6 +5,8 @@ import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
 import { ImageUpdates } from "@web/components/ImageUpdates";
 import { StatusChip } from "@web/components/StatusChip";
+import { relativeTime } from "@web/lib/relative-time";
+import { useNow } from "@web/lib/use-now";
 import { Link, NavLink, Outlet, useParams } from "react-router-dom";
 
 /**
@@ -44,6 +46,43 @@ const TABS: ReadonlyArray<{ to: string; label: string }> = [
  */
 export type EditAppContext = { app: AdminApp };
 
+function MetaRow({ label, value }: { label: string; value: string }) {
+  return (
+    <p className="flex justify-between gap-3 truncate">
+      <span className="text-slate-500 dark:text-slate-400">{label}</span>
+      <span className="truncate text-right text-slate-900 dark:text-slate-100">{value}</span>
+    </p>
+  );
+}
+
+/**
+ * Spec §8's right rail: "a persistent right rail on desktop carrying actions, exposure,
+ * image updates, and metadata" — the metadata part, which 1E's Self-Review wrongly
+ * claimed was already there (Task 11). Exposure is Phase 2 and stays out.
+ *
+ * `hidden lg:flex`, not conditionally rendered: on mobile the same space is the fixed
+ * bottom action bar (`ActionBar`'s own layout classes on the `<aside>` below), and there
+ * is no room to also show five rows of metadata beneath it. Every field here already
+ * lives in `AdminApp`, so this is presentation only, no new fetch.
+ */
+function AppMetadata({ app, now }: { app: AdminApp; now: number }) {
+  return (
+    <div
+      data-testid="app-metadata"
+      className="hidden flex-col gap-1 rounded-2xl border border-slate-200 p-3 text-xs lg:flex dark:border-slate-800"
+    >
+      <MetaRow label="Directory" value={app.directory} />
+      <MetaRow label="Compose file" value={app.composeFile} />
+      <MetaRow label="Project name" value={app.projectName} />
+      <MetaRow label="Adopted" value={`${relativeTime(app.adoptedAt, now)} ago`} />
+      <MetaRow
+        label="Last deploy"
+        value={app.lastDeployAt === null ? "Never" : `${relativeTime(app.lastDeployAt, now)} ago`}
+      />
+    </div>
+  );
+}
+
 function tabLinkClass({ isActive }: { isActive: boolean }): string {
   return `border-b-2 px-3 py-2 text-sm ${
     isActive
@@ -54,6 +93,7 @@ function tabLinkClass({ isActive }: { isActive: boolean }): string {
 
 export function EditApp() {
   const { slug = "" } = useParams<{ slug: string }>();
+  const now = useNow();
   // Resolves through the cheap single-app endpoint (`GET /api/apps/:id`, which accepts a
   // slug too — see `loadAppByIdOrSlug`), not `useAdminApps()`'s whole-inventory rollup.
   // The list query used to be made *active* on every edit page merely by being read here,
@@ -123,6 +163,7 @@ export function EditApp() {
         <aside className="fixed inset-x-0 bottom-0 z-10 flex flex-col gap-4 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
           <ActionBar app={app} />
           <ImageUpdates appId={app.id} />
+          <AppMetadata app={app} now={now} />
         </aside>
       </div>
     </div>

@@ -215,6 +215,79 @@ describe("user management", () => {
     await app.close();
   });
 
+  // Important finding: `GET /api/users` used to omit `appIds` entirely, so the web
+  // scope picker always opened blank for an already-scoped user. This is the second,
+  // whole-list query the fix adds — one query over `user_app_scope`, grouped in memory
+  // by user, not one query per row.
+  it("includes each user's appIds in the list, scoped to exactly what was set", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { cookie },
+      payload: {
+        email: "viewer@example.com",
+        password: "correct-horse-battery",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const viewerId = created.json().id;
+
+    const { apps, hosts } = await import("../db/schema.js");
+    await app.deps.db.insert(hosts).values({
+      id: "test-host",
+      name: "Test Host",
+      kind: "local",
+      composeRoot: "/test",
+      dockerSocket: "/var/run/docker.sock",
+    });
+    await app.deps.db.insert(apps).values([
+      {
+        id: "app-a",
+        hostId: "test-host",
+        slug: "jellyfin",
+        displayName: "Jellyfin",
+        directory: "jellyfin",
+        composeFile: "compose.yaml",
+        projectName: "jellyfin",
+      },
+      {
+        id: "app-b",
+        hostId: "test-host",
+        slug: "gitea",
+        displayName: "Gitea",
+        directory: "gitea",
+        composeFile: "compose.yaml",
+        projectName: "gitea",
+      },
+    ]);
+
+    const scoped = await app.inject({
+      method: "PUT",
+      url: `/api/users/${viewerId}/scope`,
+      headers: { cookie },
+      payload: { scopeAllApps: false, appIds: ["app-a", "app-b"] },
+    });
+    expect(scoped.statusCode).toBe(200);
+
+    const list = await app.inject({ method: "GET", url: "/api/users", headers: { cookie } });
+    expect(list.statusCode).toBe(200);
+    const rows = list.json() as Array<{ id: string; appIds: string[] }>;
+    const viewerRow = rows.find((row) => row.id === viewerId);
+    expect(viewerRow?.appIds.slice().sort()).toEqual(["app-a", "app-b"]);
+
+    // The admin never had scope rows inserted — the fix must not invent any.
+    const adminRow = rows.find((row) => row.id !== viewerId);
+    expect(adminRow?.appIds).toEqual([]);
+
+    await app.close();
+  });
+
   it("allows setting user app scope and returns 404 for nonexistent user", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);

@@ -131,7 +131,17 @@ export async function probeRoutes(app: FastifyInstance): Promise<void> {
     const body = patchBody.parse(request.body);
     if (Object.keys(body).length === 0) return reply.code(400).send({ error: "no_fields" });
 
-    await db.update(probes).set(body).where(eq(probes.id, probeId));
+    const updates: typeof body & { nextRunAt?: number } = { ...body };
+    if (body.intervalSeconds !== undefined && body.intervalSeconds !== probe.intervalSeconds) {
+      // Otherwise a shortened interval is invisible until the OLD interval finishes
+      // running out — a daily probe changed to every 30 seconds would still wait up to a
+      // day. Capping rather than overwriting: a probe already due sooner than the new
+      // window (interval lengthened) keeps firing on schedule instead of being pushed out.
+      const now = Math.floor(Date.now() / 1000);
+      updates.nextRunAt = Math.min(probe.nextRunAt, now + body.intervalSeconds);
+    }
+
+    await db.update(probes).set(updates).where(eq(probes.id, probeId));
     const [updated] = await db.select().from(probes).where(eq(probes.id, probeId));
 
     // Only a PATCH that actually flips `enabled` moves what a tile shows. A label-only

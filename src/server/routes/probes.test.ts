@@ -1,4 +1,6 @@
+import { probes } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 const CONFIG = JSON.stringify({
@@ -156,6 +158,58 @@ describe("probe routes", () => {
     });
     expect(deleted.statusCode).toBe(204);
     await app.close();
+  });
+
+  it("moves nextRunAt up when shortening the interval on a probe due tomorrow", async () => {
+    // Carried since 1C: a daily probe (86_400s) switched to every 30 seconds must not
+    // wait for the old interval to finish running out.
+    const { app, cookie, probeId } = await withProbe();
+    const now = Math.floor(Date.now() / 1000);
+    const dueTomorrow = now + 86_400;
+    await app.deps.db.update(probes).set({ nextRunAt: dueTomorrow }).where(eq(probes.id, probeId));
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/probes/${probeId}`,
+      headers: { cookie },
+      payload: { intervalSeconds: 30 },
+    });
+    expect(patched.statusCode).toBe(200);
+    const { nextRunAt } = patched.json();
+    expect(nextRunAt).toBeLessThan(dueTomorrow);
+    expect(nextRunAt).toBeLessThanOrEqual(now + 30 + 1);
+  });
+
+  it("does not push nextRunAt out when lengthening an interval that was already due sooner", async () => {
+    const { app, cookie, probeId } = await withProbe();
+    const dueSoon = Math.floor(Date.now() / 1000) + 5;
+    await app.deps.db.update(probes).set({ nextRunAt: dueSoon }).where(eq(probes.id, probeId));
+
+    const lengthened = await app.inject({
+      method: "PATCH",
+      url: `/api/probes/${probeId}`,
+      headers: { cookie },
+      payload: { intervalSeconds: 86_400 },
+    });
+    expect(lengthened.statusCode).toBe(200);
+    // Capping, not overwriting: a probe already due sooner than "now + 86,400s" keeps
+    // its existing schedule instead of being pushed out to the new window.
+    expect(lengthened.json().nextRunAt).toBe(dueSoon);
+  });
+
+  it("leaves nextRunAt untouched when patching an unrelated field", async () => {
+    const { app, cookie, probeId } = await withProbe();
+    const dueTomorrow = Math.floor(Date.now() / 1000) + 86_400;
+    await app.deps.db.update(probes).set({ nextRunAt: dueTomorrow }).where(eq(probes.id, probeId));
+
+    const after = await app.inject({
+      method: "PATCH",
+      url: `/api/probes/${probeId}`,
+      headers: { cookie },
+      payload: { label: "Renamed" },
+    });
+    expect(after.statusCode).toBe(200);
+    expect(after.json().nextRunAt).toBe(dueTomorrow);
   });
 
   it("refuses a viewer everywhere", async () => {

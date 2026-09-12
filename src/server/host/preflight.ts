@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import Docker from "dockerode";
 
@@ -43,6 +43,7 @@ export async function runMountPreflight(opts: {
   const docker = new Docker({ socketPath: opts.dockerSocket });
   const markerDir = join(opts.composeRoot, ".homestead-preflight");
   const markerName = `${randomUUID()}.marker`;
+  const markerPath = join(markerDir, markerName);
   const token = randomUUID();
 
   // One try/finally around EVERYTHING that can create the marker directory, so no
@@ -52,12 +53,33 @@ export async function runMountPreflight(opts: {
   try {
     try {
       await mkdir(markerDir, { recursive: true });
-      await writeFile(join(markerDir, markerName), token, "utf8");
+      await writeFile(markerPath, token, "utf8");
     } catch (error) {
-      return {
-        ok: false,
-        reason: `cannot write a marker into ${opts.composeRoot}: ${String(error)}`,
-      };
+      // `markerDir` is shared by every concurrent run, and this run's own `mkdir` can
+      // race a DIFFERENT run's cleanup `rmdir` below: that run finishes, sees (from its
+      // own perspective) an empty directory, and removes it in the microseconds-wide
+      // window between this run's `mkdir` returning and its `writeFile` landing —
+      // producing exactly the ENOENT `writeFile` throws when its parent directory is
+      // gone. That is not a real mount failure, so it gets one retry of the same
+      // mkdir+writeFile pair rather than being reported as one; a genuine problem
+      // (permissions, a missing compose root) throws again immediately and is reported
+      // the same way it always was.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        try {
+          await mkdir(markerDir, { recursive: true });
+          await writeFile(markerPath, token, "utf8");
+        } catch (retryError) {
+          return {
+            ok: false,
+            reason: `cannot write a marker into ${opts.composeRoot}: ${String(retryError)}`,
+          };
+        }
+      } else {
+        return {
+          ok: false,
+          reason: `cannot write a marker into ${opts.composeRoot}: ${String(error)}`,
+        };
+      }
     }
 
     await ensureImage(docker, image);
@@ -111,7 +133,14 @@ export async function runMountPreflight(opts: {
   } catch (error) {
     return { ok: false, reason: `could not run the marker check: ${String(error)}` };
   } finally {
-    await rm(markerDir, { recursive: true, force: true }).catch(() => {});
+    // Remove only this run's marker file, then try the directory non-recursively and
+    // swallow the error if it is not empty. `markerDir` is shared by every concurrent
+    // run (and every previous abnormal exit); a recursive removal here would delete a
+    // sibling run's not-yet-read marker out from under it, turning a healthy re-check
+    // into a false "marker not visible" failure. A directory left behind because another
+    // run's marker is still inside is harmless — the same as after an abnormal exit.
+    await rm(markerPath, { force: true }).catch(() => {});
+    await rmdir(markerDir).catch(() => {});
   }
 }
 

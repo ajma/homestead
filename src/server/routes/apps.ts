@@ -1,6 +1,6 @@
 import { LibsqlError } from "@libsql/client";
 import type { AdminApp, ViewerApp } from "@shared/dto";
-import { maskEnv, parseEnv } from "@shared/env-file.js";
+import { maskEnv, parseEnv, removeEnv, serialiseEnv, upsertEnv } from "@shared/env-file.js";
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
@@ -77,6 +77,36 @@ const composeWriteBody = z.object({
   content: z.string(),
   expectedHash: z.string().nullable(),
 });
+
+/** One named key's new value, or a deletion (`value: null`) — see `envWriteBody`. */
+const envChangeSchema = z.object({
+  key: z.string().min(1),
+  value: z.string().nullable(),
+});
+
+/**
+ * `PUT /api/apps/:id/env`'s body: either a whole-file replacement (`content`, for raw
+ * mode, which edits arbitrary free text) or a list of named key changes (`changes`, for
+ * a table save). Never both — the route would otherwise have to guess which one the
+ * caller actually meant, and never neither, for the same reason.
+ *
+ * `changes` is what lets a table-mode save stop shipping every credential in the file to
+ * the browser just to reapply the one key it changed: the route applies each change
+ * through `upsertEnv`/`removeEnv` itself, against its own read of the file, and the
+ * browser never has to hold the rest of it. See the route handler below.
+ */
+const envWriteBody = z
+  .object({
+    content: z.string().optional(),
+    changes: z.array(envChangeSchema).optional(),
+    expectedHash: z.string().nullable(),
+  })
+  .refine((body) => !(body.content !== undefined && body.changes !== undefined), {
+    message: "content and changes are mutually exclusive",
+  })
+  .refine((body) => body.content !== undefined || body.changes !== undefined, {
+    message: "either content or changes is required",
+  });
 
 /**
  * True for a UNIQUE constraint violation — `apps_host_directory` or `apps_host_slug` —
@@ -667,7 +697,15 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     const file = await readEnv(row.directory);
     if (file.state === "unreadable") return reply.code(409).send(UNREADABLE);
     // Masked, always. The reveal endpoint is the only way to see values.
-    return { entries: maskEnv(parseEnv(file.content)), exists: file.state === "present" };
+    //
+    // `hash` rides along even though nothing here is a secret: it is what lets a
+    // table-mode save send `PUT .../env` a `changes` list guarded by a hash it already
+    // has, without first re-fetching the whole file just to learn what to guard against.
+    return {
+      entries: maskEnv(parseEnv(file.content)),
+      exists: file.state === "present",
+      hash: file.hash,
+    };
   });
 
   app.post("/api/apps/:id/env/reveal", async (request, reply) => {
@@ -719,14 +757,15 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     //
     // `detail: { scope: "all" }` is what makes this line distinguishable from the
     // per-key branch above, which records the one key it revealed. But `scope: "all"`
-    // alone does not distinguish the two whole-file callers from each other: a table
-    // save (which fetches the whole file to reapply changed keys through `upsertEnv` —
-    // see `EnvTab.tsx`'s module doc comment) used to write a line byte-identical to
-    // someone deliberately dumping every secret via Raw mode. `reason` is the client's
-    // own account of which one this was — validated above against a closed set, so nothing
-    // free-text ever lands here — and is what actually lets an auditor tell them apart.
-    // It is optional (older or non-browser callers may not send it) so its absence is
-    // itself informative rather than a validation failure.
+    // alone does not distinguish the two whole-file callers from each other: this same
+    // branch answers both a deliberate Raw-mode dump and the rarer fetch a table save's
+    // own 409 recovery makes to build its conflict UI (see `EnvTab.tsx`'s module doc
+    // comment) — a routine table save no longer reads the whole file at all, now that
+    // `PUT .../env`'s `changes` mode applies key edits server-side. `reason` is the
+    // client's own account of which of the two this was — validated above against a
+    // closed set, so nothing free-text ever lands here — and is what actually lets an
+    // auditor tell them apart. It is optional (older or non-browser callers may not send
+    // it) so its absence is itself informative rather than a validation failure.
     await audit(db, ctx, {
       action: "app.env_revealed",
       targetType: "app",
@@ -740,7 +779,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.put("/api/apps/:id/env", async (request, reply) => {
     const ctx = requireCapability(request, "app:secrets");
     const { id } = z.object({ id: z.string() }).parse(request.params);
-    const body = composeWriteBody.parse(request.body);
+    const body = envWriteBody.parse(request.body);
 
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
@@ -748,14 +787,39 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // Refuse rather than overwrite. `writeTextFile` cannot tell an unreadable file from
     // an absent one either, so a `null` expectedHash would sail straight through its
     // guard and replace a `.env` full of passwords.
-    if ((await readEnv(row.directory)).state === "unreadable") {
+    const existing = await readEnv(row.directory);
+    if (existing.state === "unreadable") {
       return reply.code(409).send(UNREADABLE);
     }
+
+    // `changes` mode applies each named key against the file's OWN current content —
+    // read just above, never sent by the caller — through the same `upsertEnv`/
+    // `removeEnv` the browser used to run client-side. That is the whole point: every
+    // untouched line, including every comment, survives byte-for-byte (`upsertEnv`'s own
+    // docstring records why that matters), and the rest of the file never has to leave
+    // this process to get there. An empty `changes` array touches nothing and reserialises
+    // the file unchanged — a no-op, not an instruction to empty it. `content` mode is
+    // unchanged: raw edits are arbitrary free text, not a set of named key changes, so
+    // there is nothing here for a change list to apply.
+    const content =
+      body.changes !== undefined
+        ? serialiseEnv(
+            body.changes.reduce(
+              (entries, change) =>
+                change.value === null
+                  ? removeEnv(entries, change.key)
+                  : upsertEnv(entries, change.key, change.value),
+              parseEnv(existing.content),
+            ),
+          )
+        : // The refine on `envWriteBody` guarantees exactly one of `content`/`changes` is
+          // present, so this is `string`, never `undefined`, whenever `changes` is not.
+          (body.content as string);
 
     try {
       const { hash } = await host.writeTextFile(
         `${row.directory}/.env`,
-        body.content,
+        content,
         body.expectedHash,
       );
       // `.env` feeds ${VAR} interpolation and COMPOSE_PROJECT_NAME, so the resolved

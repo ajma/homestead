@@ -167,4 +167,47 @@ describe("EditApp", () => {
     mount("/apps/nope/overview", null);
     await waitFor(() => expect(screen.getByText(/No app called/)).toBeTruthy());
   });
+
+  describe("right-rail metadata", () => {
+    // Spec §8's right rail: "actions, exposure, image updates, and metadata" — the
+    // metadata part, wrongly claimed as delivered by 1E's Self-Review (Task 11).
+
+    it("shows the directory, compose file, project name, adoption date and last deploy", () => {
+      stubFetch(app);
+      mount();
+      const rail = within(screen.getByTestId("app-metadata"));
+      // "jellyfin" appears twice here: directory and project name are the same string
+      // in this fixture.
+      expect(rail.getAllByText("jellyfin")).toHaveLength(2);
+      expect(rail.getByText("compose.yaml")).toBeTruthy();
+      expect(rail.getByText(/ago$/)).toBeTruthy(); // adopted, some age string
+      expect(rail.getByText("Never")).toBeTruthy(); // never deployed
+    });
+
+    it("says 'Never' for last deploy when the app has never been deployed", () => {
+      const seedApp = { ...app, lastDeployAt: null };
+      stubFetch(seedApp);
+      mount("/apps/jellyfin/overview", seedApp);
+      expect(within(screen.getByTestId("app-metadata")).getByText("Never")).toBeTruthy();
+    });
+
+    it("shows the age of the most recent deploy when there is one", () => {
+      const now = Math.floor(Date.now() / 1000);
+      const seedApp = { ...app, lastDeployAt: now - 60 };
+      stubFetch(seedApp);
+      mount("/apps/jellyfin/overview", seedApp);
+      expect(within(screen.getByTestId("app-metadata")).getByText(/1m ago/)).toBeTruthy();
+    });
+
+    it("is absent on mobile widths, where the action bar takes that space", () => {
+      // jsdom has no real viewport, so this checks the responsive classes directly:
+      // `hidden` at the base breakpoint, revealed only from `lg` up, same pattern used
+      // for the desktop-only table header elsewhere in this codebase.
+      stubFetch(app);
+      mount();
+      const rail = screen.getByTestId("app-metadata");
+      expect(rail.className).toContain("hidden");
+      expect(rail.className).toContain("lg:flex");
+    });
+  });
 });

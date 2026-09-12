@@ -11,6 +11,9 @@ export type PersistedTransition = {
   appId: string;
   status: "up" | "degraded" | "down" | "starting" | "unknown";
   faultClass: "app" | "network" | "config" | null;
+  /** Epoch seconds this probe's `lastStatus` took effect — the same clock the row itself
+   * is stamped with, so a client reading it needs no clock of its own. */
+  statusSince: number;
   changed: boolean;
 };
 
@@ -106,6 +109,7 @@ export async function persistResult(
     appId: probe.appId,
     status: transition.status,
     faultClass: result.faultClass ?? null,
+    statusSince: transition.statusSince,
     changed: transition.changed || faultClassChanged,
   };
 }

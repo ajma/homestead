@@ -34,10 +34,15 @@ describe(".env API", () => {
       headers: { cookie },
     });
     expect(res.body).not.toContain("hunter2");
-    expect(res.json().entries).toEqual([
+    const body = res.json();
+    expect(body.entries).toEqual([
       { key: "DB_PASSWORD", masked: "••••••••" },
       { key: "PUID", masked: "••••••••" },
     ]);
+    // The hash rides along with the masked list — nothing secret about it — so a
+    // table-mode save can guard a `changes` PUT with it without fetching the whole file
+    // first just to learn what to guard against.
+    expect(typeof body.hash).toBe("string");
     await app.close();
   });
 
@@ -258,7 +263,7 @@ describe(".env API", () => {
       headers: { cookie },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ entries: [], exists: false });
+    expect(res.json()).toEqual({ entries: [], exists: false, hash: null });
     await app.close();
   });
 
@@ -413,5 +418,170 @@ describe("reveal with a duplicated key", () => {
       payload: { key: "API_KEY" },
     });
     expect(res.json()).toEqual({ key: "API_KEY", value: "live-value" });
+  });
+});
+
+/** The hash `GET .../env` reports right now — what a table save guards a `changes` PUT with. */
+async function currentHash(
+  app: Awaited<ReturnType<typeof withEnv>>["app"],
+  cookie: string,
+  id: string,
+) {
+  const res = await app.inject({ method: "GET", url: `/api/apps/${id}/env`, headers: { cookie } });
+  return res.json().hash as string;
+}
+
+describe("PUT /api/apps/:id/env with changes", () => {
+  it("applies each key through upsertEnv, preserving every comment and untouched line byte-for-byte", async () => {
+    // The carried finding this task closes: a table save used to fetch the whole file to
+    // run `upsertEnv` in the browser. Now the route does it, against its own read of the
+    // file, and the caller sends only the keys it actually touched.
+    const { app, cookie, id } = await withEnv();
+    const hash = await currentHash(app, cookie, id);
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "PUID", value: "1001" }], expectedHash: hash },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe(
+      "# Database\nDB_PASSWORD=hunter2\nPUID=1001\n",
+    );
+    await app.close();
+  });
+
+  it("deletes a key when its change carries a null value", async () => {
+    const { app, cookie, id } = await withEnv();
+    const hash = await currentHash(app, cookie, id);
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "PUID", value: null }], expectedHash: hash },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe("# Database\nDB_PASSWORD=hunter2\n");
+    await app.close();
+  });
+
+  it("distinguishes a delete from setting a key to an empty string", async () => {
+    const { app, cookie, id } = await withEnv();
+    const hash = await currentHash(app, cookie, id);
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "PUID", value: "" }], expectedHash: hash },
+    });
+    expect(res.statusCode).toBe(200);
+    // Still present, just empty — not removed the way `value: null` would remove it.
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe(
+      "# Database\nDB_PASSWORD=hunter2\nPUID=\n",
+    );
+    await app.close();
+  });
+
+  it("adds a key that was not previously in the file", async () => {
+    const { app, cookie, id } = await withEnv();
+    const hash = await currentHash(app, cookie, id);
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "TZ", value: "Europe/London" }], expectedHash: hash },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe(
+      "# Database\nDB_PASSWORD=hunter2\nPUID=1000\nTZ=Europe/London\n",
+    );
+    await app.close();
+  });
+
+  it("still enforces the hash guard, 409ing on a mismatch", async () => {
+    const { app, cookie, id } = await withEnv();
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "PUID", value: "1001" }], expectedHash: "not-the-real-hash" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("stale_hash");
+    // Refused, not partially applied.
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe(ENV);
+    await app.close();
+  });
+
+  it("still refuses a .env it cannot read, rather than applying changes blind", async () => {
+    const { app, cookie, id } = await withEnv();
+    app.deps.host.readTextFileErrors.set("jellyfin/.env", new Error("EACCES: permission denied"));
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "PUID", value: "1001" }], expectedHash: null },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("env_unreadable");
+    await app.close();
+  });
+
+  it("rejects content and changes sent together, rather than guessing which was meant", async () => {
+    const { app, cookie, id } = await withEnv();
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: {
+        content: "SOMETHING=else\n",
+        changes: [{ key: "PUID", value: "1001" }],
+        expectedHash: null,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    // Refused before touching the file.
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe(ENV);
+    await app.close();
+  });
+
+  it("rejects a body with neither content nor changes", async () => {
+    const { app, cookie, id } = await withEnv();
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { expectedHash: null },
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it("treats an empty changes array as a no-op, not an instruction to empty the file", async () => {
+    const { app, cookie, id } = await withEnv();
+    const hash = await currentHash(app, cookie, id);
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [], expectedHash: hash },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe(ENV);
+    await app.close();
+  });
+
+  it("applies changes in order against the freshly-read file, rewriting the LAST occurrence of a duplicated key", async () => {
+    const { app, cookie, id } = await withEnv("API_KEY=old-value\nAPI_KEY=live-value\n");
+    const hash = await currentHash(app, cookie, id);
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/apps/${id}/env`,
+      headers: { cookie },
+      payload: { changes: [{ key: "API_KEY", value: "rotated" }], expectedHash: hash },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(app.deps.host.files.get("jellyfin/.env")).toBe("API_KEY=old-value\nAPI_KEY=rotated\n");
+    await app.close();
   });
 });

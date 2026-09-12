@@ -122,6 +122,7 @@ describe("useEventStream", () => {
         probeId: "p1",
         status: "down",
         faultClass: "app",
+        statusSince: 2000,
       });
     });
 
@@ -130,6 +131,38 @@ describe("useEventStream", () => {
     expect(patched?.[0]?.reason).toBe("Containers not running");
     // The assertion the spec's rationale is actually about.
     expect(fetches).toBe(0);
+  });
+
+  it("dates a patched tile by the server's statusSince, not the client's clock", async () => {
+    // Task 10, carried since 1C/1E: a tile's age must come from one clock regardless of
+    // whether it arrived by fetch or by SSE patch. If the client stamped its own receipt
+    // time here instead, this would read close to `Date.now()` rather than the server's
+    // far-off value.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(9_000_000);
+      const client = new QueryClient();
+      client.setQueryData(launcherKey, [
+        tile({ probes: [probe({ probeId: "p1", kind: "docker", status: "up" })] }),
+      ]);
+      mount(client);
+      expect(FakeEventSource.instances.length).toBe(1);
+      act(() => {
+        FakeEventSource.instances[0]?.emit("status", {
+          appId: "a1",
+          probeId: "p1",
+          status: "down",
+          faultClass: "app",
+          statusSince: 42,
+        });
+      });
+
+      const patched = client.getQueryData<LauncherApp[]>(launcherKey);
+      expect(patched?.[0]?.probes[0]?.statusSince).toBe(42);
+      expect(patched?.[0]?.since).toBe(42);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ignores an event for an app not in the cache", async () => {
@@ -143,6 +176,7 @@ describe("useEventStream", () => {
         probeId: "p9",
         status: "down",
         faultClass: "app",
+        statusSince: 2000,
       });
     });
     expect(client.getQueryData<LauncherApp[]>(launcherKey)).toEqual([tile()]);
@@ -168,6 +202,7 @@ describe("useEventStream", () => {
         probeId: "p9",
         status: "down",
         faultClass: "app",
+        statusSince: 2000,
       });
     });
 
@@ -195,6 +230,7 @@ describe("useEventStream", () => {
         probeId: "p1",
         status: "down",
         faultClass: "app",
+        statusSince: 2000,
       });
     });
 
@@ -257,6 +293,7 @@ describe("useEventStream", () => {
         probeId: "http1",
         status: "up",
         faultClass: null,
+        statusSince: 2000,
       });
     });
     const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
@@ -286,12 +323,14 @@ describe("useEventStream", () => {
         probeId: "docker1",
         status: "up",
         faultClass: null,
+        statusSince: 2000,
       });
       FakeEventSource.instances[0]?.emit("status", {
         appId: "a1",
         probeId: "http1",
         status: "up",
         faultClass: null,
+        statusSince: 2000,
       });
     });
     const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
@@ -319,6 +358,7 @@ describe("useEventStream", () => {
         probeId: "ext1",
         status: "down",
         faultClass: "network",
+        statusSince: 2000,
       });
     });
     const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];
@@ -358,6 +398,7 @@ describe("useEventStream", () => {
         probeId: "http1",
         status: "degraded",
         faultClass: "app",
+        statusSince: 2000,
       });
     });
     const [after] = client.getQueryData<LauncherApp[]>(launcherKey) ?? [];

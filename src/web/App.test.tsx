@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
+import { SETUP_STEPS, type SetupState } from "@shared/setup.js";
 import { render, screen, waitFor } from "@testing-library/react";
 import { App, queryClient } from "@web/App";
 import type { Me } from "@web/auth/useSession";
@@ -76,6 +77,12 @@ function stubMe(overrides: Partial<Me> = {}, extra: { apps?: AdminApp[] } = {}) 
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/me")) return json(200, me);
+      // Every test in this file that reaches here predates the setup wizard and assumes
+      // a fully onboarded instance — the setup route guard's own behaviour is exercised
+      // separately, below, with its own fetch stub.
+      if (url.includes("/api/setup/state")) {
+        return json(200, { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 });
+      }
       if (url.includes("/api/launcher")) return json(200, { apps: [] });
       if (url.includes("/containers")) return json(200, { containers: [], dockerReachable: true });
       // `ComposeTab`/`EnvTab` are loaded behind `React.lazy` now (Important 5 of the 1F
@@ -180,6 +187,35 @@ describe("the admin route guard", () => {
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
+  it("sends a viewer away from the logs deep url", async () => {
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/logs");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Logs" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
+  it("sends a viewer away from the probes deep url", async () => {
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/probes");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Probes" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
+  it("sends a viewer away from settings", async () => {
+    // `/settings` has no per-app slug to guard, only the role check `App.tsx` applies
+    // to the whole `/settings/*` subtree — the same claim as every route above, made
+    // against the one admin surface that isn't nested under `/apps`.
+    stubMe({ role: "viewer" });
+    renderAt("/settings");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
+  });
+
   it("lets an admin reach both", async () => {
     stubMe({ role: "admin" });
     renderAt("/apps");
@@ -192,6 +228,34 @@ describe("the admin route guard", () => {
     renderAt("/apps/jellyfin/containers");
 
     await waitFor(() => expect(screen.getByRole("link", { name: "Containers" })).toBeTruthy());
+  });
+
+  it("lets an admin reach settings", async () => {
+    stubMe({ role: "admin" });
+    renderAt("/settings");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy());
+  });
+});
+
+describe("the settings nav link", () => {
+  it("shows an admin the settings link", async () => {
+    stubMe({ role: "admin" });
+    renderAt("/");
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Settings" })).toBeTruthy());
+  });
+
+  it("does not show a viewer the settings link", async () => {
+    // The launcher premise ("a housemate sees status tiles and nothing else") starts
+    // with what the nav bar offers — but this proves only the link's absence, not that
+    // the route itself is closed. "sends a viewer away from settings" above, by
+    // navigation, is the claim that actually matters.
+    stubMe({ role: "viewer" });
+    renderAt("/");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
   });
 });
 
@@ -241,5 +305,203 @@ describe("the tab data-loading boundary", () => {
     // producing an update on an unmounted component instead of proving anything about
     // the next test.
     await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+  });
+});
+
+/**
+ * `stubMe` above assumes a fully onboarded instance, which is right for every test
+ * above it but wrong for these — the setup route guard is precisely the behaviour that
+ * assumption would hide. `me: null` renders as a 401 from `/api/me`, matching how the
+ * real endpoint answers when nobody is signed in yet, which is the state a fresh
+ * install boots into.
+ */
+function stubSetupGuard(me: Me | null, setup: SetupState) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/me")) {
+        return me ? json(200, me) : json(401, { error: "unauthenticated" });
+      }
+      if (url.includes("/api/setup/state")) return json(200, setup);
+      if (url.includes("/api/launcher")) return json(200, { apps: [] });
+      return json(200, []);
+    }),
+  );
+}
+
+describe("the setup route guard", () => {
+  it("pulls an anonymous visitor into the wizard while setup is incomplete", async () => {
+    // The reverse guard: nobody has to be signed in yet for step 1, since a machine
+    // with no users has no admin to authorise anything.
+    stubSetupGuard(null, { completedSteps: [], completedAt: null });
+    renderAt("/");
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Create admin/ })).toBeTruthy());
+  });
+
+  it("pulls a signed-in admin into the wizard too, not just an anonymous visitor", async () => {
+    stubSetupGuard(
+      {
+        id: "u1",
+        email: "admin@example.com",
+        name: "Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: ["admin"], completedAt: null },
+    );
+    renderAt("/apps");
+
+    // Landed on the wizard's own resume point, not the inventory it asked for.
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Verify host/ })).toBeTruthy());
+  });
+
+  it("pushes a completed setup off /setup and onto the launcher", async () => {
+    // Completion is one-way: re-entering would offer "create the first admin" to a
+    // second admin.
+    stubSetupGuard(
+      {
+        id: "u1",
+        email: "admin@example.com",
+        name: "Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+  });
+
+  it("never sends a viewer into the wizard, even mid-setup", async () => {
+    stubSetupGuard(
+      {
+        id: "u2",
+        email: "viewer@example.com",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: [], completedAt: null },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    // Not merely "landed elsewhere" — a viewer must never even ask. GET /api/setup/state
+    // is admin-only once an admin exists, so calling it here would risk a viewer seeing
+    // a spurious error screen instead of simply not needing the answer.
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
+  });
+
+  it("sends a viewer straight to the launcher from a completed /setup, the same way as mid-setup", async () => {
+    // The test above proves a viewer skips the wizard while setup is incomplete — this
+    // proves the other half of the two-way guard doesn't accidentally reintroduce a
+    // path in. `Routed` forces `setupComplete` to `true` for a viewer unconditionally
+    // (`needsSetupCheck = !isViewer`), so `/setup` for a viewer is always resolved by
+    // the completed branch's own hardcoded `<Navigate to="/" />` — the same rule that
+    // sits beside the `isAdmin` checks for `/apps` and `/settings` — never by the
+    // incomplete branch's catch-all. Same landing, same never-fetches assertion as the
+    // mid-setup test, against the opposite `completedAt`, to prove that holds either way.
+    stubSetupGuard(
+      {
+        id: "u2",
+        email: "viewer@example.com",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
+  });
+
+  it("has TanStack's default retry behaviour in production, not silently disabled", () => {
+    // Cheap and synchronous, and the reason the test below is allowed to turn retries
+    // off for its own duration: this is what proves production never does. `App.tsx`'s
+    // own `defaultOptions` sets only `refetchOnWindowFocus: false` — if a future change
+    // added `retry: false` there, the test below couldn't catch it (turning retries off
+    // only makes THAT test faster, not fail); this assertion is the one that would.
+    expect(queryClient.getDefaultOptions().queries?.retry).not.toBe(false);
+  });
+
+  it("sends an unauthenticated visitor to Login, not the dead end, when setup-state 401s", async () => {
+    // The window Critical 1 of the whole-branch review named: an admin exists (so
+    // `/api/setup/state` now requires one, per `setup.ts:144`) but this particular
+    // caller has no session — a second device, an expired cookie, a private window.
+    // Both `/api/me` and `/api/setup/state` answer 401, which is genuinely
+    // indistinguishable from "the server is broken" unless the guard treats an auth
+    // failure as "needs a session" rather than "setup status unknown". Before the fix,
+    // this combination rendered the same dead-end "Homestead is unavailable" screen as
+    // a real 500, with no login form and no way back in.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/me")) return json(401, { error: "unauthenticated" });
+        if (url.includes("/api/setup/state")) return json(401, { error: "unauthenticated" });
+        if (url.includes("/api/setup/status")) return json(200, { needsSetup: false });
+        return json(200, []);
+      }),
+    );
+
+    // `useSession` already passes `retry: false` itself, but `useSetupState` does not —
+    // without turning it off here too, a 401 that react-query treats as retryable would
+    // leave this test waiting out real backoff delays before settling into `isError`.
+    const defaults = queryClient.getDefaultOptions();
+    queryClient.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retry: false } });
+    try {
+      renderAt("/");
+
+      await waitFor(() => expect(screen.getByText(/Sign in to continue/i)).toBeTruthy());
+      expect(screen.queryByText(/Homestead is unavailable/i)).toBeNull();
+    } finally {
+      queryClient.setDefaultOptions(defaults);
+    }
+  });
+
+  it("shows the retry screen, not a blank page, when the setup-state fetch fails", async () => {
+    // The gap `SetupWizard.test.tsx` used to paper over: that file's own "does not
+    // strand the user" test rendered `<SetupWizard>` in isolation, which passes
+    // regardless of anything here, since `Routed` (below) gates on this same
+    // `["setup-state"]` query before `<SetupWizard>` is ever mounted — by the time it
+    // would render, the query has already succeeded. This is the actual path a failing
+    // `/api/setup/state` takes in the real app: through `Routed`'s own retry screen,
+    // not the wizard's.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/me")) return json(401, { error: "unauthenticated" });
+        if (url.includes("/api/setup/state")) return json(500, { error: "boom" });
+        return json(200, []);
+      }),
+    );
+
+    // Still the real singleton `queryClient` from `App.tsx` and the real `Routed` route
+    // tree — exported from `App.tsx` for exactly this reason — but with `retry` flipped
+    // off for the duration of this one test, so the assertion below is about WHICH
+    // screen a failure renders, not about waiting out react-query's real backoff to get
+    // there. Restored in `finally` so every other test (and the "default retry
+    // behaviour" test above/below it) keeps proving against the real production default.
+    const defaults = queryClient.getDefaultOptions();
+    queryClient.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retry: false } });
+    try {
+      renderAt("/");
+      await waitFor(() => expect(screen.getByText(/Homestead is unavailable/i)).toBeTruthy());
+      expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+    } finally {
+      queryClient.setDefaultOptions(defaults);
+    }
   });
 });

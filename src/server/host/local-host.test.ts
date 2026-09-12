@@ -1,10 +1,10 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hashContent, LocalHost } from "@server/host/local-host";
+import { hashContent, LocalHost, parseDockerVersion } from "@server/host/local-host";
 import { HashMismatchError } from "@server/host/types";
 import Docker from "dockerode";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 async function dockerAvailable(): Promise<boolean> {
   try {
@@ -133,5 +133,53 @@ describe.skipIf(!(await dockerAvailable()))("LocalHost docker reads", () => {
     await expect(
       host.listContainers({ project: "definitely-not-a-real-project" }),
     ).resolves.toEqual([]);
+  });
+});
+
+describe("LocalHost.dockerVersion", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects rather than reporting a bare mapping when the daemon's answer is malformed", async () => {
+    // Whether `dockerVersion()` actually calls `parseDockerVersion` at all — not whether
+    // that function validates correctly, which `parseDockerVersion`'s own tests below
+    // already cover. Nothing else exercises this call site: the `describe.skipIf` block
+    // above never calls `dockerVersion`, and `FakeHost.dockerVersion` (test-helpers.ts)
+    // is a hard-coded, always-valid literal that a route test could never see fail
+    // through. Bypassing `parseDockerVersion` at the call site — mapping `raw`'s fields
+    // directly instead of validating them — leaves every other host and setup-host test
+    // green; this is the one that would catch it.
+    vi.spyOn(Docker.prototype, "version").mockResolvedValue({
+      ApiVersion: "1.47",
+      Os: "linux",
+      Arch: "x86_64",
+      // `Version` omitted — exactly what an older daemon or Podman's Docker-compatible
+      // socket can hand back despite `@types/dockerode` declaring it required.
+    } as never);
+
+    await expect(host.dockerVersion()).rejects.toThrow(/form Homestead understood/);
+  });
+});
+
+describe("parseDockerVersion", () => {
+  it("maps a well-formed response", () => {
+    expect(
+      parseDockerVersion({ Version: "27.3.1", ApiVersion: "1.47", Os: "linux", Arch: "x86_64" }),
+    ).toEqual({ version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "x86_64" });
+  });
+
+  it("throws rather than reporting success when a field is missing", () => {
+    // A "success" that drops the version string is worse than a failure: JSON silently
+    // omits `undefined`, so the caller would see `{ ok: true, apiVersion, os, arch }`
+    // with no way to tell the evidence is missing.
+    expect(() => parseDockerVersion({ ApiVersion: "1.47", Os: "linux", Arch: "x86_64" })).toThrow(
+      /form Homestead understood/,
+    );
+  });
+
+  it("throws when the response is not an object at all", () => {
+    expect(() => parseDockerVersion("not an object")).toThrow(/form Homestead understood/);
+    expect(() => parseDockerVersion(null)).toThrow(/form Homestead understood/);
   });
 });

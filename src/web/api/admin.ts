@@ -55,8 +55,16 @@ export type ComposeFile = { content: string; hash: string };
  * `GET /api/apps/:id/env`'s shape: one masked row per `.env` entry, values never
  * included — `EnvTab`'s per-row reveal (Task 2's `POST .../env/reveal`) is the only way
  * to fetch a value, and only ever for one key at a time.
+ *
+ * `hash` is not a secret — it is what lets a table-mode save guard its `PUT .../env`
+ * `changes` request with a hash it already has, rather than fetching the whole file
+ * first just to learn one.
  */
-export type EnvList = { entries: Array<{ key: string; masked: string }>; exists: boolean };
+export type EnvList = {
+  entries: Array<{ key: string; masked: string }>;
+  exists: boolean;
+  hash: string | null;
+};
 
 export function useAdminApps() {
   return useQuery({

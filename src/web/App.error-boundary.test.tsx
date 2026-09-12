@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { AdminApp } from "@shared/dto";
+import { SETUP_STEPS } from "@shared/setup.js";
 import { render, screen, waitFor } from "@testing-library/react";
 import { App } from "@web/App";
 import type { Me } from "@web/auth/useSession";
@@ -76,6 +77,11 @@ function stubMe() {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/me")) return json(200, me);
+      // This suite assumes a fully onboarded instance — the setup route guard has its
+      // own tests in App.test.tsx.
+      if (url.includes("/api/setup/state")) {
+        return json(200, { completedSteps: [...SETUP_STEPS], completedAt: 1_800_000_000 });
+      }
       if (url.includes("/api/launcher")) return json(200, { apps: [] });
       if (url.includes("/containers")) return json(200, { containers: [], dockerReachable: true });
       if (url.endsWith("/api/apps")) return json(200, apps);
