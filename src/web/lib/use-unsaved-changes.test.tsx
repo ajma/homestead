@@ -81,6 +81,36 @@ function setup(initialDirty: boolean) {
   };
 }
 
+/**
+ * `new BeforeUnloadEvent(...)` throws "Illegal constructor" in jsdom — the only way to get
+ * a real instance, here or in a browser, is the legacy `document.createEvent` factory.
+ * That distinction matters: jsdom's `BeforeUnloadEvent.returnValue` is typed as a DOMString
+ * on the generated wrapper, but `BeforeUnloadEventImpl` never overrides it, so it actually
+ * resolves to `Event`'s inherited legacy `returnValue` accessor — a boolean mirror of the
+ * canceled flag, not an independent field. Reading `event.returnValue` back afterwards
+ * therefore cannot show what value was assigned; it only ever reports
+ * `!event.defaultPrevented`, regardless of whether the handler set it at all. So instead of
+ * reading the property after the fact, this shadows the `returnValue` setter on the
+ * instance and records every value passed to it, which observes that the assignment ran,
+ * and with what value, independent of jsdom's (unrelated) canceled-flag bookkeeping.
+ */
+function createSpiedBeforeUnloadEvent(): {
+  event: BeforeUnloadEvent;
+  returnValueCalls: unknown[];
+} {
+  const event = document.createEvent("BeforeUnloadEvent");
+  event.initEvent("beforeunload", false, true);
+  const returnValueCalls: unknown[] = [];
+  Object.defineProperty(event, "returnValue", {
+    configurable: true,
+    get: () => returnValueCalls.at(-1),
+    set: (value: unknown) => {
+      returnValueCalls.push(value);
+    },
+  });
+  return { event, returnValueCalls };
+}
+
 describe("useUnsavedChanges", () => {
   it("does not block navigation when clean", async () => {
     const { navigateAway, router } = setup(false);
@@ -142,18 +172,20 @@ describe("useUnsavedChanges", () => {
   it("does not warn on beforeunload while clean", () => {
     setup(false);
 
-    const event = new Event("beforeunload", { cancelable: true });
+    const { event, returnValueCalls } = createSpiedBeforeUnloadEvent();
     window.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(false);
+    expect(returnValueCalls).toEqual([]);
   });
 
-  it("warns on beforeunload while dirty, via the ref the listener reads on every dispatch", () => {
+  it("warns on beforeunload while dirty, setting both preventDefault and returnValue", () => {
     setup(true);
 
-    const event = new Event("beforeunload", { cancelable: true });
+    const { event, returnValueCalls } = createSpiedBeforeUnloadEvent();
     window.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
+    expect(returnValueCalls).toEqual([""]);
   });
 });
