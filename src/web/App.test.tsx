@@ -435,6 +435,41 @@ describe("the setup route guard", () => {
     expect(queryClient.getDefaultOptions().queries?.retry).not.toBe(false);
   });
 
+  it("sends an unauthenticated visitor to Login, not the dead end, when setup-state 401s", async () => {
+    // The window Critical 1 of the whole-branch review named: an admin exists (so
+    // `/api/setup/state` now requires one, per `setup.ts:144`) but this particular
+    // caller has no session — a second device, an expired cookie, a private window.
+    // Both `/api/me` and `/api/setup/state` answer 401, which is genuinely
+    // indistinguishable from "the server is broken" unless the guard treats an auth
+    // failure as "needs a session" rather than "setup status unknown". Before the fix,
+    // this combination rendered the same dead-end "Homestead is unavailable" screen as
+    // a real 500, with no login form and no way back in.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/me")) return json(401, { error: "unauthenticated" });
+        if (url.includes("/api/setup/state")) return json(401, { error: "unauthenticated" });
+        if (url.includes("/api/setup/status")) return json(200, { needsSetup: false });
+        return json(200, []);
+      }),
+    );
+
+    // `useSession` already passes `retry: false` itself, but `useSetupState` does not —
+    // without turning it off here too, a 401 that react-query treats as retryable would
+    // leave this test waiting out real backoff delays before settling into `isError`.
+    const defaults = queryClient.getDefaultOptions();
+    queryClient.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retry: false } });
+    try {
+      renderAt("/");
+
+      await waitFor(() => expect(screen.getByText(/Sign in to continue/i)).toBeTruthy());
+      expect(screen.queryByText(/Homestead is unavailable/i)).toBeNull();
+    } finally {
+      queryClient.setDefaultOptions(defaults);
+    }
+  });
+
   it("shows the retry screen, not a blank page, when the setup-state fetch fails", async () => {
     // The gap `SetupWizard.test.tsx` used to paper over: that file's own "does not
     // strand the user" test rendered `<SetupWizard>` in isolation, which passes

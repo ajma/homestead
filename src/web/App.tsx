@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ApiError } from "@web/api/client";
 import { useSetupState } from "@web/api/setup";
 import { useSession } from "@web/auth/useSession";
 import { ErrorBoundary } from "@web/components/ErrorBoundary";
@@ -87,6 +88,16 @@ function Routed() {
   // The route that decides whether anyone can use the product at all must not strand a
   // visitor on a blank page just because this one check failed.
   if (needsSetupCheck && setup.isError) {
+    // But a 401/403 here is not "the check failed" — once an admin exists,
+    // `setup.ts:144` requires one, so this just means "no session", and the fix is
+    // `<Login/>`, not a retry button that will 401 again forever. An absent session
+    // must resolve to `<Login/>` before a setup-state failure can resolve to the dead
+    // end below. A genuinely unavailable server (a 500, a network failure) is not an
+    // auth error and still falls through to that screen.
+    const isAuthFailure =
+      setup.error instanceof ApiError && (setup.error.status === 401 || setup.error.status === 403);
+    if (isAuthFailure && !me) return <Login />;
+
     return (
       <div className="flex min-h-dvh items-center justify-center p-6">
         <div className="max-w-sm space-y-3 text-center">
@@ -110,8 +121,11 @@ function Routed() {
 
   // The two-way guard, above the admin check below on purpose: a machine with no users
   // has no admin to authorise anything, so the wizard has to be reachable
-  // unauthenticated for its first step, and only needs a session from the second step
-  // on. Incomplete setup pulls every other route to `/setup`; a viewer is the one
+  // unauthenticated for its first step. From the second step on it needs a session
+  // throughout, and offering no way to get one used to be a dead end — the auth-failure
+  // branch above is what fixes that: a visitor with no session gets `<Login/>` instead
+  // of the "unavailable" screen once an admin exists to gate `/api/setup/state`.
+  // Incomplete setup pulls every other route to `/setup`; a viewer is the one
   // exception, since they can't complete it and must not be trapped by it either.
   if (!setupComplete) {
     return (
