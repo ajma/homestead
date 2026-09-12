@@ -24,8 +24,30 @@ services:
     # a shutdown mid-sequence would be SIGKILLed early rather than completing cleanly.
     stop_grace_period: 45s
 
-    ports:
-      - "3000:3000"
+    # `network_mode: host` instead of a bridged network with `ports:` (the two are mutually
+    # exclusive, so that key is gone). Reason: a bridged container's 127.0.0.1 is its own
+    # network namespace's loopback, not the host's, so an internal HTTP probe whose target
+    # is http://localhost:3000 would silently test the container instead of the service.
+    # The trade-off — no port remapping, a network namespace shared with the host — is a
+    # smaller loss than it sounds: this container already mounts /var/run/docker.sock, which
+    # is root-equivalent by construction, so host networking hands over nothing the socket
+    # mount had not already handed over. See docs/deployment.md §3.
+    #
+    # SECURITY NOTE, read before dismissing this as already covered: host networking also
+    # widens what a probe target can reach — including host-local services and the
+    # 169.254.169.254 link-local metadata endpoint on a cloud host. That is only harmless
+    # because setting a probe target requires `app:config` (src/server/routes/probes.ts),
+    # which is admin-only (src/server/auth/context.test.ts asserts a viewer lacks it), and an
+    # admin already holds `app:compose`/`app:lifecycle` — arbitrary compose YAML deployed
+    # through the mounted Docker socket above, which is root-equivalent by construction. Host
+    # networking hands such an admin no capability they lack by a far more direct route.
+    #
+    # TRIPWIRE: this argument depends entirely on probe-target configuration staying
+    # admin-only. If it is ever exposed to a non-admin — a scoped admin variant, a new
+    # capability, a Phase 2 external-probe surface reachable by someone else — this reasoning
+    # collapses, and probe targets must be validated against loopback, link-local and private
+    # ranges before the fetch. See docs/deployment.md §3.
+    network_mode: host
 
     volumes:
       # Read-write: Homestead runs compose commands and writes compose files.

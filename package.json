@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,green \"pnpm dev:server\" \"pnpm dev:web\"",
+    "dev": "concurrently -n server,web -c blue,green --kill-others-on-fail \"pnpm dev:server\" \"pnpm dev:web\"",
     "dev:server": "tsx watch src/server/index.ts",
     "dev:web": "vite",
     "build": "pnpm build:web && pnpm build:server",
