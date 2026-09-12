@@ -190,3 +190,61 @@ installed instead of refusing to boot. Never set it in a real deployment.
 to serve the SPA`) and registers no static handler, so the failure is a silent 404 rather than
 a crash. Check the container logs for that warning, and confirm the `build` stage actually
 produced `dist/web` before the `runtime` stage copied it.
+
+## 12. Development deployment
+
+For iterating on Homestead itself against a real, tailnet-reachable box, without rebuilding an
+image on every change. `compose.dev.yaml` builds `Dockerfile.dev` instead of the root
+Dockerfile: no source is baked in and no build runs at image-build time. The working tree is
+bind-mounted at `/app`, and the entrypoint runs the repo's own `pnpm dev` — `tsx watch`
+restarts the server and Vite serves the UI with HMR — so a file that lands on the host takes
+effect immediately.
+
+### Starting it
+
+On the dev box, with the repo present at some path (see "Pushing updates" below):
+
+```bash
+docker compose -f compose.dev.yaml up -d --build
+```
+
+`--build` only matters the first time, or after changing `Dockerfile.dev` itself — everything
+under the working tree is picked up through the bind mount without it.
+
+### Pushing updates
+
+`scripts/push-to-test.sh` rsyncs the working tree to the dev VM over SSH:
+
+```bash
+./scripts/push-to-test.sh
+```
+
+Override `HOMESTEAD_TEST_HOST` / `HOMESTEAD_TEST_PATH` to target somewhere other than the
+project's current test VM. `tsx watch` and Vite pick up the change as soon as rsync finishes —
+no restart needed, unless `package.json`'s dependencies changed, in which case restart the
+container so the entrypoint reruns `pnpm install` into the `node_modules` volume.
+
+### Opening it
+
+`http://homestead-test.hippo-ule.ts.net:5173` — Vite's port, not the API's. The browser talks
+to Vite, which proxies `/api` to the server on port 3000 in the same network namespace (both
+share the host's, per `network_mode: host`). This is also why `HOMESTEAD_BASE_URL` in
+`compose.dev.yaml` is set to that same Vite URL rather than the API's: Better-Auth compares
+the browser's `Origin` header against it and derives cookie security from its scheme, and the
+browser's address bar only ever shows the Vite URL in this deployment.
+
+### How it differs from production
+
+| | Production (`compose.example.yaml`) | Development (`compose.dev.yaml`) |
+|---|---|---|
+| Image | Built once, immutable, four stages | `Dockerfile.dev`: no source baked in, no build step |
+| Source | Copied into the image at build time | Bind-mounted from the working tree at `/app` |
+| `node_modules` | Installed inside the image at build time (Alpine/musl) | Named volume, (re-)installed by the entrypoint on each container start |
+| Change workflow | Rebuild and redeploy the image | `scripts/push-to-test.sh`; the watchers pick it up |
+| Served on | The API's own port, built SPA assets | Vite's dev server (HMR), proxying `/api` to the server |
+| `HOMESTEAD_BASE_URL` | The API's port | Vite's port |
+
+`network_mode: host`, the Docker socket mount, and the compose-root identical-path mount and
+its boot preflight are identical in both deployments — see §3 and §4. Setting
+`HOMESTEAD_SKIP_MOUNT_PREFLIGHT=true` is no more appropriate here than in production; the dev
+deployment's compose-root mount is real and can be misconfigured the same way.
