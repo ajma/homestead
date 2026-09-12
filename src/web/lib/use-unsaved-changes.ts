@@ -42,10 +42,16 @@ export function useUnsavedChanges(dirty: boolean): {
   useEffect(() => {
     function handler(event: BeforeUnloadEvent) {
       if (!dirtyRef.current) return;
+      // `preventDefault()` alone is sufficient in every currently supported browser
+      // (Chrome has honoured it unaided since 119; Firefox and Safari always did) to
+      // show the browser's own "leave site?" prompt — no page can customise its text.
+      // This used to also set `event.returnValue` for older Chrome, which required it;
+      // that line was dropped rather than kept as unverifiable belt-and-braces, since
+      // under the DOM spec `returnValue`'s setter and `preventDefault()` both just set
+      // the same canceled flag, so a browser new enough to need the assignment at all
+      // would have to disagree with the spec to make it do anything `preventDefault()`
+      // didn't already do.
       event.preventDefault();
-      // Chrome ignores `preventDefault` alone and still requires `returnValue` set to
-      // something truthy to show its own confirmation prompt.
-      event.returnValue = "";
     }
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
