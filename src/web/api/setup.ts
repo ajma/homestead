@@ -1,4 +1,4 @@
-import type { SetupState, SetupStep } from "@shared/setup.js";
+import type { HostCheck, SetupState, SetupStep } from "@shared/setup.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@web/api/client";
 
@@ -47,5 +47,23 @@ export function useFinishSetup() {
   return useMutation({
     mutationFn: () => apiFetch<SetupState>("/api/setup/finish", { method: "POST" }),
     onSuccess: (state) => queryClient.setQueryData(setupStateKey, state),
+  });
+}
+
+export const hostCheckKey = ["setup-host-check"] as const;
+
+/**
+ * `GET /api/setup/host-check` runs a real container for the mount preflight — the same
+ * cost the route itself serialises server-side (see `src/server/routes/setup.ts`'s
+ * `runPreflightOnce`). `staleTime`/`gcTime` at 0 so the step's re-check button, which
+ * calls `refetch()`, always gets a genuinely fresh answer rather than a cached one from
+ * before the user went and fixed their bind mount.
+ */
+export function useHostCheck() {
+  return useQuery({
+    queryKey: hostCheckKey,
+    queryFn: () => apiFetch<HostCheck>("/api/setup/host-check"),
+    staleTime: 0,
+    gcTime: 0,
   });
 }

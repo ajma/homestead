@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { SetupState } from "@shared/setup.js";
+import type { HostCheck, SetupState } from "@shared/setup.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SetupWizard } from "@web/routes/setup/SetupWizard";
@@ -12,10 +12,27 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+/** A fixture, not a real answer — good enough that `StepVerifyHost`, reached via Back
+ * in the "review an earlier step" test, has a `HostCheck`-shaped body to render rather
+ * than crashing on a `SetupState` it was never meant to receive. */
+const HEALTHY_HOST_CHECK: HostCheck = {
+  composeRoot: "/srv/homestead/apps",
+  docker: { ok: true, version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "arm64" },
+  preflight: { ok: true },
+};
+
+/** Routes by URL rather than answering every request identically: this wizard's own
+ * steps make their own requests (`StepVerifyHost`'s `GET /api/setup/host-check`, at
+ * least), and a stub that always returns `state` would hand a step something shaped
+ * nothing like what it asked for the moment more than one endpoint is exercised in the
+ * same test. */
 function stubState(state: SetupState) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async () => json(200, state)),
+    vi.fn(async (url: string) => {
+      if (url === "/api/setup/host-check") return json(200, HEALTHY_HOST_CHECK);
+      return json(200, state);
+    }),
   );
 }
 
@@ -88,6 +105,10 @@ describe("SetupWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Back/ }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: /Verify host/ })).toBeTruthy());
+    // Waits for StepVerifyHost's own fetch to actually settle and render, rather than
+    // stopping at the static heading — a stub answering every URL identically would
+    // hand it a `SetupState` instead of a `HostCheck` and crash once this resolves.
+    await waitFor(() => expect(screen.getByText("27.3.1")).toBeTruthy());
   });
 
   it("shows no Back affordance on the very first step", async () => {
