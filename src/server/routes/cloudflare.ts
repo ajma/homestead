@@ -23,6 +23,9 @@ function faultOf(error: unknown): CloudflareError["fault"] {
 }
 
 export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
+  const { db, secrets } = app.deps;
+  const store = new CloudflareCredentialStore(db, secrets);
+
   /**
    * Verification strategy: `listZones()`, not a dedicated verify endpoint.
    *
@@ -51,17 +54,13 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   }
 
   app.get("/api/cloudflare/credentials", async (request) => {
-    const { db, secrets } = app.deps;
-    requireCapability(request, "cf:write");
-    const store = new CloudflareCredentialStore(db, secrets);
+    requireCapability(request, "cf:read");
     return store.status();
   });
 
   app.put("/api/cloudflare/credentials", async (request, reply) => {
-    const { db, secrets } = app.deps;
     const ctx = requireCapability(request, "cf:write");
     const body = putBody.parse(request.body);
-    const store = new CloudflareCredentialStore(db, secrets);
 
     try {
       await verify(body);
@@ -86,18 +85,14 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete("/api/cloudflare/credentials", async (request, reply) => {
-    const { db, secrets } = app.deps;
     const ctx = requireCapability(request, "cf:write");
-    const store = new CloudflareCredentialStore(db, secrets);
     await store.clear();
     await audit(db, ctx, { action: "cloudflare.credentials_deleted" });
     return reply.code(204).send();
   });
 
   app.get("/api/cloudflare/zones", async (request, reply) => {
-    const { db, secrets } = app.deps;
     requireCapability(request, "cf:write");
-    const store = new CloudflareCredentialStore(db, secrets);
     const creds = await store.get();
     if (!creds) {
       return reply.code(409).send({ error: "not_configured" });

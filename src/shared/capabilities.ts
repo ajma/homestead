@@ -5,6 +5,7 @@ export const CAPABILITIES = [
   "app:config",
   "app:lifecycle",
   "app:secrets",
+  "cf:read",
   "cf:write",
   "user:manage",
 ] as const;
