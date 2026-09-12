@@ -23,7 +23,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { fetchSchemaAt, resolveCommitSha } from "./compose-schema-source";
+import { fetchSchemaAt, resolveCommitSha, resolveDefaultBranch } from "./compose-schema-source";
 
 const PINNED_PATH = resolve("src/shared/schema/PINNED.md");
 const LOCAL_SCHEMA_PATH = resolve("src/shared/schema/compose-spec.json");
@@ -56,22 +56,45 @@ function serviceKeys(schema: unknown, sourceLabel: string): Set<string> {
 
 async function main() {
   const pinned = await pinnedSha();
-  const current = await resolveCommitSha("main");
+  const defaultBranch = await resolveDefaultBranch();
+  const current = await resolveCommitSha(defaultBranch);
 
-  console.log(`Pinned commit:   ${pinned}`);
-  console.log(`Upstream (main): ${current}`);
+  console.log(`Pinned commit:              ${pinned}`);
+  console.log(`Upstream (${defaultBranch}): ${current}`);
+
+  // The two SHAs above are strings, not a look at the file. Comparing them alone would let
+  // a botched vendor run or a hand-edit of compose-spec.json pass silently, as long as
+  // nobody touched PINNED.md's commit line — so before saying anything is fine, fetch what
+  // GitHub actually has at `pinned` and diff it against the file on disk. This is the check
+  // this script's own "No drift" message has always claimed to make.
+  const [localSchema, pinnedSchema] = await Promise.all([
+    readFile(LOCAL_SCHEMA_PATH, "utf8").then((text) => JSON.parse(text) as unknown),
+    fetchSchemaAt(pinned),
+  ]);
+  const vendoredMatchesPin = JSON.stringify(localSchema) === JSON.stringify(pinnedSchema);
+
+  if (!vendoredMatchesPin) {
+    console.log(
+      `\nMISMATCH: ${LOCAL_SCHEMA_PATH} does not match the content GitHub has at the pinned ` +
+        `commit (${pinned}). The pin itself is not stale — this is a corrupted or hand-edited ` +
+        "vendored file, not upstream drift. Re-vendor it with " +
+        `\`pnpm exec tsx scripts/vendor-compose-schema.ts ${pinned}\` and diff before committing.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
 
   if (pinned === current) {
-    console.log("No drift: the vendored schema matches the tip of compose-spec's default branch.");
+    console.log(
+      "No drift: the vendored schema's content matches the pinned commit, and that commit " +
+        "is the tip of compose-spec's default branch.",
+    );
     return;
   }
 
   console.log("\nDRIFT: the vendored schema is behind compose-spec's default branch.");
 
-  const [localSchema, upstreamSchema] = await Promise.all([
-    readFile(LOCAL_SCHEMA_PATH, "utf8").then((text) => JSON.parse(text) as unknown),
-    fetchSchemaAt(current),
-  ]);
+  const upstreamSchema = await fetchSchemaAt(current);
 
   const localKeys = serviceKeys(localSchema, "The vendored schema");
   const upstreamKeys = serviceKeys(upstreamSchema, "The upstream schema");
@@ -93,7 +116,7 @@ async function main() {
 
   console.log(
     "\nDo not refresh the pin as a side effect of this check — see this script's own doc " +
-      "comment. To refresh deliberately: pnpm exec tsx scripts/vendor-compose-schema.ts main",
+      `comment. To refresh deliberately: pnpm exec tsx scripts/vendor-compose-schema.ts ${defaultBranch}`,
   );
 
   process.exitCode = 1;

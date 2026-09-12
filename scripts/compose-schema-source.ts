@@ -8,6 +8,22 @@
 
 export const REPO = "compose-spec/compose-spec";
 
+/**
+ * The repo's actual default branch, not a guess. `check-schema-drift.ts` talks about "the
+ * tip of compose-spec's default branch" — that claim used to be backed by a hardcoded
+ * `"main"`, which is only true today because nobody has renamed it. Asking GitHub keeps the
+ * words and the behaviour in sync if that ever changes upstream.
+ */
+export async function resolveDefaultBranch(): Promise<string> {
+  const response = await fetch(`https://api.github.com/repos/${REPO}`, {
+    headers: { accept: "application/vnd.github+json" },
+  });
+  if (!response.ok) throw new Error(`Could not look up ${REPO}: ${response.status}`);
+  const branch = (await response.json()).default_branch as string;
+  if (!branch) throw new Error("Repo lookup did not include a default_branch");
+  return branch;
+}
+
 /** Resolves `ref` (a branch, tag, or SHA) to the full 40-character commit SHA GitHub has it at. */
 export async function resolveCommitSha(ref: string): Promise<string> {
   const commitResponse = await fetch(`https://api.github.com/repos/${REPO}/commits/${ref}`, {
