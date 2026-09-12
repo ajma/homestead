@@ -1,6 +1,6 @@
 import type { AdminApp } from "@shared/dto";
 import { useQueryClient } from "@tanstack/react-query";
-import { adminAppKey, useJobs } from "@web/api/admin";
+import { adminAppKey, adminAppsKey, useJobs } from "@web/api/admin";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { useEffect, useState } from "react";
 
@@ -43,11 +43,13 @@ export function describeActionError(error: unknown): string {
  * job this browser tab happens to remember starting". `starting` covers the gap between
  * click and response, which is also disabled but does not yet have a `jobId` to stream.
  *
- * `handleJobDone` invalidates `adminAppKey(app.id)` and `adminAppKey(app.slug)` —
- * deliberately never `adminAppsKey`, the whole-inventory rollup that `GET /api/apps`
- * computes by spawning up to four `docker compose config` processes. Re-fetching all of
- * it to update one row is the mistake 1E already made once and fixed (the 1E final-fix
- * brief, Important 3); a caller reusing this hook cannot reintroduce it.
+ * `handleJobDone` invalidates `adminAppKey(app.id)` and `adminAppKey(app.slug)`, and
+ * separately patches this app's row in the `adminAppsKey` cache in place — it never
+ * invalidates `adminAppsKey` itself. That rollup is what `GET /api/apps` computes by
+ * spawning up to four `docker compose config` processes; re-fetching all of it to update
+ * one row is the mistake 1E already made once and fixed (the 1E final-fix brief,
+ * Important 3), and a caller reusing this hook cannot reintroduce it. See the patch
+ * itself, below, for why writing to that one row is safe where invalidating it is not.
  *
  * `knownRunningJobId` lets a caller that already has the answer — the inventory row,
  * from `GET /api/apps`'s own `runningJobId` field — skip `useJobs` entirely rather than
@@ -103,10 +105,29 @@ export function useAppActions(
     // deliberately (see `src/web/api/admin.ts`), so this one invalidation refreshes all of
     // them. `adminAppKey(app.slug)` is a separate cache entry — the one `EditApp`'s own
     // header is keyed by, since it resolves through `useAdminApp(slug)` rather than the
-    // whole-inventory `adminAppsKey`. Both need invalidating; neither call touches
-    // `adminAppsKey` itself.
+    // whole-inventory `adminAppsKey`. Both need invalidating.
     queryClient.invalidateQueries({ queryKey: adminAppKey(app.id) });
     queryClient.invalidateQueries({ queryKey: adminAppKey(app.slug) });
+
+    // Since Task 2, `adminAppsKey` — the inventory list `GET /api/apps` returns — is the
+    // ONLY cache holding this row's `runningJobId`; nothing else writes to it once a job
+    // finishes. Leaving it untouched (as this used to) meant a row's cached
+    // `runningJobId` outlived the job itself: an admin who deployed, watched it finish,
+    // then came back within the list's 15s `staleTime` found Deploy and Restart disabled
+    // again and a second SSE stream opened for a job that had already completed. It
+    // self-healed once that stream replayed `done`, but it was a visible flicker and a
+    // spurious connection nothing caught.
+    //
+    // This does NOT reintroduce the defect `adminAppsKey` is otherwise never invalidated
+    // for (the 1E final-fix brief, Important 3): that rule is about *invalidating* —
+    // forcing `GET /api/apps` to re-run its Docker calls — on every status frame from a
+    // flapping probe, which would turn polling into a load generator. A job finishing is
+    // not a status frame; it is a discrete, user-initiated, low-frequency event, and a
+    // local `setQueryData` patch triggers no refetch and no Docker call at all — it just
+    // corrects the one field this hook's own row owns.
+    queryClient.setQueryData<AdminApp[]>(adminAppsKey, (rows) =>
+      rows?.map((row) => (row.id === app.id ? { ...row, runningJobId: null } : row)),
+    );
   }
 
   return { busy, activeJobId, actionError, setActionError, startJob, handleJobDone };

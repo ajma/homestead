@@ -44,7 +44,8 @@ const ROW_BUTTON_CLASS =
  * second POST-and-track implementation — one job runner, one set of semantics, so a row
  * action and the edit page's button cannot diverge on what "deploy" means or on how a 409
  * reads. `handleJobDone` (from that hook) invalidates only `adminAppKey(app.id)` and
- * `adminAppKey(app.slug)` — never `adminAppsKey`, the whole-inventory rollup `GET
+ * `adminAppKey(app.slug)`, and separately patches this row's cached `runningJobId` in
+ * `adminAppsKey` — it never invalidates that whole-inventory rollup, which is what `GET
  * /api/apps` computes by spawning up to four `docker compose config` processes. A row
  * action re-fetching all of it to update one row is the mistake 1E already made once and
  * fixed; reusing the hook is what makes it structurally impossible to make again here.

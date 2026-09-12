@@ -376,5 +376,44 @@ describe("AdminApps", () => {
       );
       expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: adminAppsKey });
     });
+
+    it("clears a row's cached runningJobId once its job finishes, so a remount within staleTime doesn't re-disable it", async () => {
+      // Since Task 2, `adminAppsKey` is the only cache holding `runningJobId` — nothing
+      // else writes to it once a job finishes. Before this fix, a finished job's id
+      // lingered in that cache: a remount inside the list's 15s `staleTime` re-read the
+      // dead id, re-disabled Deploy/Restart and re-opened a second `JobOutput` stream for
+      // a job that had already completed. This pins the fix without invalidating the
+      // whole-inventory rollup (the sibling test above already pins that it must not).
+      const seeded = app({ runningJobId: "existing-job" });
+      stubRowFetch([seeded]);
+      const { client, unmount } = mount([seeded]);
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+      );
+
+      act(() => {
+        FakeEventSource.instances[0]?.emit("done", { status: "succeeded", exitCode: 0 });
+      });
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(false),
+      );
+      expect(client.getQueryData<AdminApp[]>(adminAppsKey)?.[0]?.runningJobId).toBeNull();
+
+      unmount();
+      render(
+        <QueryClientProvider client={client}>
+          <MemoryRouter>
+            <AdminApps />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(false),
+      );
+      expect(FakeEventSource.instances).toHaveLength(1);
+    });
   });
 });
