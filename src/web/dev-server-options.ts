@@ -10,7 +10,7 @@ export type DevServerOptions = {
 };
 
 export function resolveDevServerOptions(
-  env: Pick<NodeJS.ProcessEnv, "VITE_DEV_HOST" | "VITE_ALLOWED_HOSTS">,
+  env: Partial<Pick<NodeJS.ProcessEnv, "VITE_DEV_HOST" | "VITE_ALLOWED_HOSTS">>,
 ): DevServerOptions {
   const options: DevServerOptions = {};
 
