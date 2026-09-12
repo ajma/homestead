@@ -9,6 +9,11 @@ export type CloudflareStatus =
 
 export type CloudflareZone = { id: string; name: string };
 
+/** `deletedAt` is `null` for a live tunnel, an epoch-ms timestamp once soft-deleted.
+ * Shared rather than server-only because a future picker UI needs to filter or grey out
+ * deleted tunnels the same way the server does — see `CloudflareClient.listTunnels`. */
+export type CloudflareTunnel = { id: string; name: string; deletedAt: number | null };
+
 /**
  * Cloudflare's failure classified into the sentence a caller needs to say about it.
  * Shared rather than server-only: the PUT route's 422 body carries this verbatim

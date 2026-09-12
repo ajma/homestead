@@ -1,4 +1,4 @@
-import type { CloudflareFault } from "@shared/cloudflare.js";
+import type { CloudflareFault, CloudflareTunnel } from "@shared/cloudflare.js";
 import { z } from "zod";
 import { CloudflareError } from "./errors.js";
 
@@ -70,8 +70,66 @@ const envelopeSchema = z.object({
 const zoneSchema = z.object({ id: z.string(), name: z.string() });
 const zonesResultSchema = z.array(zoneSchema);
 
+/**
+ * `deleted_at` is Cloudflare's documented field for a soft-deleted tunnel — present and
+ * null for a live tunnel, an ISO8601 timestamp once deleted. Unlike the token response
+ * (see `tunnelTokenResultSchema` below), this shape is not on the plan's "unverified"
+ * list, so it is trusted directly rather than defended against alternate shapes.
+ */
+const tunnelSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  deleted_at: z.string().nullable().optional(),
+});
+const tunnelsResultSchema = z.array(tunnelSchema);
+
+/**
+ * The tunnel-token endpoint's response shape is explicitly unverified (see the plan's
+ * "what is known" section) — Cloudflare's docs and its own examples disagree on whether
+ * `result` is the bare token string or `{ token: string }`. Both are accepted here rather
+ * than guessing one; whichever shape arrives, `tunnelToken` below still enforces a
+ * non-empty string, so an API change to a THIRD shape fails the parse loudly instead of
+ * handing back `undefined` as if it were a token (Phase 1F's missing-Docker-version
+ * defect, generalised).
+ */
+const tunnelTokenResultSchema = z.union([z.string(), z.object({ token: z.string() })]);
+
+/** ISO8601 → epoch ms, or `null` for a tunnel that has not been deleted. Raises rather
+ * than returning `NaN` silently: an unparseable date is Cloudflare sending a shape this
+ * client does not understand, not a value safe to carry forward. */
+function parseDeletedAt(raw: string | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  const ms = Date.parse(raw);
+  if (Number.isNaN(ms)) {
+    throw new CloudflareError(
+      "cloudflare",
+      "Cloudflare's tunnel response carried a deleted_at that could not be parsed as a date",
+      { status: null, codes: [] },
+    );
+  }
+  return ms;
+}
+
+function toTunnel(raw: z.infer<typeof tunnelSchema>): CloudflareTunnel {
+  return { id: raw.id, name: raw.name, deletedAt: parseDeletedAt(raw.deleted_at) };
+}
+
 export type CloudflareClient = {
   listZones(): Promise<Array<{ id: string; name: string }>>;
+  /** Posts `config_src: "cloudflare"` — see the module-level note on `createTunnel`'s
+   * implementation for why that field is the whole point. */
+  createTunnel(name: string): Promise<{ id: string; name: string }>;
+  /** Every tunnel on the account, deleted ones included (with `deletedAt` set) rather
+   * than filtered out — a caller that wants only live tunnels filters on `deletedAt`
+   * itself, and nothing here silently decides that for it. */
+  listTunnels(): Promise<CloudflareTunnel[]>;
+  /** Raises if Cloudflare's response has no usable, non-empty token — never resolves
+   * with `""`. See `tunnelTokenResultSchema` above for why two shapes are accepted. */
+  tunnelToken(tunnelId: string): Promise<string>;
+  /** Idempotent: deleting a tunnel that is already deleted resolves, it does not throw.
+   * The rollback path (2B's step-sequence runner) depends on that — rollback must be
+   * safe to run twice. */
+  deleteTunnel(tunnelId: string): Promise<void>;
 };
 
 /**
@@ -145,18 +203,25 @@ export function createCloudflareClient(opts: {
   }
 
   /**
-   * One page of `GET /zones`, with retry.
+   * The one request path every method on this client goes through — envelope parsing,
+   * fault classification, bounded retry and token scrubbing all live here exactly once.
+   * `listZones`'s pagination loop and the tunnel methods below both call this rather than
+   * each re-implementing (or half-reimplementing) the retry loop; see the plan's note on
+   * why a second request path is the thing to avoid.
    *
-   * `accountId` is accepted by this client (and stored on it) for the account-scoped
-   * endpoints later sub-phases add — tunnels and Access resources all live under
-   * `/accounts/{account_id}/...`. It is deliberately NOT sent as a filter on this zones
-   * call: whether `GET /zones` even accepts an account filter is not on this plan's list
-   * of verified Cloudflare facts (see the plan's "what is known" section), and a
-   * Zone:Read token's own scope already limits which zones it can see. Guessing a query
-   * parameter into the one endpoint this phase can actually exercise would trade a real
-   * verification for an invented one.
+   * Takes a full URL rather than a path so callers decide their own base (`/zones` has no
+   * account segment; the tunnel endpoints are all under `/accounts/{account_id}/...`) —
+   * this function has no opinion on that, only on what happens once a request is sent.
    */
-  async function requestPage(page: number): Promise<PageResult> {
+  async function requestEnvelope(req: {
+    method: "GET" | "POST" | "DELETE";
+    url: string;
+    body?: unknown;
+  }): Promise<{
+    result: unknown;
+    resultInfo?: { page: number; per_page: number; total_count: number };
+    status: number;
+  }> {
     let lastFault: CloudflareFault = "network";
     let lastMessage = "the Cloudflare API request failed";
     let lastStatus: number | null = null;
@@ -165,12 +230,14 @@ export function createCloudflareClient(opts: {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       let response: Response;
       try {
-        response = await opts.fetch(`${API_BASE}/zones?page=${page}`, {
-          method: "GET",
+        response = await opts.fetch(req.url, {
+          method: req.method,
           headers: {
             authorization: `Bearer ${opts.token}`,
             accept: "application/json",
+            ...(req.body !== undefined ? { "content-type": "application/json" } : {}),
           },
+          body: req.body !== undefined ? JSON.stringify(req.body) : undefined,
         });
       } catch (error) {
         lastFault = "network";
@@ -179,10 +246,6 @@ export function createCloudflareClient(opts: {
         );
         lastStatus = null;
         lastCodes = [];
-        // Reads `RETRYABLE_FAULTS` the same way the parsed-envelope branch below does —
-        // see that set's doc comment. Before this fix, a transport failure was retried
-        // unconditionally regardless of what the set said, which made `"network"`'s
-        // membership decorative: deleting it from the set changed nothing here.
         // Reads `RETRYABLE_FAULTS` the same way the parsed-envelope branch below does —
         // see that set's doc comment. Before this fix, a transport failure was retried
         // unconditionally regardless of what the set said, which made `"network"`'s
@@ -230,21 +293,43 @@ export function createCloudflareClient(opts: {
         throw new CloudflareError(fault, message, { status: lastStatus, codes: lastCodes });
       }
 
-      const zonesParsed = zonesResultSchema.safeParse(parsed.data.result);
-      if (!zonesParsed.success) {
-        throw new CloudflareError(
-          "cloudflare",
-          "Cloudflare's zones response did not match the expected shape",
-          { status: response.status, codes: [] },
-        );
-      }
-
-      return { zones: zonesParsed.data, resultInfo: parsed.data.result_info };
+      return {
+        result: parsed.data.result,
+        resultInfo: parsed.data.result_info,
+        status: response.status,
+      };
     }
 
     // Unreachable in practice (the loop always returns or throws), but keeps the
     // function's return type honest without a non-null assertion.
     throw new CloudflareError(lastFault, lastMessage, { status: lastStatus, codes: lastCodes });
+  }
+
+  /** Every account-scoped endpoint (tunnels, and Access resources later) lives under this
+   * prefix. `accountId` was accepted and stored by this client from the start for exactly
+   * these — see the constructor options — but the zones call above deliberately never
+   * sends it: whether `GET /zones` even accepts an account filter was never verified, and
+   * a Zone:Read token's own scope already limits what it can see. */
+  function accountUrl(path: string): string {
+    return `${API_BASE}/accounts/${opts.accountId}${path}`;
+  }
+
+  /** One page of `GET /zones`, with retry — the only thing specific to zones is the URL
+   * and the result's shape; `requestEnvelope` does the rest. */
+  async function requestPage(page: number): Promise<PageResult> {
+    const { result, resultInfo } = await requestEnvelope({
+      method: "GET",
+      url: `${API_BASE}/zones?page=${page}`,
+    });
+    const zonesParsed = zonesResultSchema.safeParse(result);
+    if (!zonesParsed.success) {
+      throw new CloudflareError(
+        "cloudflare",
+        "Cloudflare's zones response did not match the expected shape",
+        { status: null, codes: [] },
+      );
+    }
+    return { zones: zonesParsed.data, resultInfo };
   }
 
   return {
@@ -273,6 +358,91 @@ export function createCloudflareClient(opts: {
         `Cloudflare's zones listing did not complete within ${MAX_PAGES} pages; the API may be ignoring pagination`,
         { status: null, codes: [] },
       );
+    },
+
+    /**
+     * `config_src: "cloudflare"` on the request body is the entire point of this method
+     * (see the plan's §6 and the commit this ships in) — it is what keeps ingress
+     * decisions in Cloudflare's API rather than a local config file cloudflared would
+     * need restarting to reread. Nothing in this client's response handling would notice
+     * if it were dropped from the body, which is exactly why `client.test.ts` asserts on
+     * the outgoing request rather than the parsed response.
+     */
+    async createTunnel(name) {
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: accountUrl("/cfd_tunnel"),
+        body: { name, config_src: "cloudflare" },
+      });
+      const parsed = tunnelSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's tunnel response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return { id: parsed.data.id, name: parsed.data.name };
+    },
+
+    async listTunnels() {
+      const { result } = await requestEnvelope({ method: "GET", url: accountUrl("/cfd_tunnel") });
+      const parsed = tunnelsResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's tunnel list response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return parsed.data.map(toTunnel);
+    },
+
+    async tunnelToken(tunnelId) {
+      const { result } = await requestEnvelope({
+        method: "GET",
+        url: accountUrl(`/cfd_tunnel/${tunnelId}/token`),
+      });
+      const parsed = tunnelTokenResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's tunnel token response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      const token = typeof parsed.data === "string" ? parsed.data : parsed.data.token;
+      // A missing or empty token is exactly the "success with no version in it" failure
+      // this project has already shipped once (Phase 1G, a missing Docker version field).
+      // Raising here — never returning `""` — is the fix that generalises: an empty
+      // string in a `.env` produces a container that starts, fails to connect, and looks
+      // like a network problem to whoever debugs it next.
+      if (token.length === 0) {
+        throw new CloudflareError("cloudflare", "Cloudflare returned an empty tunnel token", {
+          status: null,
+          codes: [],
+        });
+      }
+      return token;
+    },
+
+    /**
+     * Idempotent by design, not by special-casing a response shape: Cloudflare tunnels
+     * are soft-deleted (see `tunnelSchema`'s `deleted_at`), so re-deleting an
+     * already-deleted tunnel is expected to report the same `success: true` envelope as
+     * the first call. This method does not add its own "already deleted" precondition
+     * check on top of that — such a check is exactly what would make a repeat call throw,
+     * which is the failure `client.test.ts`'s idempotency test binds against.
+     *
+     * Whether Cloudflare instead refuses a delete while the tunnel has active connections
+     * is the plan's second explicitly-unverified fact. This method does not guess at a
+     * `?cascade=` flag or similar to force it through: if that refusal exists, it already
+     * arrives as an ordinary non-success envelope and surfaces as a normal
+     * `CloudflareError`, fault-classified the same as any other rejected request — failing
+     * loudly rather than silently swallowing a real refusal.
+     */
+    async deleteTunnel(tunnelId) {
+      await requestEnvelope({ method: "DELETE", url: accountUrl(`/cfd_tunnel/${tunnelId}`) });
     },
   };
 }

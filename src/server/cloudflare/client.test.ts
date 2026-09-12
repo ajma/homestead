@@ -424,4 +424,174 @@ describe("createCloudflareClient", () => {
       expect(fetchMock).toHaveBeenCalledTimes(50);
     });
   });
+
+  describe("createTunnel", () => {
+    it("posts config_src: cloudflare on the request body", async () => {
+      // The binding assertion: on the REQUEST body, not the response — nothing in the
+      // response handling would notice if `config_src` were dropped from what we send,
+      // which is exactly why this test inspects the outgoing fetch call.
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const sent = JSON.parse(String(init?.body));
+        expect(sent).toEqual({ name: "homestead", config_src: "cloudflare" });
+        return jsonResponse(
+          envelope({ success: true, result: { id: "tunnel-1", name: "homestead" } }),
+        );
+      });
+      const tunnel = await client({ fetch: fetchMock }).createTunnel("homestead");
+      expect(tunnel).toEqual({ id: "tunnel-1", name: "homestead" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends the request to the account-scoped cfd_tunnel endpoint", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel`,
+        );
+        return jsonResponse(
+          envelope({ success: true, result: { id: "tunnel-1", name: "homestead" } }),
+        );
+      });
+      await client({ fetch: fetchMock }).createTunnel("homestead");
+    });
+
+    it("raises a CloudflareError classified the normal way on failure", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: false, errors: [{ code: 9109, message: "forbidden" }] }), {
+          status: 403,
+        }),
+      );
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .createTunnel("homestead")
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect(error.fault).toBe("permission");
+    });
+  });
+
+  describe("listTunnels", () => {
+    it("surfaces a deleted tunnel's deletedAt rather than excluding it from the list", async () => {
+      // Choosing to surface rather than exclude: the interface's `deletedAt` field would
+      // be pointless — always null — if this method filtered deleted tunnels out itself.
+      // A caller that wants only live tunnels filters on `deletedAt`; a picker showing a
+      // deleted tunnel as if it were live is the confusing bug this test guards against
+      // in the other direction (surfacing it means a caller CAN grey it out).
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: [
+              { id: "t1", name: "live", deleted_at: null },
+              { id: "t2", name: "gone", deleted_at: "2024-01-02T03:04:05Z" },
+            ],
+          }),
+        ),
+      );
+      const tunnels = await client({ fetch: fetchMock }).listTunnels();
+      expect(tunnels).toEqual([
+        { id: "t1", name: "live", deletedAt: null },
+        { id: "t2", name: "gone", deletedAt: Date.parse("2024-01-02T03:04:05Z") },
+      ]);
+    });
+
+    it("tolerates a tunnel with no deleted_at field at all", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: [{ id: "t1", name: "live" }] })),
+      );
+      const tunnels = await client({ fetch: fetchMock }).listTunnels();
+      expect(tunnels).toEqual([{ id: "t1", name: "live", deletedAt: null }]);
+    });
+  });
+
+  describe("tunnelToken", () => {
+    it("returns the token when the result is a bare string", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: "the-tunnel-token" })),
+      );
+      const token = await client({ fetch: fetchMock }).tunnelToken("tunnel-1");
+      expect(token).toBe("the-tunnel-token");
+    });
+
+    it("returns the token when the result is wrapped in an object", async () => {
+      // Two plausible shapes were never verified against a real account; both are
+      // accepted rather than guessing one and failing on the other.
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: { token: "the-tunnel-token" } })),
+      );
+      const token = await client({ fetch: fetchMock }).tunnelToken("tunnel-1");
+      expect(token).toBe("the-tunnel-token");
+    });
+
+    it("raises rather than returning an empty string when the token is empty", async () => {
+      const fetchMock = vi.fn(async () => jsonResponse(envelope({ success: true, result: "" })));
+      const error = await client({ fetch: fetchMock })
+        .tunnelToken("tunnel-1")
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect((error as CloudflareError).message).not.toBe("");
+    });
+
+    it("raises rather than returning an empty string when the token field is missing", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: { notToken: "oops" } })),
+      );
+      const error = await client({ fetch: fetchMock })
+        .tunnelToken("tunnel-1")
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+    });
+
+    it("never puts the tunnel token in a thrown error's message", async () => {
+      const fetchMock = vi.fn(async () => jsonResponse(envelope({ success: true, result: "" })));
+      const error = (await client({ fetch: fetchMock })
+        .tunnelToken("tunnel-1")
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error.message).not.toContain("the-tunnel-token");
+    });
+  });
+
+  describe("deleteTunnel", () => {
+    it("succeeds on a live tunnel", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: { id: "tunnel-1" } })),
+      );
+      await expect(client({ fetch: fetchMock }).deleteTunnel("tunnel-1")).resolves.toBeUndefined();
+    });
+
+    it("is idempotent: calling it twice on an already-deleted tunnel is not an error", async () => {
+      // Real Cloudflare tunnels are soft-deleted, so a repeat delete is expected to
+      // report the same success envelope rather than a fresh error — the rollback path
+      // (2B's step-sequence runner) depends on being able to call this twice safely.
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: { id: "tunnel-1" } })),
+      );
+      const c = client({ fetch: fetchMock });
+      await expect(c.deleteTunnel("tunnel-1")).resolves.toBeUndefined();
+      await expect(c.deleteTunnel("tunnel-1")).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("sends the DELETE method to the account-scoped tunnel endpoint", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("DELETE");
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/tunnel-1`,
+        );
+        return jsonResponse(envelope({ success: true, result: { id: "tunnel-1" } }));
+      });
+      await client({ fetch: fetchMock }).deleteTunnel("tunnel-1");
+    });
+
+    it("raises a CloudflareError classified the normal way on a genuine failure", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: false, errors: [{ code: 9109, message: "nope" }] }), {
+          status: 403,
+        }),
+      );
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .deleteTunnel("tunnel-1")
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect(error.fault).toBe("permission");
+    });
+  });
 });
