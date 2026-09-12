@@ -6,6 +6,15 @@ import { useEffect, useState } from "react";
 
 export type ActionKind = "up" | "restart" | "pull" | "down";
 
+// Mirrors the server's `JOB_KINDS` (`job-runner.ts`) — the only kinds `JobRunner.live` can
+// ever resolve, and therefore the only kinds `GET /api/jobs/:id/stream` can attach to
+// rather than answer `done {status:"running"}` immediately (see the guard below).
+const ACTION_KINDS: readonly ActionKind[] = ["up", "restart", "pull", "down"];
+
+function isActionKind(kind: string): kind is ActionKind {
+  return (ACTION_KINDS as readonly string[]).includes(kind);
+}
+
 const ALREADY_RUNNING_MESSAGE = "Another job is already running for this app.";
 
 const TIMEOUT_MESSAGE =
@@ -20,14 +29,31 @@ const TIMEOUT_MESSAGE =
  * already disables its buttons while a job is in flight; the residual case this function
  * exists for is the click that lands in the brief window before that disable has rendered.
  * It reads as "already running" — a fact, not a failure the user needs to retry past.
+ *
+ * The server's own `message` is preferred over the constant below when it sends one:
+ * `routes/jobs.ts` answers two different 409 bodies for `job_running` — the ordinary "a
+ * job of mine is already running" case, whose message IS this constant, and the case
+ * where the lock is held by something else sharing it (a step job) with no id to give,
+ * whose message honestly names the holder instead (`` `This app is busy: ${holder}.` ``).
+ * Hard-coding the constant here discarded that second message before it ever reached a
+ * user — the server built it, the client threw it away (Phase 2B whole-branch review,
+ * Minor 7). The constant survives only as a fallback for a 409 with no `message` at all.
  */
 export function describeActionError(error: unknown): string {
-  if (error instanceof ApiError && error.status === 409) return ALREADY_RUNNING_MESSAGE;
+  if (error instanceof ApiError && error.status === 409) {
+    return errorMessage(error.body) ?? ALREADY_RUNNING_MESSAGE;
+  }
   // A timeout is genuinely different from a rejection: `apiFetch` gave up waiting, not
   // the server saying no, so the action itself may have gone through — "already running"
   // and a raw "API request timed out after 30000ms" are both wrong words for that.
   if (error instanceof ApiTimeoutError) return TIMEOUT_MESSAGE;
   return error instanceof Error ? error.message : "Could not start this action.";
+}
+
+function errorMessage(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null || !("message" in body)) return undefined;
+  const { message } = body as { message: unknown };
+  return typeof message === "string" ? message : undefined;
 }
 
 /**
@@ -70,9 +96,18 @@ export function useAppActions(
   const [starting, setStarting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Restricted to `ACTION_KINDS`, deliberately: `useJobs` returns every job for this app,
+  // any kind, and a `running` row from a step sequence (e.g. `cloudflare_expose`) is not
+  // something `JobOutput`'s stream can attach to — `GET /api/jobs/:id/stream` answers
+  // `done {status:"running"}` immediately for a job `JobRunner.live` cannot resolve,
+  // re-enabling the action buttons while the sequence is still in flight. This is the same
+  // defect `GET /api/apps`'s own `runningJobId` was fixed to avoid handing out (see
+  // `running-jobs.ts`); this hook has an independent source for the same fact
+  // (`useJobs`/`GET /api/apps/:id/jobs`, used whenever `knownRunningJobId` is not
+  // supplied) and needs the same filter applied to it.
   const runningJobId = hasKnownRunningJobId
     ? (options.knownRunningJobId ?? null)
-    : (jobs?.find((job) => job.status === "running")?.id ?? null);
+    : (jobs?.find((job) => job.status === "running" && isActionKind(job.kind))?.id ?? null);
 
   // Picks up a job already running when this hook mounts — someone started a `pull` and
   // refreshed the page, or another admin's session did — without stomping on a job this

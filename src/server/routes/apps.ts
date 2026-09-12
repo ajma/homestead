@@ -617,8 +617,13 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    // `isSystem` marks the managed cloudflared stack, which Phase 2 owns.
-    if (row.isSystem) return reply.code(409).send({ error: "system_app" });
+    // Both system kinds are refused here, unlike the lifecycle guard in jobs.ts, which
+    // refuses only `self`. Deleting either kind makes Homestead forget a resource it
+    // still manages: forgetting `self` orphans Homestead's own tracking of itself, and
+    // forgetting `cloudflared` orphans the tunnel stack Phase 2 depends on existing.
+    // Neither loss is something the client can undo, so there is no kind for which
+    // delete is safe the way `down` on `cloudflared` (jobs.ts) is.
+    if (row.systemKind !== null) return reply.code(409).send({ error: "system_app" });
 
     // Forgetting an app never touches its files or containers.
     await db.delete(apps).where(eq(apps.id, id));

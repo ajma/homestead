@@ -24,7 +24,7 @@ const app: AdminApp = {
   composeFile: "compose.yaml",
   projectName: "jellyfin",
   lastComposeHash: null,
-  isSystem: false,
+  systemKind: null,
   showOnLauncher: true,
   sortOrder: 0,
   graceUntil: null,

@@ -100,6 +100,29 @@ describe("sweepStrandedJobs", () => {
     expect(row.output).toBe("service web failed to start");
   });
 
+  it("repairs a stranded step job the same as a stranded compose job", async () => {
+    // The sweep's predicate is `jobs.status`, which does not read `kind` at all — so a
+    // step job (recorded by `StepJobRunner`, under a kind like `cloudflare_expose` rather
+    // than one of `JobRunner`'s four) should already be covered. Verified, not assumed:
+    // Phase 2B carries a named instruction not to take that on faith.
+    await db.insert(jobs).values({
+      id: "step-job-1",
+      appId: "app-1",
+      kind: "cloudflare_expose",
+      status: "running",
+      startedAt: NOW - 30,
+    });
+
+    const repaired = await sweepStrandedJobs(db, NOW);
+
+    expect(repaired).toBe(1);
+    const [row] = await db.select().from(jobs);
+    if (!row) throw new Error("expected a job row");
+    expect(row.kind).toBe("cloudflare_expose");
+    expect(row.status).toBe("failed");
+    expect(row.output).toContain("interrupted");
+  });
+
   it("reports zero on a clean database rather than throwing", async () => {
     expect(await sweepStrandedJobs(db, NOW)).toBe(0);
   });

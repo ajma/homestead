@@ -1,15 +1,28 @@
-import { inArray } from "drizzle-orm";
+import { and, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
+import { JOB_KINDS } from "./job-runner.js";
 
 /**
  * The message a swept job carries. `failed` rather than a new status value is deliberate:
  * the status union at `@shared/admin.ts` is consumed in many places and a user reads
  * "crashed" and "failed" the same way. The distinction lives here instead.
+ *
+ * Two variants, not one: a compose job's damage (if any) is in the app's containers, but a
+ * step job's (a `cloudflare_expose`, from 2D onward) is Cloudflare-side — DNS records and
+ * Access applications a killed sequence's rollback never ran for (see the whole-branch
+ * review's ruling on the shutdown gap, Important 1). Telling a user to "check the app's
+ * containers" about a stranded step job points them at the one place the damage is NOT.
  */
-const SWEPT_OUTPUT =
+const SWEPT_OUTPUT_COMPOSE =
   "This job was interrupted: Homestead restarted while it was running. " +
   "The compose command may or may not have completed — check the app's containers.";
+
+const SWEPT_OUTPUT_STEP =
+  "This job was interrupted: Homestead restarted while it was in progress. " +
+  "It may have created resources outside Homestead's own database — such as Cloudflare DNS " +
+  "records or Access applications — that a normal failure would have rolled back. Check them " +
+  "by hand.";
 
 /**
  * Repairs jobs a crash left mid-flight.
@@ -30,11 +43,17 @@ const SWEPT_OUTPUT =
  * in the UI that never came from anywhere.
  */
 export async function sweepStrandedJobs(db: Db, nowSeconds: number): Promise<number> {
-  const stranded = await db
+  const strandedCompose = await db
     .update(jobs)
-    .set({ status: "failed", finishedAt: nowSeconds, output: SWEPT_OUTPUT })
-    .where(inArray(jobs.status, ["running", "queued"]))
+    .set({ status: "failed", finishedAt: nowSeconds, output: SWEPT_OUTPUT_COMPOSE })
+    .where(and(inArray(jobs.status, ["running", "queued"]), inArray(jobs.kind, JOB_KINDS)))
     .returning({ id: jobs.id });
 
-  return stranded.length;
+  const strandedStep = await db
+    .update(jobs)
+    .set({ status: "failed", finishedAt: nowSeconds, output: SWEPT_OUTPUT_STEP })
+    .where(and(inArray(jobs.status, ["running", "queued"]), notInArray(jobs.kind, [...JOB_KINDS])))
+    .returning({ id: jobs.id });
+
+  return strandedCompose.length + strandedStep.length;
 }

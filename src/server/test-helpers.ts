@@ -4,9 +4,11 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "./app.js";
 import { buildApp } from "./app.js";
+import { AppLock } from "./apps/app-lock.js";
 import { ComposeConfigCache } from "./apps/compose-config.js";
 import { ImageUpdateChecker } from "./apps/image-updates.js";
 import { JobRunner } from "./apps/job-runner.js";
+import { StepJobRunner } from "./apps/step-job-runner.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
@@ -268,7 +270,12 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
   const host = new FakeHost();
   const auth = createAuth(config, db);
   const composeConfig = new ComposeConfigCache(host);
-  const jobs = new JobRunner({ db, host, composeConfig });
+  // Shared with `stepJobs` the same way `index.ts` shares it in production, so a test
+  // that starts both a compose job and a step job against the same app exercises the
+  // real mutual exclusion rather than two independently-permissive locks.
+  const appLock = new AppLock();
+  const jobs = new JobRunner({ db, host, composeConfig, appLock });
+  const stepJobs = new StepJobRunner({ db, appLock });
   const registryDigests = new Map<string, string>();
   const images = new ImageUpdateChecker({
     db,
@@ -336,6 +343,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     auth,
     composeConfig,
     jobs,
+    stepJobs,
     images,
     scheduler,
     events,

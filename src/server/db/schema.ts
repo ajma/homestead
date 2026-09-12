@@ -93,7 +93,7 @@ export const apps = sqliteTable(
     projectName: text("project_name").notNull(),
     launchInternalUrl: text("launch_internal_url"),
     lastComposeHash: text("last_compose_hash"),
-    isSystem: integer("is_system", { mode: "boolean" }).notNull().default(false),
+    systemKind: text("system_kind", { enum: ["self", "cloudflared"] }),
     graceUntil: integer("grace_until"),
     adoptedAt: integer("adopted_at").notNull().default(now),
     archivedAt: integer("archived_at"),

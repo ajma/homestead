@@ -154,22 +154,31 @@ docker compose up -d
 
 Migrations run automatically at startup against whatever is in `/app/data/homestead.db` — no
 separate migration step. Keep `stop_grace_period` comfortably above the real shutdown budget:
-`jobs.shutdown()`'s 10s (`src/server/apps/job-runner.ts`) plus `server.close()`'s 20s
-(`src/server/shutdown.ts`) worst case, for a total of **30s**, not the 20s either file states
-in isolation. `compose.example.yaml` sets `stop_grace_period: 45s` for that reason — 15s of
-margin above the 30s budget. Compose's own *default* grace period, if that line were removed,
-is **10s** — well under the budget, not "comfortably above" it — so do not delete it. With the
-45s set, an upgrade's `docker compose up -d` (which stops the old container before starting the
-new one) gets a clean shutdown rather than a `SIGKILL` mid-sequence.
+`jobs.shutdown()`'s 10s (`src/server/apps/job-runner.ts`) plus `stepJobs.shutdown()`'s 10s
+(`src/server/apps/step-job-runner.ts`) plus `server.close()`'s 20s (`src/server/shutdown.ts`)
+worst case, for a total of **40s**, not the 20s any one file states in isolation.
+`compose.example.yaml` sets `stop_grace_period: 55s` for that reason — 15s of margin above
+the 40s budget. Compose's own *default* grace period, if that line were removed, is **10s** —
+well under the budget, not "comfortably above" it — so do not delete it. With the 55s set, an
+upgrade's `docker compose up -d` (which stops the old container before starting the new one)
+gets a clean shutdown rather than a `SIGKILL` mid-sequence.
 
 ## 9. Managing Homestead with Homestead
 
 Once running, Homestead is a normal container and can be adopted and managed like any other
-app it watches. Mark its row `isSystem` and every lifecycle action (`up`, `down`, `restart`,
-`pull`) is refused with 409 `system_app`, the same guard that already protects it from
-deletion. Restarts and stops of Homestead itself have to happen from the NAS instead of from
-Homestead's own UI: a `down` issued against yourself cannot be undone by the UI that issued it,
-and a `restart` kills the process handling the very request that asked for it.
+app it watches. Set its row's `system_kind` column to `'self'` (there is no UI for this — it is
+a direct SQL update against `apps`, e.g. `UPDATE apps SET system_kind = 'self' WHERE id = '<id>'`)
+and every lifecycle action (`up`, `down`, `restart`, `pull`) is refused with 409 `system_app`,
+the same guard that already protects it from deletion. Restarts and stops of Homestead itself
+have to happen from the NAS instead of from Homestead's own UI: a `down` issued against yourself
+cannot be undone by the UI that issued it, and a `restart` kills the process handling the very
+request that asked for it.
+
+`system_kind` also has a second value, `'cloudflared'`, for the managed Cloudflare Tunnel
+container Phase 2 introduces: it is refused deletion the same as `'self'`, but — unlike
+`'self'` — its lifecycle actions (including `down`) are **not** refused, since restarting or
+stopping the tunnel does not take Homestead's own UI down with it. Use `'self'` only for
+Homestead's own row.
 
 ## 10. Verifying the mount preflight
 

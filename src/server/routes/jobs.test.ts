@@ -376,11 +376,11 @@ describe("lifecycle routes", () => {
 });
 
 describe("system apps", () => {
-  it("refuses every lifecycle action on a system app", async () => {
+  it("refuses every lifecycle action on a self-adopted Homestead", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     const id = await createApp(app, cookie, { name: "homestead" });
-    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, id));
+    await app.deps.db.update(apps).set({ systemKind: "self" }).where(eq(apps.id, id));
 
     for (const kind of ["up", "down", "restart", "pull"]) {
       const res = await app.inject({
@@ -391,6 +391,41 @@ describe("system apps", () => {
       expect(res.statusCode, `${kind} should be refused`).toBe(409);
       expect(res.json().error, `${kind} should say why`).toBe("system_app");
     }
+    await app.close();
+  });
+
+  it("allows lifecycle actions on the managed cloudflared stack", async () => {
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const id = await createApp(app, cookie, { name: "cloudflared" });
+    await app.deps.db.update(apps).set({ systemKind: "cloudflared" }).where(eq(apps.id, id));
+
+    for (const kind of ["up", "restart", "pull"]) {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/apps/${id}/actions/${kind}`,
+        headers: { cookie },
+      });
+      expect(res.statusCode, `${kind} should be allowed`).toBe(202);
+    }
+    await app.close();
+  });
+
+  it("allows `down` on the managed cloudflared stack too", async () => {
+    // Not refused, unlike `self`. The confirmation for anything destructive is the
+    // client's job, and a server that refused `down` here would make the UI's confirm
+    // dialog a lie. A reader will otherwise "tighten" this into a 409 and break the UI.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const id = await createApp(app, cookie, { name: "cloudflared" });
+    await app.deps.db.update(apps).set({ systemKind: "cloudflared" }).where(eq(apps.id, id));
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/actions/down`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(202);
     await app.close();
   });
 
@@ -412,7 +447,7 @@ describe("system apps", () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     const id = await createApp(app, cookie, { name: "homestead" });
-    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, id));
+    await app.deps.db.update(apps).set({ systemKind: "self" }).where(eq(apps.id, id));
 
     await app.inject({ method: "POST", url: `/api/apps/${id}/actions/down`, headers: { cookie } });
 
@@ -429,7 +464,7 @@ describe("system apps", () => {
     // re-querying the row without the scope filter, since a row that hasn't loaded yet
     // cannot be guarded on) leaves every other test in this file green.
     const { app, cookie, id } = await withApp();
-    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, id));
+    await app.deps.db.update(apps).set({ systemKind: "self" }).where(eq(apps.id, id));
     const outOfScope = await createScopedAdmin(app, cookie, { appIds: [] });
 
     const res = await app.inject({

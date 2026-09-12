@@ -100,11 +100,11 @@ describe("app scope enforcement", () => {
   }
 
   it("tells a scoped admin nothing about a system app outside their scope", async () => {
-    // `DELETE /api/apps/:id` checks scope (via `loadApp`) before it checks `isSystem`
-    // (`apps.ts:599-600`), so an out-of-scope system app 404s today, by construction —
+    // `DELETE /api/apps/:id` checks scope (via `loadApp`) before it checks `systemKind`
+    // (`apps.ts:626`), so an out-of-scope system app 404s today, by construction —
     // never 409, which would confirm to a scoped admin that an app they cannot see
     // exists at all. Nothing else pins that ordering: a refactor that hoisted the
-    // `isSystem` check above `loadApp` would turn this into a 409 and nothing would
+    // `systemKind` check above `loadApp` would turn this into a 409 and nothing would
     // notice.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
@@ -123,7 +123,7 @@ describe("app scope enforcement", () => {
       payload: { directories: ["cloudflared"] },
     });
     const appId = adopted.json().adopted[0].id;
-    await app.deps.db.update(apps).set({ isSystem: true }).where(eq(apps.id, appId));
+    await app.deps.db.update(apps).set({ systemKind: "self" }).where(eq(apps.id, appId));
 
     // Create a scoped admin with an empty allowlist — cannot see the system app above.
     const scopedEmail = `scoped-${Math.random().toString(36).slice(2)}@example.com`;

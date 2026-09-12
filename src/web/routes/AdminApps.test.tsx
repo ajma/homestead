@@ -104,7 +104,7 @@ const app = (over: Partial<AdminApp> = {}): AdminApp => ({
   composeFile: "compose.yaml",
   projectName: "jellyfin",
   lastComposeHash: null,
-  isSystem: false,
+  systemKind: null,
   showOnLauncher: true,
   sortOrder: 0,
   graceUntil: null,
@@ -216,7 +216,7 @@ describe("AdminApps", () => {
   });
 
   it("marks a system app so it cannot be mistaken for one of yours", async () => {
-    mount([app({ isSystem: true, displayName: "cloudflared" })]);
+    mount([app({ systemKind: "cloudflared", displayName: "cloudflared" })]);
     expect(screen.getByText(/System/)).toBeTruthy();
   });
 
