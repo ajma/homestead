@@ -1,3 +1,4 @@
+import { AppLock } from "@server/apps/app-lock";
 import { ComposeConfigCache } from "@server/apps/compose-config";
 import { JobBusyError, JobRunner } from "@server/apps/job-runner";
 import { createDb, runMigrations } from "@server/db/client";
@@ -46,7 +47,12 @@ async function seed() {
     host,
     row,
     userId,
-    runner: new JobRunner({ db, host, composeConfig: new ComposeConfigCache(host) }),
+    runner: new JobRunner({
+      db,
+      host,
+      composeConfig: new ComposeConfigCache(host),
+      appLock: new AppLock(),
+    }),
   };
 }
 
@@ -210,7 +216,7 @@ describe("JobRunner", () => {
     host.composeResults.set("up -d", { exitCode: 0, stdout: "", stderr: "" });
 
     const cache = new ComposeConfigCache(host);
-    const runner = new JobRunner({ db, host, composeConfig: cache });
+    const runner = new JobRunner({ db, host, composeConfig: cache, appLock: new AppLock() });
     const target = { directory: "jellyfin", composeFile: "compose.yaml" };
 
     await cache.resolve(target);

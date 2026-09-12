@@ -3,7 +3,7 @@ import { ulid } from "ulid";
 import type { Db } from "../db/client.js";
 import { apps, jobs } from "../db/schema.js";
 import type { Host, JobChunk, JobHandle } from "../host/types.js";
-import { AppLock } from "./app-lock.js";
+import type { AppLock } from "./app-lock.js";
 import type { ComposeConfigCache } from "./compose-config.js";
 
 export const JOB_KINDS = ["up", "down", "restart", "pull"] as const;
@@ -64,10 +64,15 @@ export class JobRunner {
   private readonly running = new Map<string, RunningJob & { handle: JobHandle }>();
 
   /**
-   * The per-app mutex, shared with the step runner when one is supplied. Defaults to a
-   * private instance so every existing call site (and every test that constructs a
-   * `JobRunner` directly) keeps working unchanged; callers that need the step runner and
-   * this runner to exclude each other pass the same `AppLock` instance to both.
+   * The per-app mutex, shared with the step runner. Required, not defaulted: an optional
+   * `appLock` that falls back to a private instance compiles cleanly for a call site that
+   * forgets to share it, which reinstates — silently — the exact failure Task 2 exists to
+   * eliminate (two runners with two private locks do not exclude each other at all). A
+   * mutation that dropped `appLock` from one construction while leaving the other's
+   * intact was measured to leave the entire suite green under the optional form; making
+   * this required turns that same mutation into a compile error instead. Every call site
+   * that matters (`index.ts`, `test-helpers.ts`, and any test that starts a `JobRunner`
+   * and a `StepJobRunner` against the same app) already has an `AppLock` to pass.
    */
   private readonly appLock: AppLock;
 
@@ -76,10 +81,10 @@ export class JobRunner {
       db: Db;
       host: Host;
       composeConfig: ComposeConfigCache;
-      appLock?: AppLock;
+      appLock: AppLock;
     },
   ) {
-    this.appLock = deps.appLock ?? new AppLock();
+    this.appLock = deps.appLock;
   }
 
   live(jobId: string): RunningJob | undefined {
