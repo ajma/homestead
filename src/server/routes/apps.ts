@@ -685,7 +685,12 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // never holds the rest of the file in memory to display it. The 404 body must
       // not disclose which keys do exist, and — per the rule below — carries no audit
       // trace either, so a caller guessing key names learns nothing either way.
-      const entry = parseEnv(file.content).find(
+      // `findLast`, matching `upsertEnv`. A duplicated key means compose reads the LAST
+      // occurrence, so revealing the first would show a value the container does not use —
+      // in the one place an admin goes specifically to check what a secret is set to.
+      // `upsertEnv`'s docstring records the measured version of this: `A=1\nA=2` edited to
+      // `9` became `A=9\nA=2`, the UI reported success, and the container still saw `2`.
+      const entry = parseEnv(file.content).findLast(
         (e): e is Extract<typeof e, { kind: "pair" }> => e.kind === "pair" && e.key === body.key,
       );
       if (!entry) return reply.code(404).send({ error: "key_not_found" });

@@ -326,3 +326,20 @@ describe("POST /api/apps/:id/env/reveal with a key", () => {
     expect(res.statusCode).toBe(403);
   });
 });
+
+describe("reveal with a duplicated key", () => {
+  it("shows the value the container will actually use, not the first one", async () => {
+    // dotenv and compose both take the last occurrence. `upsertEnv` already uses
+    // findLastIndex for exactly this reason, with a docstring recording the measured
+    // incident where rewriting the first was a silent no-op. Reveal has to agree, or an
+    // admin checking a secret is shown one value while the container runs another.
+    const { app, cookie, id } = await withEnv("API_KEY=old-value\nAPI_KEY=live-value\n");
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${id}/env/reveal`,
+      headers: { cookie },
+      payload: { key: "API_KEY" },
+    });
+    expect(res.json()).toEqual({ key: "API_KEY", value: "live-value" });
+  });
+});
