@@ -19,6 +19,7 @@ import type { IconStore } from "./icons/store.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
 import { cloudflareRoutes } from "./routes/cloudflare.js";
+import { cloudflareTunnelRoutes } from "./routes/cloudflare-tunnel.js";
 import { containerRoutes } from "./routes/containers.js";
 import type { EventBus } from "./routes/events.js";
 import { eventRoutes } from "./routes/events.js";
@@ -200,6 +201,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(imageRoutes);
   await app.register(probeRoutes);
   await app.register(cloudflareRoutes);
+  await app.register(cloudflareTunnelRoutes);
   await app.register(eventRoutes);
   await app.register(launcherRoutes);
   await app.register(iconRoutes);
