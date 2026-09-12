@@ -2,7 +2,7 @@ import { runningJobs } from "@server/apps/running-jobs";
 import { createDb, runMigrations } from "@server/db/client";
 import { apps, hosts, jobs } from "@server/db/schema";
 import { ulid } from "ulid";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 async function seed() {
   const { db } = await createDb(":memory:");
@@ -70,8 +70,16 @@ describe("runningJobs", () => {
   });
 
   it("returns an empty map without querying when given no app ids", async () => {
+    // A response-level assertion (`result.size === 0`) can't tell this apart from a
+    // version that runs the query anyway: `inArray(jobs.appId, [])` compiles to a
+    // no-match predicate, so the map comes back empty either way. Spying on `db.select`
+    // — same technique as `apps.test.ts`'s "never issues its query for a viewer" tests —
+    // is what actually observes the early return this test is named for.
     const db = await seed();
+    const selectSpy = vi.spyOn(db, "select");
     const result = await runningJobs(db, []);
+    expect(selectSpy).not.toHaveBeenCalled();
+    selectSpy.mockRestore();
     expect(result.size).toBe(0);
   });
 
