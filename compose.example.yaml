@@ -16,9 +16,13 @@ services:
     container_name: homestead
     restart: unless-stopped
 
-    # Must exceed the shutdown budget in src/server/shutdown.ts (20s), or SIGKILL lands
-    # mid-sequence and the ordering buys nothing.
-    stop_grace_period: 30s
+    # Must exceed the shutdown budget: jobs.shutdown()'s 10s (src/server/apps/job-runner.ts)
+    # plus server.close()'s 20s (src/server/shutdown.ts) = 30s worst case. Set with margin
+    # above that, not equal to it — equal buys nothing, since SIGKILL and the sequence's own
+    # deadline would land at the same instant. Compose's own default grace period, if this
+    # line is removed, is 10s, not this value — plenty of margin below the 30s budget, so
+    # a shutdown mid-sequence would be SIGKILLed early rather than completing cleanly.
+    stop_grace_period: 45s
 
     ports:
       - "3000:3000"

@@ -12,7 +12,12 @@
  *    `server.close()`: Fastify's close does not resolve while a stream is open, and
  *    1C's launcher streams stay open for as long as a tab is.
  * 4. `server.close()` drains in-flight requests.
- * 5. `db.close()` last, once nothing can still be reading.
+ * 5. `db.close()` last, once the server has drained — or been abandoned. On the
+ *    `server.close()` timeout path (see `stageWithTimeout` below) "abandoned" is the
+ *    honest word: a timeout means Fastify still has something in flight, and `db.close()`
+ *    runs anyway. That in-flight handler sees a closed-client error rather than a clean
+ *    response, which is an acceptable loss on a process that is exiting regardless — a
+ *    `file:` libSQL client with WAL keeps every already-committed write durable either way.
  *
  * Every stage is individually guarded. A stage that throws must not strand the ones after
  * it — the database handle in particular gets closed even when the server refuses to.
@@ -40,9 +45,10 @@ export type ShutdownOptions = {
    * is worth avoiding, and a `file:` libSQL client with WAL is durable at every committed
    * write regardless, so there is nothing to lose by giving up on the server specifically.
    *
-   * Default 20s plus `JobRunner`'s own 10s default totals 30s, matching the
-   * `stop_grace_period: 30s` `compose.example.yaml` sets — after which the orchestrator
-   * SIGKILLs regardless of what this function is still doing.
+   * Default 20s plus `JobRunner`'s own 10s default totals a 30s worst case, which is why
+   * `compose.example.yaml` sets `stop_grace_period: 45s` — margin above that 30s, not equal
+   * to it — after which the orchestrator SIGKILLs regardless of what this function is still
+   * doing.
    */
   timeoutMs?: number;
   onError?: (stage: string, error: unknown) => void;

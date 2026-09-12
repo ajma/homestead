@@ -115,10 +115,14 @@ docker compose up -d
 ```
 
 Migrations run automatically at startup against whatever is in `/app/data/homestead.db` — no
-separate migration step. Keep `stop_grace_period` above the shutdown budget in
-`src/server/shutdown.ts` (20s); Compose's default is 30s in `compose.example.yaml`, comfortably
-above it, so an upgrade's `docker compose up -d` (which stops the old container before
-starting the new one) gets a clean shutdown rather than a `SIGKILL` mid-sequence.
+separate migration step. Keep `stop_grace_period` comfortably above the real shutdown budget:
+`jobs.shutdown()`'s 10s (`src/server/apps/job-runner.ts`) plus `server.close()`'s 20s
+(`src/server/shutdown.ts`) worst case, for a total of **30s**, not the 20s either file states
+in isolation. `compose.example.yaml` sets `stop_grace_period: 45s` for that reason — 15s of
+margin above the 30s budget. Compose's own *default* grace period, if that line were removed,
+is **10s** — well under the budget, not "comfortably above" it — so do not delete it. With the
+45s set, an upgrade's `docker compose up -d` (which stops the old container before starting the
+new one) gets a clean shutdown rather than a `SIGKILL` mid-sequence.
 
 ## 8. Managing Homestead with Homestead
 
