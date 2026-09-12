@@ -55,10 +55,31 @@ export async function runMountPreflight(opts: {
       await mkdir(markerDir, { recursive: true });
       await writeFile(markerPath, token, "utf8");
     } catch (error) {
-      return {
-        ok: false,
-        reason: `cannot write a marker into ${opts.composeRoot}: ${String(error)}`,
-      };
+      // `markerDir` is shared by every concurrent run, and this run's own `mkdir` can
+      // race a DIFFERENT run's cleanup `rmdir` below: that run finishes, sees (from its
+      // own perspective) an empty directory, and removes it in the microseconds-wide
+      // window between this run's `mkdir` returning and its `writeFile` landing —
+      // producing exactly the ENOENT `writeFile` throws when its parent directory is
+      // gone. That is not a real mount failure, so it gets one retry of the same
+      // mkdir+writeFile pair rather than being reported as one; a genuine problem
+      // (permissions, a missing compose root) throws again immediately and is reported
+      // the same way it always was.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        try {
+          await mkdir(markerDir, { recursive: true });
+          await writeFile(markerPath, token, "utf8");
+        } catch (retryError) {
+          return {
+            ok: false,
+            reason: `cannot write a marker into ${opts.composeRoot}: ${String(retryError)}`,
+          };
+        }
+      } else {
+        return {
+          ok: false,
+          reason: `cannot write a marker into ${opts.composeRoot}: ${String(error)}`,
+        };
+      }
     }
 
     await ensureImage(docker, image);

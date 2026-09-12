@@ -3,7 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMountPreflight } from "@server/host/preflight";
 import Docker from "dockerode";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// A native ESM module namespace is not configurable, so `vi.spyOn(fsPromises, ...)`
+// cannot override `writeFile` in place (Vitest's own error points here: "Module
+// namespace is not configurable in ESM"). `vi.mock` with `importOriginal` sidesteps
+// that by replacing the whole binding every other test in this file imports — wrapped
+// in a real `vi.fn()` whose default implementation IS the real `writeFile`, so nothing
+// here behaves differently unless a test explicitly queues a one-off override below.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 
 async function dockerAvailable(): Promise<boolean> {
   try {
@@ -62,6 +73,41 @@ describe.skipIf(!hasDocker)("runMountPreflight", () => {
       await expect(readdir(root)).resolves.not.toContain(".homestead-preflight");
     } finally {
       await chmod(markerDir, 0o700).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("retries the marker write once when it races a concurrent run's cleanup rmdir", async () => {
+    // `markerDir` is shared by every concurrent run — a different run's own cleanup
+    // `rmdir` (below, in `finally`) can land in the microseconds between this run's own
+    // `mkdir` returning and its `writeFile` landing, deleting the directory this run just
+    // saw exist and producing exactly the ENOENT `writeFile` throws when its parent is
+    // gone. Reproduced deterministically here (real concurrent timing is not
+    // guaranteed to trip it on every run) by making the first `writeFile` throw that
+    // exact error once; the fix retries the same mkdir+writeFile pair, so this should
+    // still succeed rather than reporting a false "cannot write a marker".
+    const root = await mkdtemp(join(tmpdir(), "hs-preflight-write-race-"));
+    try {
+      const mockedWriteFile = vi.mocked(writeFile);
+      mockedWriteFile.mockClear();
+      mockedWriteFile.mockImplementationOnce(async () => {
+        const err = new Error(
+          "ENOENT: no such file or directory, open '...'",
+        ) as NodeJS.ErrnoException;
+        err.code = "ENOENT";
+        throw err;
+      });
+
+      const result = await runMountPreflight({
+        composeRoot: root,
+        dockerSocket: "/var/run/docker.sock",
+      });
+
+      expect(result).toEqual({ ok: true });
+      // The one-off failure plus the retry that actually wrote it — proves a retry
+      // happened at all, not just that the run eventually succeeded some other way.
+      expect(mockedWriteFile).toHaveBeenCalledTimes(2);
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
