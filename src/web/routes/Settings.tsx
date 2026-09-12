@@ -1,4 +1,5 @@
 import { UserManager } from "@web/components/UserManager";
+import { CloudflarePanel } from "@web/routes/settings/CloudflarePanel";
 import { HostCheckPanel } from "@web/routes/setup/HostCheckPanel";
 
 /**
@@ -13,7 +14,8 @@ import { HostCheckPanel } from "@web/routes/setup/HostCheckPanel";
  * steps ran, so an admin who continued past a failing mount preflight during setup, then
  * fixed it, had no way to confirm the fix short of a hand-crafted API call. Spec §9's
  * "can be completed later from settings" promise covers this the same way it covers
- * Cloudflare.
+ * Cloudflare — `CloudflarePanel` below is that promise kept for the credentials half of
+ * it (Phase 2A Task 3); everything else §6 promises is a later sub-phase's job.
  */
 export function Settings() {
   return (
@@ -26,6 +28,14 @@ export function Settings() {
           warned about.
         </p>
         <HostCheckPanel />
+      </section>
+      <section>
+        <h2 className="mb-2 text-base font-semibold">Cloudflare</h2>
+        <p className="mb-4 text-sm text-slate-500">
+          Store the Cloudflare account and API token used to expose apps through a tunnel. The token
+          is never shown again once saved — only its last four characters.
+        </p>
+        <CloudflarePanel />
       </section>
       <section>
         <UserManager />
