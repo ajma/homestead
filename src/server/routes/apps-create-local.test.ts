@@ -131,6 +131,7 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
     scheduler,
     events,
     icons: { metadata: iconMetadata, store: iconStore },
+    preflight: async () => ({ ok: true }),
   });
 
   return app as RealHostTestApp;

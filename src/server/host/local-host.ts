@@ -188,6 +188,16 @@ export class LocalHost implements Host {
     }));
   }
 
+  async dockerVersion(): Promise<{
+    version: string;
+    apiVersion: string;
+    os: string;
+    arch: string;
+  }> {
+    const raw = await this.docker.version();
+    return { version: raw.Version, apiVersion: raw.ApiVersion, os: raw.Os, arch: raw.Arch };
+  }
+
   /**
    * Follows a container's logs.
    *

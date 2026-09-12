@@ -193,6 +193,14 @@ export class FakeHost implements Host {
     return this.images.get(ref) ?? null;
   }
 
+  /** Fixed plausible response, overridable per test (e.g. to simulate a dead socket). */
+  dockerVersion = async (): Promise<{
+    version: string;
+    apiVersion: string;
+    os: string;
+    arch: string;
+  }> => ({ version: "27.3.1", apiVersion: "1.47", os: "linux", arch: "x86_64" });
+
   runCompose(target: ComposeTarget, args: string[]): JobHandle {
     this.composeCalls.push({ target, args });
     const scripted = this.composeResults.get(args.join(" ")) ?? {
@@ -315,6 +323,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     scheduler,
     events,
     icons: { metadata: iconMetadata, store: iconStore },
+    preflight: async () => ({ ok: true }),
   });
 
   // Assign each app instance its own source address to avoid rate-limit bucket

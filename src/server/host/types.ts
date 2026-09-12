@@ -77,6 +77,9 @@ export interface Host {
   deleteFile(rel: string): Promise<void>;
   fileExists(rel: string): Promise<boolean>;
   listContainers(filters?: { project?: string }): Promise<ContainerSummary[]>;
+  /** The daemon's own version response. Step 2 of onboarding shows it verbatim, because
+   *  "Docker is reachable" is a claim and a version string is evidence. */
+  dockerVersion(): Promise<{ version: string; apiVersion: string; os: string; arch: string }>;
   streamLogs(opts: LogOptions): AsyncIterable<LogLine>;
   inspectContainer(id: string): Promise<ContainerInspect>;
   inspectImage(ref: string): Promise<ImageInspect | null>;
