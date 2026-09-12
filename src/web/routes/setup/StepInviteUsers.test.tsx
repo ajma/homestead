@@ -136,4 +136,47 @@ describe("StepInviteUsers", () => {
     await waitFor(() => expect(screen.getByText("Ann Admin")).toBeTruthy());
     expect(screen.getByRole("button", { name: "Add user" }).hasAttribute("disabled")).toBe(true);
   });
+
+  it("does not fire Skip while a role-change PATCH is in flight, even though the wizard's own pending is still false", async () => {
+    // Task 8's review finding: this file's own doc comment used to claim "Make admin"/
+    // "Make viewer" and "Enable" needed no guard because the only comparable action was
+    // dialog-gated — false, since those two fire a bare PATCH with nothing between a
+    // click here and that request settling. `pending` alone cannot cover this window: it
+    // only reflects the wizard's own completion request, which has not been told
+    // anything yet. Mirrors `StepImport`'s identical test for `AdoptPanel`'s `busy`.
+    let resolvePatch!: (response: Response) => void;
+    const patchResponse = new Promise<Response>((resolve) => {
+      resolvePatch = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "PATCH") return patchResponse;
+        if ((!init?.method || init.method === "GET") && url.endsWith("/api/users")) {
+          return json(200, [user({ role: "viewer" })]);
+        }
+        return json(200, []);
+      }),
+    );
+    const { onComplete } = mount({ skippable: true });
+
+    await waitFor(() => expect(screen.getByText("Ann Admin")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Make admin" }));
+
+    // The PATCH is now in flight; the wizard has not been told to complete anything, so
+    // its own `pending` prop is still false.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Skip/ }).hasAttribute("disabled")).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Skip/ }));
+    expect(onComplete).not.toHaveBeenCalled();
+
+    resolvePatch(json(200, { ...user(), role: "admin" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Skip/ }).hasAttribute("disabled")).toBe(false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Skip/ }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
 });

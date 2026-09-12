@@ -311,6 +311,15 @@ function EditScopeDialog({ user, onClose }: { user: ManagedUser; onClose: () => 
  * would leave zero administrators able to sign in, and the dialog stays open showing
  * that refusal in place rather than closing over it (see `ActionBar`'s `confirmingStop`
  * for the established pattern this follows).
+ *
+ * "Make admin"/"Make viewer" and "Enable" are a third kind of action, neither dialog-gated
+ * nor confirmed: a bare `apiFetch` PATCH fired straight from the row. `mutatingUserIds`
+ * tracks which rows have one in flight — disabling that row's own button so a second
+ * click cannot fire a second PATCH, and, via `busy` below, letting a caller's own footer
+ * button refuse to fire on top of one neither of them has seen the result of yet. This is
+ * `AdoptPanel`'s `submitting`/`busy` pattern, applied here for the same reason: without
+ * it, `StepInviteUsers`'s Skip could fire while a role change or re-enable was still
+ * in flight, unmounting this panel mid-request.
  */
 export function UserManager({
   disabled = false,
@@ -321,8 +330,13 @@ export function UserManager({
    * mirroring `AdoptPanel`'s identical prop. */
   disabled?: boolean;
   /** Footer buttons rendered after this panel's own content: nothing for `Settings`,
-   * Skip/Finish for the wizard's users step. */
-  actions?: ReactNode;
+   * Skip/Finish for the wizard's users step. Receives `busy` — true while a bare-PATCH
+   * row action ("Make admin"/"Make viewer", "Enable") is in flight — the same shape
+   * `AdoptPanel`'s `actions` render prop already uses, and for the same reason: a
+   * caller's own button needs to see this component's in-flight state, not just
+   * `disabled`, to avoid firing on top of a request neither of them has a result for
+   * yet. */
+  actions?: (busy: boolean) => ReactNode;
 }) {
   const { data: users, isPending, isError } = useUsers();
   const queryClient = useQueryClient();
@@ -331,13 +345,29 @@ export function UserManager({
   const [disablingUser, setDisablingUser] = useState<ManagedUser | null>(null);
   const [deletingUser, setDeletingUser] = useState<ManagedUser | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  const [mutatingUserIds, setMutatingUserIds] = useState<Set<string>>(new Set());
+
+  const busy = mutatingUserIds.size > 0;
 
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: usersKey });
   }
 
+  function startMutating(userId: string) {
+    setMutatingUserIds((prev) => new Set(prev).add(userId));
+  }
+
+  function stopMutating(userId: string) {
+    setMutatingUserIds((prev) => {
+      const next = new Set(prev);
+      next.delete(userId);
+      return next;
+    });
+  }
+
   async function handleEnable(user: ManagedUser) {
     setRowError(null);
+    startMutating(user.id);
     try {
       await apiFetch(`/api/users/${user.id}`, {
         method: "PATCH",
@@ -349,11 +379,14 @@ export function UserManager({
       // `last_admin` — it still gets the same generic handling as everything else here,
       // for a network failure or a timeout.
       setRowError(describeUserError(error, "Something went wrong re-enabling this user."));
+    } finally {
+      stopMutating(user.id);
     }
   }
 
   async function handleRoleChange(user: ManagedUser, role: Role) {
     setRowError(null);
+    startMutating(user.id);
     try {
       await apiFetch(`/api/users/${user.id}`, {
         method: "PATCH",
@@ -365,6 +398,8 @@ export function UserManager({
       // disabling or deleting one — `describeUserError` already maps it to one
       // sentence regardless of which field triggered it.
       setRowError(describeUserError(error, "Something went wrong changing this user's role."));
+    } finally {
+      stopMutating(user.id);
     }
   }
 
@@ -430,7 +465,7 @@ export function UserManager({
                       onClick={() =>
                         handleRoleChange(user, user.role === "admin" ? "viewer" : "admin")
                       }
-                      disabled={disabled}
+                      disabled={disabled || mutatingUserIds.has(user.id)}
                       className="ml-1 text-slate-500 underline disabled:opacity-50"
                     >
                       {user.role === "admin" ? "Make viewer" : "Make admin"}
@@ -463,7 +498,7 @@ export function UserManager({
                         <button
                           type="button"
                           onClick={() => handleEnable(user)}
-                          disabled={disabled}
+                          disabled={disabled || mutatingUserIds.has(user.id)}
                           className="rounded-lg border border-slate-200 px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-800"
                         >
                           Enable
@@ -486,7 +521,7 @@ export function UserManager({
         </div>
       )}
 
-      {actions && <div className="mt-4 flex justify-end gap-2">{actions}</div>}
+      {actions && <div className="mt-4 flex justify-end gap-2">{actions(busy)}</div>}
 
       {creating && <CreateUserDialog onClose={() => setCreating(false)} />}
       {scopingUser && <EditScopeDialog user={scopingUser} onClose={() => setScopingUser(null)} />}

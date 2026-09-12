@@ -19,16 +19,20 @@ import type { SetupStepProps } from "./SetupWizard";
  * offered as two buttons rather than one purely so someone who has just added three
  * accounts isn't stuck pressing a button labelled "Skip" to move on.
  *
- * Unlike `StepImport`'s Skip — disabled on `busy` as well as `pending`, because
- * `AdoptPanel`'s Adopt button and Skip sit side by side with nothing between them, so a
- * real click could land on Skip while that adopt's own POST was still in flight — the
- * only comparable action here, creating a user, is gated behind `DialogShell`'s
- * `CreateUserDialog`: a full-viewport `fixed inset-0 z-50` overlay that captures every
- * click for as long as it's open, including the whole span of its own submit. A real
- * click can no more reach the buttons below while that dialog is open than it could
- * reach anything else on the page behind it, so there is no equivalent window for these
- * two buttons to guard against — `pending` (the wizard's own completion request, once
- * either has already fired `onComplete`) is the only thing that needs to disable them.
+ * Skip and Finish are disabled on `busy` as well as `pending`, the same shape
+ * `StepImport`'s Skip uses against `AdoptPanel`. Creating a user IS dialog-gated —
+ * `DialogShell`'s `CreateUserDialog` is a full-viewport `fixed inset-0 z-50` overlay
+ * that captures every click for as long as it's open, including the whole span of its
+ * own submit, so there is no equivalent window to guard for that one action. But
+ * `UserManager`'s "Make admin"/"Make viewer" and "Enable" are not gated behind anything:
+ * each fires a bare `apiFetch` PATCH straight from the row, with nothing between a click
+ * here and that request settling. Without `busy`, a click on one of those followed
+ * immediately by a click on Skip or Finish was not blocked at all — `pending` stays
+ * false for that entire window, since it only reflects the wizard's own completion
+ * request, not anything happening inside `UserManager`. The impact was benign (the PATCH
+ * completes server-side regardless of what the wizard does), but the guarantee this
+ * comment used to claim did not exist; `busy` — true while `UserManager` has one of
+ * those two in flight — is what makes it exist now.
  */
 export function StepInviteUsers({ onComplete, pending, skippable }: SetupStepProps) {
   return (
@@ -43,13 +47,13 @@ export function StepInviteUsers({ onComplete, pending, skippable }: SetupStepPro
 
       <UserManager
         disabled={pending}
-        actions={
+        actions={(busy) => (
           <>
             {skippable && (
               <button
                 type="button"
                 onClick={onComplete}
-                disabled={pending}
+                disabled={pending || busy}
                 className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
               >
                 Skip
@@ -58,13 +62,13 @@ export function StepInviteUsers({ onComplete, pending, skippable }: SetupStepPro
             <button
               type="button"
               onClick={onComplete}
-              disabled={pending}
+              disabled={pending || busy}
               className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
             >
               {pending ? "Continuing…" : "Finish"}
             </button>
           </>
-        }
+        )}
       />
     </div>
   );
