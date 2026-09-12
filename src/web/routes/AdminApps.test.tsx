@@ -1,11 +1,104 @@
 // @vitest-environment jsdom
+import type { JobRow } from "@shared/admin.js";
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
-import { adminAppsKey } from "@web/api/admin";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { AdminApps } from "@web/routes/AdminApps";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// jsdom has no EventSource. Same double as `ActionBar.test.tsx` — a row action's
+// `JobOutput` (rendered while `activeJobId !== null`) opens one of these exactly the way
+// `ActionBar` itself does, since both go through `useAppActions`.
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+
+  listeners = new Map<string, Array<(e: MessageEvent) => void>>();
+  closed = false;
+
+  constructor(readonly url: string) {
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  removeEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((l) => l !== fn),
+    );
+  }
+  close() {
+    this.closed = true;
+  }
+  emit(type: string, data?: unknown) {
+    const init = data === undefined ? {} : { data: JSON.stringify(data) };
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn(new MessageEvent(type, init));
+    }
+  }
+}
+
+function jobRow(over: Partial<JobRow> = {}): JobRow {
+  return {
+    id: "job-1",
+    appId: "a1",
+    kind: "pull",
+    status: "running",
+    startedAt: 1_800_000_000,
+    finishedAt: null,
+    exitCode: null,
+    output: null,
+    userId: null,
+    createdAt: 1_800_000_000,
+    ...over,
+  };
+}
+
+type ActionResponse = { status: number; body: unknown };
+
+/**
+ * Multiplexes one `fetch` double across the list route (`GET /api/apps`), a row's own
+ * `GET /api/apps/:id/jobs`, and its `POST /api/apps/:id/actions/:kind` — mirrors
+ * `ActionBar.test.tsx`'s `stubFetch`, since a row action goes through the exact same
+ * `useAppActions` hook.
+ */
+function stubRowFetch(
+  seed: AdminApp[],
+  actions: Partial<Record<string, ActionResponse[]>> = {},
+  extra: { jobs?: JobRow[] } = {},
+) {
+  const startedKinds: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: RequestInfo | URL) => {
+      const href = String(url);
+      const actionMatch = href.match(/\/actions\/(\w+)$/);
+      if (actionMatch?.[1]) {
+        const kind = actionMatch[1];
+        startedKinds.push(kind);
+        const queue = actions[kind];
+        const next: ActionResponse = queue?.shift() ?? { status: 202, body: { jobId: "j1" } };
+        return new Response(JSON.stringify(next.body), {
+          status: next.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (href.endsWith("/jobs")) {
+        return new Response(JSON.stringify(extra.jobs ?? []), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(seed), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }),
+  );
+  return startedKinds;
+}
 
 const app = (over: Partial<AdminApp> = {}): AdminApp => ({
   id: "a1",
@@ -35,17 +128,22 @@ const app = (over: Partial<AdminApp> = {}): AdminApp => ({
 function mount(seed?: AdminApp[]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (seed) client.setQueryData(adminAppsKey, seed);
-  return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter>
-        <AdminApps />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <AdminApps />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 describe("AdminApps", () => {
   beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -56,6 +154,10 @@ describe("AdminApps", () => {
           }),
       ),
     );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("lists each app with its status and directory", async () => {
@@ -155,5 +257,102 @@ describe("AdminApps", () => {
   it("gives every row's status chip no button role, since there is no health panel here", async () => {
     mount([app()]);
     expect(screen.queryByRole("button", { name: /Show health details/ })).toBeNull();
+  });
+
+  describe("row actions", () => {
+    it("offers deploy, restart and a shortcut to the compose editor", () => {
+      stubRowFetch([app()]);
+      mount([app()]);
+      expect(screen.getByRole("button", { name: "Deploy" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Restart" })).toBeTruthy();
+      const editorLink = screen.getByRole("link", { name: /Open in editor/ });
+      expect(editorLink.getAttribute("href")).toBe("/apps/jellyfin/compose");
+    });
+
+    it("posts to the deploy action's own kind", async () => {
+      const started = stubRowFetch([app()]);
+      mount([app()]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+
+      await waitFor(() => expect(started).toContain("up"));
+    });
+
+    it("confirms before restarting, the one destructive row action", () => {
+      stubRowFetch([app()]);
+      mount([app()]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+
+      const dialog = screen.getByRole("dialog");
+      expect(within(dialog).getByText(/Jellyfin/)).toBeTruthy();
+    });
+
+    it("does not post restart when the confirmation is cancelled", () => {
+      const started = stubRowFetch([app()]);
+      mount([app()]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+      const dialog = screen.getByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+      expect(started).not.toContain("restart");
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("posts restart once confirmed", async () => {
+      const started = stubRowFetch([app()]);
+      mount([app()]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+      const dialog = screen.getByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: "Restart" }));
+
+      await waitFor(() => expect(started).toContain("restart"));
+    });
+
+    it("disables a row's actions while that app already has a job running, matching ActionBar", async () => {
+      stubRowFetch([app()], {}, { jobs: [jobRow({ id: "existing-job", status: "running" })] });
+      mount([app()]);
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+      );
+      expect(screen.getByRole("button", { name: "Restart" }).hasAttribute("disabled")).toBe(true);
+    });
+
+    it("disables a row's actions once one is started, until the job finishes", async () => {
+      stubRowFetch([app()], { up: [{ status: 202, body: { jobId: "j1" } }] });
+      mount([app()]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+      );
+    });
+
+    it("invalidates only that app's key when a row action's job finishes, never the whole list", async () => {
+      // The mistake 1E already made once: `adminAppsKey` is the Docker-touching endpoint
+      // (`GET /api/apps`, up to four `docker compose config` spawns). A row action must
+      // invalidate `adminAppKey(app.id)` — the same cache `ActionBar`'s own job-completion
+      // handler refreshes — and never the whole inventory list.
+      stubRowFetch([app()], { up: [{ status: 202, body: { jobId: "j1" } }] });
+      const { client } = mount([app()]);
+      const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+
+      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+      act(() => {
+        FakeEventSource.instances[0]?.emit("done", { status: "succeeded", exitCode: 0 });
+      });
+
+      await waitFor(() =>
+        expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: adminAppKey("a1") }),
+      );
+      expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: adminAppsKey });
+    });
   });
 });

@@ -1,7 +1,11 @@
+import type { AdminApp } from "@shared/dto";
 import type { AppStatus } from "@shared/types";
 import { useAdminApps } from "@web/api/admin";
 import { AppIcon } from "@web/components/AppIcon";
+import { ConfirmDialog } from "@web/components/ConfirmDialog";
+import { JobOutput } from "@web/components/JobOutput";
 import { StatusChip } from "@web/components/StatusChip";
+import { describeActionError, useAppActions } from "@web/components/useAppActions";
 import { relativeTime } from "@web/lib/relative-time";
 import { useNow } from "@web/lib/use-now";
 import { AdoptDialog } from "@web/routes/AdoptDialog";
@@ -25,6 +29,76 @@ const STATUS_FALLBACK: Record<AppStatus, string> = {
   degraded: "Degraded",
   down: "Down",
 };
+
+const ROW_BUTTON_CLASS =
+  "rounded-lg border border-slate-200 px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-800";
+
+/**
+ * Spec §8's "row actions" — deploy, restart, and a shortcut straight into the compose
+ * editor — reachable without leaving the inventory. Every one of these is already
+ * reachable from the edit page's own `ActionBar`; this exists purely so the spec's row
+ * actions aren't missing, the gap 1E's Self-Review wrongly claimed was already closed
+ * (Task 11).
+ *
+ * Goes through `useAppActions`, the exact hook `ActionBar` itself uses, rather than a
+ * second POST-and-track implementation — one job runner, one set of semantics, so a row
+ * action and the edit page's button cannot diverge on what "deploy" means or on how a 409
+ * reads. `handleJobDone` (from that hook) invalidates only `adminAppKey(app.id)` and
+ * `adminAppKey(app.slug)` — never `adminAppsKey`, the whole-inventory rollup `GET
+ * /api/apps` computes by spawning up to four `docker compose config` processes. A row
+ * action re-fetching all of it to update one row is the mistake 1E already made once and
+ * fixed; reusing the hook is what makes it structurally impossible to make again here.
+ *
+ * Restart is the one that confirms: unlike Deploy (idempotent when nothing changed) or
+ * the editor shortcut (pure navigation), it stops and starts the app's containers,
+ * interrupting whatever was using it, however briefly.
+ */
+function RowActions({ app }: { app: AdminApp }) {
+  const { busy, activeJobId, actionError, setActionError, startJob, handleJobDone } =
+    useAppActions(app);
+  const [confirmingRestart, setConfirmingRestart] = useState(false);
+
+  function handleDeploy() {
+    startJob("up").catch((error: unknown) => setActionError(describeActionError(error)));
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" disabled={busy} onClick={handleDeploy} className={ROW_BUTTON_CLASS}>
+          Deploy
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setConfirmingRestart(true)}
+          className={ROW_BUTTON_CLASS}
+        >
+          Restart
+        </button>
+        <Link to={`/apps/${app.slug}/compose`} className={ROW_BUTTON_CLASS}>
+          Open in editor
+        </Link>
+      </div>
+
+      {actionError && <p className="text-xs text-rose-600 dark:text-rose-400">{actionError}</p>}
+
+      {activeJobId !== null && <JobOutput jobId={activeJobId} onDone={handleJobDone} />}
+
+      {confirmingRestart && (
+        <ConfirmDialog
+          title="Restart app"
+          message={`Restart ${app.displayName}? This briefly stops and starts its containers.`}
+          confirmLabel="Restart"
+          destructive
+          onConfirm={() => startJob("restart")}
+          onClose={() => setConfirmingRestart(false)}
+          formatError={describeActionError}
+        />
+      )}
+    </div>
+  );
+}
 
 export function AdminApps() {
   const { data, isError } = useAdminApps();
@@ -73,6 +147,7 @@ export function AdminApps() {
                 <th className="px-4 py-2 font-medium">Status</th>
                 <th className="px-4 py-2 font-medium">Directory</th>
                 <th className="px-4 py-2 font-medium">Last deploy</th>
+                <th className="px-4 py-2 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="block md:table-row-group">
@@ -115,6 +190,9 @@ export function AdminApps() {
                     {app.lastDeployAt === null
                       ? "Never"
                       : `${relativeTime(app.lastDeployAt, now)} ago`}
+                  </td>
+                  <td className="mt-2 block md:mt-0 md:table-cell md:px-4 md:py-3">
+                    <RowActions app={app} />
                   </td>
                 </tr>
               ))}
