@@ -115,6 +115,24 @@ describe("cloudflare routes", () => {
     await app.close();
   });
 
+  it("trims whitespace pasted around the token and account id before verifying and storing", async () => {
+    const { app, cookie } = await withAdmin();
+    app.deps.fetch = verifyingFetch();
+
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/cloudflare/credentials",
+      headers: { cookie },
+      // A trailing newline is the most likely way a copy-pasted, otherwise-valid token
+      // gets rejected — invisible in a `type="password"` field.
+      payload: { token: `${TOKEN}\n`, accountId: ` ${ACCOUNT_ID} ` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ accountId: ACCOUNT_ID, tokenHint: TOKEN.slice(-4) });
+    await app.close();
+  });
+
   it("GET credentials never returns the token", async () => {
     const { app, cookie } = await withAdmin();
     app.deps.fetch = verifyingFetch();

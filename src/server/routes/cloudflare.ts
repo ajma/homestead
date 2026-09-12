@@ -7,9 +7,15 @@ import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { CloudflareError } from "../cloudflare/errors.js";
 
+// `.trim()` before `.min(1)`: a token pasted out of the Cloudflare dashboard frequently
+// carries a trailing newline or space, invisible in a `type="password"` field. Untrimmed,
+// that whitespace makes a correct token fail verification as `auth` — a support question
+// that is genuinely hard to self-diagnose from the browser. Trimming first also means a
+// whitespace-only value correctly fails `.min(1)` rather than sneaking through as
+// "non-empty".
 const putBody = z.object({
-  token: z.string().min(1),
-  accountId: z.string().min(1),
+  token: z.string().trim().min(1),
+  accountId: z.string().trim().min(1),
 });
 
 /**
@@ -92,7 +98,14 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/cloudflare/zones", async (request, reply) => {
-    requireCapability(request, "cf:write");
+    // A read, gated on the read capability — the same as `GET /credentials` above, and
+    // deliberately not `cf:write`. Every role today either holds both `cf:read` and
+    // `cf:write` or neither (see `src/shared/capabilities.ts`), so this was cosmetic
+    // until the first role is granted `cf:read` alone; at that point a role meant to see
+    // Cloudflare status would 403 on this route while `GET /credentials` succeeded,
+    // rendering a half-built panel silently. See `cloudflare-read-capability.test.ts` for
+    // the binding test — nothing at the role level exercises this today.
+    requireCapability(request, "cf:read");
     const creds = await store.get();
     if (!creds) {
       return reply.code(409).send({ error: "not_configured" });
