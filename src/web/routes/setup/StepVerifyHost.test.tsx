@@ -27,13 +27,19 @@ function stub(...bodies: HostCheck[]) {
   return fn;
 }
 
-function mount(onComplete = vi.fn()) {
+function mount(onComplete = vi.fn(), pending = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
     onComplete,
     ...render(
       <QueryClientProvider client={client}>
-        <StepVerifyHost state={STATE} onComplete={onComplete} />
+        <StepVerifyHost
+          state={STATE}
+          onComplete={onComplete}
+          pending={pending}
+          onFail={vi.fn()}
+          skippable={false}
+        />
       </QueryClientProvider>,
     ),
   };
@@ -119,5 +125,13 @@ describe("StepVerifyHost", () => {
 
     expect(onComplete).toHaveBeenCalled();
     expect(screen.getByText("marker not visible inside the container")).toBeTruthy();
+  });
+
+  it("disables Continue while the wizard's own completion is pending", async () => {
+    stub(HEALTHY);
+    mount(vi.fn(), true);
+
+    await waitFor(() => expect(screen.getByText("27.3.1")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /Continuing/ }).hasAttribute("disabled")).toBe(true);
   });
 });

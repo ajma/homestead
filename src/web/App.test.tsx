@@ -341,4 +341,34 @@ describe("the setup route guard", () => {
     const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls.some((call) => String(call[0]).includes("/api/setup/state"))).toBe(false);
   });
+
+  it("shows the retry screen, not a blank page, when the setup-state fetch fails", async () => {
+    // The gap `SetupWizard.test.tsx` used to paper over: that file's own "does not
+    // strand the user" test rendered `<SetupWizard>` in isolation, which passes
+    // regardless of anything here, since `Routed` (below) gates on this same
+    // `["setup-state"]` query before `<SetupWizard>` is ever mounted — by the time it
+    // would render, the query has already succeeded. This is the actual path a failing
+    // `/api/setup/state` takes in the real app: through `Routed`'s own retry screen,
+    // not the wizard's.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/me")) return json(401, { error: "unauthenticated" });
+        if (url.includes("/api/setup/state")) return json(500, { error: "boom" });
+        return json(200, []);
+      }),
+    );
+    renderAt("/");
+
+    // No `retry: false` here — this is the real singleton `queryClient` from `App.tsx`,
+    // which (unlike `useSession`'s query) does not opt `useSetupState` out of the
+    // library default of 3 retries with backoff, so this genuinely takes several
+    // seconds to settle into `isError`. Faking that away would be exactly the kind of
+    // shortcut that made the isolated wizard test worthless as proof of real behaviour.
+    await waitFor(() => expect(screen.getByText(/Homestead is unavailable/i)).toBeTruthy(), {
+      timeout: 12_000,
+    });
+    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
+  }, 15_000);
 });

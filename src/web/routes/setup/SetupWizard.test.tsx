@@ -82,19 +82,6 @@ describe("SetupWizard", () => {
     expect(indicator.queryByText(/Invite users \(done\)/)).toBeNull();
   });
 
-  it("does not strand the user on a blank screen when the state fetch fails", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => json(500, { error: "boom" })),
-    );
-    mount();
-
-    await waitFor(() =>
-      expect(screen.getByText(/could not check how far setup has gotten/i)).toBeTruthy(),
-    );
-    expect(screen.getByRole("button", { name: /Try again/ })).toBeTruthy();
-  });
-
   it("lets someone review an earlier, already-completed step via Back", async () => {
     // Resumability means the resume point can't move just because someone looked — Back
     // is for review, not for changing where a reload lands.
@@ -117,5 +104,54 @@ describe("SetupWizard", () => {
 
     await waitFor(() => expect(screen.getByRole("heading", { name: /Create admin/ })).toBeTruthy());
     expect(screen.queryByRole("button", { name: /Back/ })).toBeNull();
+  });
+
+  it("offers Skip on the users step, which spec §9 marks skippable", async () => {
+    stubState({ completedSteps: ["admin", "host", "import"], completedAt: null });
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Invite users/ })).toBeTruthy());
+    expect(screen.getByRole("button", { name: /Skip/ })).toBeTruthy();
+  });
+
+  it("does not offer Skip on the host step, which spec §9 does not mark skippable", async () => {
+    stubState({ completedSteps: ["admin"], completedAt: null });
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Verify host/ })).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("27.3.1")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /Skip/ })).toBeNull();
+  });
+
+  it("does not double-fire a step's completion from a second click while the first is still in flight", async () => {
+    // `StepPlaceholder`'s Skip button deliberately does not disable itself on `pending`
+    // — it stands in for a step author who forgot. The wizard's own guard in
+    // `markComplete` has to hold regardless, which is what this proves: the underlying
+    // `.../complete` POST fires once, not twice, even though nothing in the DOM stopped
+    // the second click from reaching the handler.
+    const completeCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/complete")) {
+          completeCalls.push(url);
+          // Never resolves — keeps the wizard's own request "in flight" for the whole
+          // test, so a second click lands squarely in the window the guard exists for.
+          return new Promise<Response>(() => {});
+        }
+        return json(200, { completedSteps: ["admin", "host"], completedAt: null });
+      }),
+    );
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Import/ })).toBeTruthy());
+    const skip = screen.getByRole("button", { name: /Skip/ });
+    fireEvent.click(skip);
+    fireEvent.click(skip);
+
+    await waitFor(() => expect(completeCalls.length).toBeGreaterThan(0));
+    // Give any errant second dispatch a chance to land before asserting its absence.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(completeCalls).toHaveLength(1);
   });
 });

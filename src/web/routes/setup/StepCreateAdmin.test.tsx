@@ -21,13 +21,19 @@ function ok(body: unknown = { id: "u1" }, status = 201) {
   );
 }
 
-function mount(state: SetupState, onComplete = vi.fn()) {
+function mount(state: SetupState, onComplete = vi.fn(), pending = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
     onComplete,
     ...render(
       <QueryClientProvider client={client}>
-        <StepCreateAdmin state={state} onComplete={onComplete} />
+        <StepCreateAdmin
+          state={state}
+          onComplete={onComplete}
+          pending={pending}
+          onFail={vi.fn()}
+          skippable={false}
+        />
       </QueryClientProvider>,
     ),
   };
@@ -166,5 +172,16 @@ describe("StepCreateAdmin", () => {
     mount(ADMIN_DONE_STATE, onComplete);
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
     expect(onComplete).toHaveBeenCalled();
+  });
+
+  it("disables Continue on the already-done screen while the wizard's own completion is pending", () => {
+    mount(ADMIN_DONE_STATE, vi.fn(), true);
+    expect(screen.getByRole("button", { name: /Continuing/ }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("disables the submit button while the wizard's own completion is pending", () => {
+    mount(FRESH_STATE, vi.fn(), true);
+    fillForm();
+    expect(screen.getByRole("button", { name: /Continuing/ }).hasAttribute("disabled")).toBe(true);
   });
 });

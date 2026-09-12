@@ -18,11 +18,13 @@ import type { SetupStepProps } from "./SetupWizard";
  * Continuing past a failed preflight is a deliberate ruling, not an oversight: a wrong
  * bind mount is fixed outside Homestead, and a NAS admin mid-migration may already know
  * their setup is unconventional but correct. Trapping them here with no way past is
- * worse than warning loudly — so `Continue` is never disabled by the preflight result,
- * and the warning is rendered from the query's own data rather than any local
- * "dismissed" flag, so it cannot be cleared by the click that advances past it.
+ * worse than warning loudly — so `Continue`'s disabled state below is never driven by
+ * the preflight result, only by `pending` (`SetupWizard`'s own completion request, in
+ * flight once this step has already called `onComplete`) — and the warning is rendered
+ * from the query's own data rather than any local "dismissed" flag, so it cannot be
+ * cleared by the click that advances past it.
  */
-export function StepVerifyHost({ onComplete }: SetupStepProps) {
+export function StepVerifyHost({ onComplete, pending }: SetupStepProps) {
   const hostCheck = useHostCheck();
 
   return (
@@ -119,9 +121,10 @@ export function StepVerifyHost({ onComplete }: SetupStepProps) {
             <button
               type="button"
               onClick={onComplete}
-              className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white"
+              disabled={pending}
+              className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
             >
-              Continue
+              {pending ? "Continuing…" : "Continue"}
             </button>
           </div>
         </div>

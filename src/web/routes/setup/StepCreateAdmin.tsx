@@ -52,8 +52,17 @@ function errorMessage(error: unknown): string {
  * `isPending` through `setTimeout(fn, 0)`, so deriving the disabled state from
  * `mutation.isPending` would leave a synchronous second submit able to slip through
  * before that timer ever fires.
+ *
+ * `pending` (from `SetupStepProps`) is a separate thing: it's true once this step has
+ * called `onComplete` and the *wizard's* completion request is in flight, which for this
+ * step is `SetupWizard`'s own `setup.refetch()`. `submitting` guards the POST that
+ * creates the account; `pending` guards the moment after, so a stray double-click on
+ * "Continue" in the already-done branch — or on this form's own submit button, in the
+ * gap between `submitting` resetting to `false` and the step actually advancing —
+ * can't fire `onComplete` twice. `SetupWizard` itself also refuses a second call, so
+ * this is a courtesy disable, not the only thing standing between here and a double-fire.
  */
-export function StepCreateAdmin({ state, onComplete }: SetupStepProps) {
+export function StepCreateAdmin({ state, onComplete, pending }: SetupStepProps) {
   const alreadyDone = state.completedSteps.includes("admin");
   const queryClient = useQueryClient();
 
@@ -109,9 +118,10 @@ export function StepCreateAdmin({ state, onComplete }: SetupStepProps) {
         <button
           type="button"
           onClick={onComplete}
-          className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white"
+          disabled={pending}
+          className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
         >
-          Continue
+          {pending ? "Continuing…" : "Continue"}
         </button>
       </div>
     );
@@ -185,10 +195,10 @@ export function StepCreateAdmin({ state, onComplete }: SetupStepProps) {
 
       <button
         type="submit"
-        disabled={submitting}
+        disabled={submitting || pending}
         className="w-full rounded-lg bg-slate-900 px-3 py-2 text-white disabled:opacity-50"
       >
-        {submitting ? "Creating…" : "Create admin"}
+        {submitting ? "Creating…" : pending ? "Continuing…" : "Create admin"}
       </button>
     </form>
   );
