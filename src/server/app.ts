@@ -1,7 +1,8 @@
+import { BlockList, isIP } from "node:net";
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import { eq, sql } from "drizzle-orm";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import type { AppLock } from "./apps/app-lock.js";
 import type { ComposeConfigCache } from "./apps/compose-config.js";
@@ -115,22 +116,90 @@ function accessJwksFetcher(fetchImpl: typeof fetch, teamDomain: string): JwksFet
 }
 
 /**
- * True when the connection's immediate TCP peer — not `request.ip` — is one of
- * `config.trustedProxies`.
+ * Builds the fields logged when an Access assertion is rejected — deliberately NOT the
+ * error object itself. `jose`'s claim-validation errors (`JWTClaimValidationFailed`,
+ * `JWTExpired`) attach the token's fully decoded payload as an own enumerable
+ * `.payload` property, and pino's default `err` serializer copies every own-enumerable
+ * property of an error onto the log record, so logging `{ err }` directly would write
+ * out `email`, `sub`, `identity_nonce`, `country`, `iss` and `aud` in full. This
+ * reports only what diagnoses a misconfiguration — the error's identity, and, for an
+ * audience mismatch specifically (the mistake operators make most often), the
+ * configured `aud` against the one the token actually carried — never the rest of the
+ * claim set.
+ */
+export function accessRejectionLogFields(
+  err: unknown,
+  expectedAud: string,
+): Record<string, unknown> {
+  if (!(err instanceof Error)) return { message: String(err) };
+
+  const base: Record<string, unknown> = {
+    name: err.name,
+    code: (err as { code?: string }).code,
+    message: err.message,
+  };
+
+  const claim = (err as { claim?: string }).claim;
+  const payload = (err as { payload?: { aud?: unknown } }).payload;
+  if (claim === "aud" && payload) {
+    return { ...base, expectedAud, actualAud: payload.aud };
+  }
+  return base;
+}
+
+/**
+ * True when `remoteAddress` — the connection's immediate TCP peer, not `request.ip` —
+ * is trusted per `config.trustedProxies`.
  *
- * Deliberately `request.socket.remoteAddress`, not `request.ip`. `request.ip` is what
- * `trustProxy` (registered above) resolves the address TO once it decides to believe
- * forwarded headers — for genuine tunnel traffic that is typically the original
- * visitor's own address, which is never in `trustedProxies`. `request.socket` is the
- * raw, unresolved peer Fastify actually accepted the connection from, exactly the fact
+ * Deliberately the raw peer, not `request.ip`. `request.ip` is what `trustProxy`
+ * (registered above) resolves the address TO once it decides to believe forwarded
+ * headers — for genuine tunnel traffic that is typically the original visitor's own
+ * address, which is never in `trustedProxies`. The raw peer is exactly the fact
  * `trustProxy` itself consults to decide whether to trust that hop at all. cloudflared
  * runs with `network_mode: host` and connects over loopback (`trustedProxies`'
  * default), so a request that reaches Homestead with cloudflared nowhere in the chain —
  * a LAN client hitting the port directly — has its OWN address as the raw peer, never
  * the loopback address the tunnel connects from.
+ *
+ * This now genuinely matches what `trustProxy` does, which a plain `includes()` did
+ * not: Fastify compiles `trustProxy`'s allowlist with `@fastify/proxy-addr`, which
+ * accepts CIDR ranges (`10.0.0.0/8`) and treats an IPv4-mapped IPv6 peer
+ * (`::ffff:127.0.0.1`) as equal to its IPv4 form (`127.0.0.1`) — neither of which a
+ * string-set membership test can do. `@fastify/proxy-addr` is not a direct dependency
+ * of this project (it arrives only transitively through Fastify; pnpm's strict
+ * `node_modules` layout means `require.resolve('@fastify/proxy-addr')` fails from this
+ * package's own root, confirmed), so importing it directly would be a phantom import.
+ * Node's own `net.BlockList` performs the identical CIDR/address-family matching
+ * without adding anything: it ships in `node:net`, which Fastify's own request
+ * handling already depends on.
+ *
+ * A destroyed socket can report `remoteAddress` as `undefined`; that — and any
+ * unparseable configuration entry — fails CLOSED here, not open.
  */
-function requestArrivedViaTrustedProxy(request: FastifyRequest, trustedProxies: string[]): boolean {
-  return trustedProxies.includes(request.socket.remoteAddress ?? "");
+export function isTrustedProxyAddress(
+  remoteAddress: string | undefined,
+  trustedProxies: string[],
+): boolean {
+  if (!remoteAddress) return false;
+
+  const peerFamily = isIP(remoteAddress);
+  if (peerFamily === 0) return false;
+
+  const trusted = new BlockList();
+  for (const entry of trustedProxies) {
+    const slashIndex = entry.indexOf("/");
+    const address = slashIndex === -1 ? entry : entry.slice(0, slashIndex);
+    const family = isIP(address);
+    if (family === 0) continue; // Malformed configuration entries are never trusted.
+
+    const maxPrefix = family === 4 ? 32 : 128;
+    const prefix = slashIndex === -1 ? maxPrefix : Number(entry.slice(slashIndex + 1));
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) continue;
+
+    trusted.addSubnet(address, prefix, family === 4 ? "ipv4" : "ipv6");
+  }
+
+  return trusted.check(remoteAddress, peerFamily === 4 ? "ipv4" : "ipv6");
 }
 
 export type AppDeps = {
@@ -244,8 +313,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
    * Every other guard here fails CLOSED, silently, rather than throwing or partially
    * authenticating:
    *
-   * - The request did not arrive via a trusted proxy (`requestArrivedViaTrustedProxy`,
-   *   above): see that function's own doc comment. §6/§9 draw the line at cloudflared —
+   * - The request did not arrive via a trusted proxy (`isTrustedProxyAddress`, above):
+   *   see that function's own doc comment. §6/§9 draw the line at cloudflared —
    *   "externally exposed apps remain reachable on the LAN without passing through
    *   Access" — which makes an Access assertion presented directly on the LAN
    *   meaningless: Cloudflare never evaluated its policy for this request, so revoking
@@ -275,7 +344,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.addHook("preHandler", async (request) => {
     if (request.auth) return;
 
-    if (!requestArrivedViaTrustedProxy(request, deps.config.trustedProxies)) return;
+    if (!isTrustedProxyAddress(request.socket.remoteAddress, deps.config.trustedProxies)) return;
 
     const header = request.headers[ACCESS_JWT_HEADER];
     const token = Array.isArray(header) ? header[0] : header;
@@ -294,10 +363,18 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       }));
     } catch (err) {
       // `debug`, not `warn`: an unauthenticated caller controls how often this fires,
-      // and `warn` would let them drive log volume. The error alone (never the token)
-      // is enough to tell "wrong audience" from "team domain does not resolve" from
-      // "expired" without exposing anything secret.
-      request.log.debug({ err }, "access assertion rejected");
+      // and `warn` would let them drive log volume. Deliberately NOT `{ err }`: jose's
+      // claim-validation errors carry the token's full decoded payload — email, sub,
+      // identity_nonce, country, iss, aud — as an own enumerable `.payload` property,
+      // and pino's default `err` serializer walks every own-enumerable property onto
+      // the log record, so `{ err }` would write the whole claim set out even though
+      // nothing here asked for it. None of that is secret (it's the cleartext body of
+      // a JWT the caller already presented), but it is more identifying detail than a
+      // debug line needs. `accessRejectionLogFields` reports only what diagnoses a
+      // misconfiguration: the error's name/code/message, and — for the audience check
+      // specifically, since a mismatched team's `aud` is the mistake operators most
+      // often make — the expected value against what the token actually carried.
+      request.log.debug(accessRejectionLogFields(err, settings.aud), "access assertion rejected");
       return;
     }
 

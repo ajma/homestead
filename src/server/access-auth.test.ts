@@ -390,12 +390,15 @@ describe("the mounted Access sign-in path", () => {
     // which makes an Access assertion arriving on a LAN-origin request meaningless —
     // Cloudflare never evaluated its policy for it, so a bearer token copied out of a
     // revoked user's browser would otherwise keep working until it expired.
-    // `app.inject`'s default `remoteAddress` is `127.0.0.1` — cloudflared's own
-    // loopback address, and `trustedProxies`' default — which is why every other test
-    // in this file is implicitly "through the tunnel". This one overrides it to a LAN
-    // address to prove the same, otherwise-valid token is ignored rather than accepted,
-    // and that the response is byte-identical to no header at all: a LAN caller cannot
-    // use this to fingerprint whether Access is configured or probe a candidate email.
+    // `app.inject`'s default `remoteAddress` is NOT `127.0.0.1` here: `buildTestApp()`
+    // (see `test-helpers.ts`) gives every test app instance its own synthetic
+    // `198.18.x.x` address and appends that same address to ITS OWN `trustedProxies`,
+    // so every other test in this file is implicitly "through the tunnel" via that
+    // synthetic address, not via the shipped loopback default. This test overrides
+    // `remoteAddress` explicitly to a real LAN address to prove the same,
+    // otherwise-valid token is ignored rather than accepted, and that the response is
+    // byte-identical to no header at all: a LAN caller cannot use this to fingerprint
+    // whether Access is configured or probe a candidate email.
     const { app, privateKey } = await withAccessConfigured();
     const token = await mintToken(privateKey, "admin@example.com");
     const remoteAddress = "192.168.1.50";
@@ -411,6 +414,91 @@ describe("the mounted Access sign-in path", () => {
     expect(withHeader.statusCode).toBe(401);
     expect(withHeader.statusCode).toBe(withoutHeader.statusCode);
     expect(withHeader.json()).toEqual(withoutHeader.json());
+    await app.close();
+  });
+
+  it("trusts the shipped production default trusted-proxy addresses, not only the harness's synthetic one", async () => {
+    // Every other test in this file authenticates through `buildTestApp()`'s synthetic
+    // `198.18.x.x` peer (see the note above), which is appended ON TOP OF the real
+    // shipped default and never exercises that default on its own. The whole-branch
+    // re-review measured that dropping loopback from `HOMESTEAD_TRUSTED_PROXIES`'
+    // default entirely survives the full suite for exactly this reason. This sends the
+    // request from the literal default (`127.0.0.1` / `::1`, `config.ts`) with nothing
+    // else added, mounted end-to-end through the real hook.
+    const { app, privateKey, adminId } = await withAccessConfigured();
+    const token = await mintToken(privateKey, "admin@example.com");
+
+    const viaIPv4Loopback = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      remoteAddress: "127.0.0.1",
+    });
+    expect(viaIPv4Loopback.statusCode).toBe(200);
+    expect(viaIPv4Loopback.json().id).toBe(adminId);
+
+    const viaIPv6Loopback = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      remoteAddress: "::1",
+    });
+    expect(viaIPv6Loopback.statusCode).toBe(200);
+    expect(viaIPv6Loopback.json().id).toBe(adminId);
+    await app.close();
+  });
+
+  it("trusts a CIDR entry in trustedProxies, matching trustProxy's own semantics", async () => {
+    // A plain string-set `includes()` — what the trusted-peer gate used to be — accepts
+    // neither CIDR ranges nor IPv4-mapped IPv6, unlike `@fastify/proxy-addr`
+    // (what `trustProxy` itself is compiled with). This is the CIDR half, mounted
+    // end-to-end: an operator who sets `HOMESTEAD_TRUSTED_PROXIES` to a subnet must get
+    // a working Access sign-in, not a silently dead one.
+    const { app, privateKey, adminId } = await withAccessConfigured();
+    app.deps.config = {
+      ...app.deps.config,
+      trustedProxies: [...app.deps.config.trustedProxies, "10.0.0.0/8"],
+    };
+    const token = await mintToken(privateKey, "admin@example.com");
+
+    const inRange = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      remoteAddress: "10.1.2.3",
+    });
+    expect(inRange.statusCode).toBe(200);
+    expect(inRange.json().id).toBe(adminId);
+
+    const outOfRange = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      remoteAddress: "11.1.2.3",
+    });
+    expect(outOfRange.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("trusts an IPv4-mapped IPv6 peer against a plain IPv4 trustedProxies entry", async () => {
+    // The other half of the same gap: a dual-stack listener (`::`) reports an IPv4
+    // client's peer as `::ffff:a.b.c.d`, which `@fastify/proxy-addr` treats as equal to
+    // the plain IPv4 form when matching against an IPv4 entry, and `includes()` did not.
+    const { app, privateKey, adminId } = await withAccessConfigured();
+    app.deps.config = {
+      ...app.deps.config,
+      trustedProxies: [...app.deps.config.trustedProxies, "203.0.113.9"],
+    };
+    const token = await mintToken(privateKey, "admin@example.com");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      remoteAddress: "::ffff:203.0.113.9",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().id).toBe(adminId);
     await app.close();
   });
 

@@ -368,7 +368,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
   const instanceIp = getUniqueTestIp();
 
   // This instance's default `inject()` peer is treated as having arrived via the
-  // trusted proxy (2E fix-wave: `requestArrivedViaTrustedProxy`, app.ts). Without
+  // trusted proxy (2E fix-wave: `isTrustedProxyAddress`, app.ts). Without
   // this, no test could reach the Access sign-in path without overriding
   // `remoteAddress` to a literal `127.0.0.1`/`::1` on every single call — which would
   // reintroduce exactly the rate-limit bucket collision `instanceIp` exists to avoid,
