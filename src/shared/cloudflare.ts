@@ -15,6 +15,17 @@ export type CloudflareZone = { id: string; name: string };
 export type CloudflareTunnel = { id: string; name: string; deletedAt: number | null };
 
 /**
+ * One entry in a tunnel's ingress array (`GET`/`PUT .../cfd_tunnel/{id}/configurations`,
+ * `result.config.ingress`). `hostname` is absent on exactly one entry in a well-formed
+ * array: the trailing catch-all, which carries only `service` (conventionally
+ * `"http_status:404"|"http_status:503"`) and matches whatever no earlier rule claimed.
+ * Shared rather than server-only because the client (Task 1), the pure splice module and
+ * the expose sequence (Task 3) all need to agree on this shape — see the phase's progress
+ * ledger.
+ */
+export type IngressRule = { hostname?: string; service: string };
+
+/**
  * `GET /api/cloudflare/tunnel`'s shape — Task 4's read model over `TunnelStore` plus
  * whatever the provision sequence's own job row says right now. A discriminated union on
  * `provisioned`, the same shape `CloudflareStatus` uses, for the same reason: a caller
@@ -64,3 +75,13 @@ export type CloudflareFault =
   | "network"
   | "cloudflare"
   | "client";
+
+/**
+ * `GET /api/cloudflare/monitor`'s shape — a discriminated union on `configured`, the same
+ * pattern `CloudflareStatus` uses and for the same reason: a caller cannot accidentally
+ * read `clientId`/`expiresAt` off a status that has none. Never carries the secret itself
+ * (see `MonitorAccessStore` — the secret is written, never read back through this shape).
+ */
+export type MonitorAccessStatus =
+  | { configured: false }
+  | { configured: true; clientId: string; policyId: string; expiresAt: number | null };

@@ -1,4 +1,4 @@
-import type { CloudflareFault, CloudflareTunnel } from "@shared/cloudflare.js";
+import type { CloudflareFault, CloudflareTunnel, IngressRule } from "@shared/cloudflare.js";
 import { z } from "zod";
 import { CloudflareError } from "./errors.js";
 
@@ -94,16 +94,18 @@ const tunnelsResultSchema = z.array(tunnelSchema);
  */
 const tunnelTokenResultSchema = z.union([z.string(), z.object({ token: z.string() })]);
 
-/** ISO8601 → epoch ms, or `null` for a tunnel that has not been deleted. Raises rather
- * than returning `NaN` silently: an unparseable date is Cloudflare sending a shape this
- * client does not understand, not a value safe to carry forward. */
-function parseDeletedAt(raw: string | null | undefined): number | null {
+/** ISO8601 → epoch ms, or `null` for a value Cloudflare did not send. Raises rather than
+ * returning `NaN` silently: an unparseable date is Cloudflare sending a shape this client
+ * does not understand, not a value safe to carry forward. `field` names which response
+ * field this was, so the error is specific (`deleted_at` vs `expires_at`) rather than a
+ * generic "date I don't understand" that gives an admin nothing to search for. */
+function parseIsoOrNull(raw: string | null | undefined, field: string): number | null {
   if (raw === null || raw === undefined) return null;
   const ms = Date.parse(raw);
   if (Number.isNaN(ms)) {
     throw new CloudflareError(
       "cloudflare",
-      "Cloudflare's tunnel response carried a deleted_at that could not be parsed as a date",
+      `Cloudflare's response carried a ${field} that could not be parsed as a date`,
       { status: null, codes: [] },
     );
   }
@@ -111,7 +113,88 @@ function parseDeletedAt(raw: string | null | undefined): number | null {
 }
 
 function toTunnel(raw: z.infer<typeof tunnelSchema>): CloudflareTunnel {
-  return { id: raw.id, name: raw.name, deletedAt: parseDeletedAt(raw.deleted_at) };
+  return { id: raw.id, name: raw.name, deletedAt: parseIsoOrNull(raw.deleted_at, "deleted_at") };
+}
+
+const ingressRuleSchema = z.object({ hostname: z.string().optional(), service: z.string() });
+
+/**
+ * Only `config.ingress` is read from this — `result` also carries `tunnel_id` and
+ * `version`, neither on the plan's "relied on" list and neither used here (the same
+ * "require only what's confirmed" posture `envelopeSchema`'s `result_info` takes; zod
+ * drops undeclared fields without complaint, so leaving them out is enough to tolerate
+ * them, not merely to make them optional).
+ */
+const tunnelConfigResultSchema = z.object({
+  config: z.object({ ingress: z.array(ingressRuleSchema) }),
+});
+
+const dnsRecordSchema = z.object({ id: z.string() });
+/** `name` is carried through so `findDnsRecord` can report "found nothing" without a
+ * separate schema — the array can be empty, or contain records this client never reads
+ * anything else off. */
+const dnsRecordsResultSchema = z.array(dnsRecordSchema.extend({ name: z.string().optional() }));
+
+const accessAppSchema = z.object({
+  id: z.string(),
+  aud: z.string(),
+  domain: z.string().optional(),
+});
+const accessAppsResultSchema = z.array(accessAppSchema);
+
+/**
+ * The exact field name for a service token's secret on creation is one of the plan's
+ * explicitly unverified facts. Modelled as two optional sibling fields on one flat object
+ * — not a `z.union` of two alternate shapes the way `tunnelTokenResultSchema` is — because
+ * the uncertainty here is a field NAME on an otherwise-identical object, not the
+ * response's top-level TYPE (bare string vs wrapped object, `tunnelToken`'s case, where a
+ * union is what lets zod tell the two shapes apart). `secretOf` below picks whichever
+ * field is present and raises if neither is, or if it is empty — the secret is returned
+ * once; an empty one is unrecoverable without rotation.
+ */
+const serviceTokenCreateResultSchema = z.object({
+  id: z.string(),
+  client_id: z.string(),
+  client_secret: z.string().optional(),
+  secret: z.string().optional(),
+  expires_at: z.string().nullable().optional(),
+});
+
+/** Same secret-field ambiguity as creation, minus `id` — the rotate endpoint operates on
+ * a token id this client already holds, and whether that id is echoed back was never
+ * checked either way, so it is not required here. */
+const rotateServiceTokenResultSchema = z.object({
+  client_id: z.string(),
+  client_secret: z.string().optional(),
+  secret: z.string().optional(),
+  expires_at: z.string().nullable().optional(),
+});
+
+const serviceTokenListItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  expires_at: z.string().nullable().optional(),
+});
+const serviceTokensListResultSchema = z.array(serviceTokenListItemSchema);
+
+const policySchema = z.object({ id: z.string() });
+
+/** Raises rather than resolving with `""` — see `serviceTokenCreateResultSchema`'s doc
+ * comment for why this is two optional fields rather than a union, and `tunnelToken`
+ * above for why an empty secret is treated as no secret at all. Never interpolates
+ * whatever (possibly-empty) value it found into the thrown message: the message names
+ * only the shape that was missing, never a value that could itself be a fragment of a
+ * real secret. */
+function secretOf(raw: { client_secret?: string; secret?: string }): string {
+  const secret = raw.client_secret ?? raw.secret ?? "";
+  if (secret.length === 0) {
+    throw new CloudflareError(
+      "cloudflare",
+      "Cloudflare's service token response did not include a usable secret",
+      { status: null, codes: [] },
+    );
+  }
+  return secret;
 }
 
 export type CloudflareClient = {
@@ -130,6 +213,62 @@ export type CloudflareClient = {
    * The rollback path (2B's step-sequence runner) depends on that — rollback must be
    * safe to run twice. */
   deleteTunnel(tunnelId: string): Promise<void>;
+
+  /** The tunnel's full ingress array — spec §6: "read tunnel config, splice `{ hostname,
+   * service }` before the trailing catch-all, PUT it back." Always the whole array; there
+   * is no add-one-rule endpoint (see `putTunnelConfig`). */
+  getTunnelConfig(tunnelId: string): Promise<{ ingress: IngressRule[] }>;
+  /** Replaces the tunnel's entire ingress array — there is no partial-update endpoint.
+   * Callers (Task 3) are responsible for the mutex and the re-read-inside-the-lock
+   * discipline §6 requires; this method has no opinion on concurrency, only on the wire
+   * format of one PUT. */
+  putTunnelConfig(tunnelId: string, config: { ingress: IngressRule[] }): Promise<void>;
+
+  /** Always sends `type: "CNAME"` and `proxied: true` — see the method's own comment for
+   * why an unproxied record is a silent failure nothing else would notice. */
+  createDnsRecord(zoneId: string, r: { name: string; content: string }): Promise<{ id: string }>;
+  /** Idempotent: deleting an already-absent record (a 404) resolves rather than throwing
+   * — rollback and deprovisioning both depend on that. */
+  deleteDnsRecord(zoneId: string, recordId: string): Promise<void>;
+  /** `null` for no match, never a throw — the idempotency checks in Task 3/4 call this to
+   * decide whether a record already exists before creating one. */
+  findDnsRecord(zoneId: string, name: string): Promise<{ id: string } | null>;
+
+  /** Always sends `type: "self_hosted"` and `policies` built from `policyIds`. See the
+   * method's own comment on the one explicitly-unverified fact this touches: how a
+   * reusable policy is attached. */
+  createAccessApp(a: {
+    domain: string;
+    name: string;
+    policyIds: string[];
+  }): Promise<{ id: string; aud: string }>;
+  /** Idempotent the same way `deleteDnsRecord` is. */
+  deleteAccessApp(appId: string): Promise<void>;
+  /** `null` for no match, never a throw. */
+  findAccessApp(domain: string): Promise<{ id: string; aud: string } | null>;
+
+  /** Raises if Cloudflare's response has no usable, non-empty secret — see
+   * `secretOf`. */
+  createServiceToken(
+    name: string,
+  ): Promise<{ id: string; clientId: string; clientSecret: string; expiresAt: number | null }>;
+  /** A single dedicated `.../rotate` call — never a second call to read back
+   * `client_secret_version`, which this client does not consume (neither `MonitorAccess`
+   * nor anything downstream in this phase needs it; see the phase report). */
+  rotateServiceToken(
+    tokenId: string,
+  ): Promise<{ clientId: string; clientSecret: string; expiresAt: number | null }>;
+  /** Never carries a secret — Cloudflare's list endpoint does not return one, only
+   * creation and rotation do. */
+  listServiceTokens(): Promise<Array<{ id: string; name: string; expiresAt: number | null }>>;
+  /** Not in the plan's original interface list. Added so `ensureMonitorAccess` (Task 2)
+   * can compensate a service token whose paired policy creation failed — see this
+   * method's test for the full justification. Idempotent like the other deletes here. */
+  deleteServiceToken(tokenId: string): Promise<void>;
+
+  /** Always sends `decision: "non_identity"` — anything else demands a human login, which
+   * the monitor probe cannot give. See the method's own comment. */
+  createMonitorPolicy(name: string, serviceTokenId: string): Promise<{ id: string }>;
 };
 
 /**
@@ -214,7 +353,7 @@ export function createCloudflareClient(opts: {
    * this function has no opinion on that, only on what happens once a request is sent.
    */
   async function requestEnvelope(req: {
-    method: "GET" | "POST" | "DELETE";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     url: string;
     body?: unknown;
   }): Promise<{
@@ -312,6 +451,38 @@ export function createCloudflareClient(opts: {
    * a Zone:Read token's own scope already limits what it can see. */
   function accountUrl(path: string): string {
     return `${API_BASE}/accounts/${opts.accountId}${path}`;
+  }
+
+  /** DNS and (later) other zone-scoped resources live under this prefix, parallel to
+   * `accountUrl` above — `zoneId` is per-call rather than a constructor option because,
+   * unlike the account, a caller may work against different zones from one client. */
+  function zoneUrl(zoneId: string, path: string): string {
+    return `${API_BASE}/zones/${zoneId}${path}`;
+  }
+
+  /**
+   * `DELETE` a resource, treating a 404 as success rather than an error. Shared by every
+   * delete method below (DNS records, Access apps, service tokens) rather than each
+   * re-implementing it — the same "one path, not several" reasoning `requestEnvelope`
+   * itself is built on.
+   *
+   * Unlike `deleteTunnel`'s documented assumption (tunnels are soft-deleted, so a repeat
+   * delete is assumed to report the same `success: true` envelope), these resources are
+   * hard-deleted: a second delete genuinely has nothing left to remove, and Cloudflare's
+   * own REST convention for "no resource at this id" is a 404. That convention is not on
+   * the plan's "relied on" list by name, but it is ordinary HTTP semantics for an
+   * id-addressed path (`/{resource}/{id}`), not a Cloudflare-specific guess the way the
+   * three flagged facts are — and every test here defines its own fixture's status code,
+   * so nothing depends on that guess being right against the real API today, only on this
+   * client's own contract being consistent.
+   */
+  async function deleteIdempotently(req: { method: "DELETE"; url: string }): Promise<void> {
+    try {
+      await requestEnvelope(req);
+    } catch (error) {
+      if (error instanceof CloudflareError && error.status === 404) return;
+      throw error;
+    }
   }
 
   /** One page of `GET /zones`, with retry — the only thing specific to zones is the URL
@@ -448,6 +619,240 @@ export function createCloudflareClient(opts: {
      */
     async deleteTunnel(tunnelId) {
       await requestEnvelope({ method: "DELETE", url: accountUrl(`/cfd_tunnel/${tunnelId}`) });
+    },
+
+    async getTunnelConfig(tunnelId) {
+      const { result } = await requestEnvelope({
+        method: "GET",
+        url: accountUrl(`/cfd_tunnel/${tunnelId}/configurations`),
+      });
+      const parsed = tunnelConfigResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's tunnel configuration response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return { ingress: parsed.data.config.ingress };
+    },
+
+    async putTunnelConfig(tunnelId, config) {
+      await requestEnvelope({
+        method: "PUT",
+        url: accountUrl(`/cfd_tunnel/${tunnelId}/configurations`),
+        body: { config: { ingress: config.ingress } },
+      });
+    },
+
+    /**
+     * `type: "CNAME"` and `proxied: true` on the request body are the entire point of
+     * this method (see the plan and `client.test.ts`'s binding test) — an unproxied
+     * record points at a hostname that never resolves publicly, and nothing else in the
+     * system would notice: the DNS record would exist, the Access application would
+     * exist, and only an external visitor would ever see the failure.
+     */
+    async createDnsRecord(zoneId, r) {
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: zoneUrl(zoneId, "/dns_records"),
+        body: { type: "CNAME", name: r.name, content: r.content, proxied: true },
+      });
+      const parsed = dnsRecordSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's DNS record response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return { id: parsed.data.id };
+    },
+
+    async deleteDnsRecord(zoneId, recordId) {
+      await deleteIdempotently({
+        method: "DELETE",
+        url: zoneUrl(zoneId, `/dns_records/${recordId}`),
+      });
+    },
+
+    async findDnsRecord(zoneId, name) {
+      const { result } = await requestEnvelope({
+        method: "GET",
+        url: `${zoneUrl(zoneId, "/dns_records")}?name=${encodeURIComponent(name)}`,
+      });
+      const parsed = dnsRecordsResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's DNS record list response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      const [first] = parsed.data;
+      return first ? { id: first.id } : null;
+    },
+
+    /**
+     * `type: "self_hosted"` on the request body is the other binding assertion this
+     * batch carries (alongside `createDnsRecord`'s `proxied: true`) — see the plan.
+     *
+     * How a reusable policy attaches to an application is one of the plan's three
+     * explicitly-unverified facts. This sends `policies` as an array of `{ id }` objects
+     * — the shape §6 itself states ("attached to every provisioned app as `{ "id": "..."
+     * }`") — embedded directly in the app-creation body, rather than creating the app
+     * first and calling a separate attach endpoint after. It does not guess at BOTH
+     * shapes, because unlike a response (where accepting two shapes costs nothing), a
+     * request can only be sent one way — sending it twice, to both a body field and a
+     * hypothetical separate endpoint, risks a duplicate attachment rather than resolving
+     * the ambiguity. If this shape is wrong, Cloudflare rejects the malformed body with a
+     * non-success envelope, which `requestEnvelope` already turns into a normal
+     * `CloudflareError` (`client` or `cloudflare` fault) — a loud, legible failure, not a
+     * silent one. See the phase report for this call.
+     */
+    async createAccessApp(a) {
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: accountUrl("/access/apps"),
+        body: {
+          name: a.name,
+          domain: a.domain,
+          type: "self_hosted",
+          policies: a.policyIds.map((id) => ({ id })),
+        },
+      });
+      const parsed = accessAppSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's Access application response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return { id: parsed.data.id, aud: parsed.data.aud };
+    },
+
+    async deleteAccessApp(appId) {
+      await deleteIdempotently({ method: "DELETE", url: accountUrl(`/access/apps/${appId}`) });
+    },
+
+    /**
+     * Lists every Access application and matches by `domain` client-side, rather than
+     * relying on a query-parameter filter — whether the list endpoint even supports one
+     * was never checked, and this project would rather make one extra round trip (Access
+     * applications on a single-NAS account are few) than depend on an unverified filter
+     * silently matching nothing and reading as "no such app" when the API just ignored
+     * the parameter.
+     */
+    async findAccessApp(domain) {
+      const { result } = await requestEnvelope({ method: "GET", url: accountUrl("/access/apps") });
+      const parsed = accessAppsResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's Access application list response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      const match = parsed.data.find((app) => app.domain === domain);
+      return match ? { id: match.id, aud: match.aud } : null;
+    },
+
+    async createServiceToken(name) {
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: accountUrl("/access/service_tokens"),
+        body: { name },
+      });
+      const parsed = serviceTokenCreateResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's service token response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return {
+        id: parsed.data.id,
+        clientId: parsed.data.client_id,
+        clientSecret: secretOf(parsed.data),
+        expiresAt: parseIsoOrNull(parsed.data.expires_at, "expires_at"),
+      };
+    },
+
+    async rotateServiceToken(tokenId) {
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: accountUrl(`/access/service_tokens/${tokenId}/rotate`),
+      });
+      const parsed = rotateServiceTokenResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's service token rotation response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return {
+        clientId: parsed.data.client_id,
+        clientSecret: secretOf(parsed.data),
+        expiresAt: parseIsoOrNull(parsed.data.expires_at, "expires_at"),
+      };
+    },
+
+    async listServiceTokens() {
+      const { result } = await requestEnvelope({
+        method: "GET",
+        url: accountUrl("/access/service_tokens"),
+      });
+      const parsed = serviceTokensListResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's service token list response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return parsed.data.map((t) => ({
+        id: t.id,
+        name: t.name,
+        expiresAt: parseIsoOrNull(t.expires_at, "expires_at"),
+      }));
+    },
+
+    async deleteServiceToken(tokenId) {
+      await deleteIdempotently({
+        method: "DELETE",
+        url: accountUrl(`/access/service_tokens/${tokenId}`),
+      });
+    },
+
+    /**
+     * `decision: "non_identity"` on the request body is the binding assertion — a policy
+     * that instead demands identity verification requires a human login, which the
+     * monitor probe (2E) cannot give. The failure mode this guards against is not an
+     * obvious misconfiguration: every external probe would simply get redirected to a
+     * login page and read as "down" or "degraded" rather than "policy misconfigured".
+     */
+    async createMonitorPolicy(name, serviceTokenId) {
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: accountUrl("/access/policies"),
+        body: {
+          name,
+          decision: "non_identity",
+          include: [{ service_token: { token_id: serviceTokenId } }],
+        },
+      });
+      const parsed = policySchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's Access policy response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return { id: parsed.data.id };
     },
   };
 }

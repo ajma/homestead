@@ -594,4 +594,477 @@ describe("createCloudflareClient", () => {
       expect(error.fault).toBe("permission");
     });
   });
+
+  describe("getTunnelConfig", () => {
+    it("returns the ingress array from result.config.ingress", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: {
+              tunnel_id: "tunnel-1",
+              config: {
+                ingress: [
+                  { hostname: "a.example.com", service: "http://localhost:8080" },
+                  { service: "http_status:404" },
+                ],
+              },
+            },
+          }),
+        ),
+      );
+      const { ingress } = await client({ fetch: fetchMock }).getTunnelConfig("tunnel-1");
+      expect(ingress).toEqual([
+        { hostname: "a.example.com", service: "http://localhost:8080" },
+        { service: "http_status:404" },
+      ]);
+    });
+
+    it("sends the request to the account-scoped configurations endpoint", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/tunnel-1/configurations`,
+        );
+        return jsonResponse(envelope({ success: true, result: { config: { ingress: [] } } }));
+      });
+      await client({ fetch: fetchMock }).getTunnelConfig("tunnel-1");
+    });
+
+    it("raises when the response does not carry a usable config.ingress", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: { config: {} } })),
+      );
+      const error = await client({ fetch: fetchMock })
+        .getTunnelConfig("tunnel-1")
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+    });
+  });
+
+  describe("putTunnelConfig", () => {
+    it("sends the ingress array under config.ingress on the request body", async () => {
+      const ingress = [{ hostname: "a.example.com", service: "http://localhost:8080" }];
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("PUT");
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/cfd_tunnel/tunnel-1/configurations`,
+        );
+        expect(JSON.parse(String(init?.body))).toEqual({ config: { ingress } });
+        return jsonResponse(envelope({ success: true, result: { config: { ingress } } }));
+      });
+      await expect(
+        client({ fetch: fetchMock }).putTunnelConfig("tunnel-1", { ingress }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("raises a CloudflareError classified the normal way on failure", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: false, errors: [{ code: 9109, message: "nope" }] }), {
+          status: 403,
+        }),
+      );
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .putTunnelConfig("tunnel-1", { ingress: [] })
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect(error.fault).toBe("permission");
+    });
+  });
+
+  describe("createDnsRecord", () => {
+    it("sends proxied: true and type: CNAME on the request body", async () => {
+      // The binding assertion: on the REQUEST body. An unproxied record points at a
+      // hostname that never resolves publicly, and nothing else in the system notices.
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const sent = JSON.parse(String(init?.body));
+        expect(sent).toEqual({
+          type: "CNAME",
+          name: "app.example.com",
+          content: "tunnel-1.cfargotunnel.com",
+          proxied: true,
+        });
+        return jsonResponse(envelope({ success: true, result: { id: "dns-1" } }));
+      });
+      const record = await client({ fetch: fetchMock }).createDnsRecord("zone-1", {
+        name: "app.example.com",
+        content: "tunnel-1.cfargotunnel.com",
+      });
+      expect(record).toEqual({ id: "dns-1" });
+    });
+
+    it("sends the request to the zone-scoped dns_records endpoint", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        expect(String(input)).toBe("https://api.cloudflare.com/client/v4/zones/zone-1/dns_records");
+        return jsonResponse(envelope({ success: true, result: { id: "dns-1" } }));
+      });
+      await client({ fetch: fetchMock }).createDnsRecord("zone-1", {
+        name: "app.example.com",
+        content: "tunnel-1.cfargotunnel.com",
+      });
+    });
+  });
+
+  describe("findDnsRecord", () => {
+    it("returns the id of the matching record", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        expect(url.pathname).toBe("/client/v4/zones/zone-1/dns_records");
+        expect(url.searchParams.get("name")).toBe("app.example.com");
+        return jsonResponse(
+          envelope({ success: true, result: [{ id: "dns-1", name: "app.example.com" }] }),
+        );
+      });
+      const record = await client({ fetch: fetchMock }).findDnsRecord("zone-1", "app.example.com");
+      expect(record).toEqual({ id: "dns-1" });
+    });
+
+    it("returns null rather than throwing when no record matches", async () => {
+      const fetchMock = vi.fn(async () => jsonResponse(envelope({ success: true, result: [] })));
+      const record = await client({ fetch: fetchMock }).findDnsRecord(
+        "zone-1",
+        "nowhere.example.com",
+      );
+      expect(record).toBeNull();
+    });
+  });
+
+  describe("deleteDnsRecord", () => {
+    it("succeeds on an existing record", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("DELETE");
+        expect(String(input)).toBe(
+          "https://api.cloudflare.com/client/v4/zones/zone-1/dns_records/dns-1",
+        );
+        return jsonResponse(envelope({ success: true, result: { id: "dns-1" } }));
+      });
+      await expect(
+        client({ fetch: fetchMock }).deleteDnsRecord("zone-1", "dns-1"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("is idempotent: a 404 on an already-deleted record is not an error — rollback calls this", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({ success: false, errors: [{ code: 81044, message: "Record does not exist" }] }),
+          { status: 404 },
+        ),
+      );
+      await expect(
+        client({ fetch: fetchMock }).deleteDnsRecord("zone-1", "dns-1"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("still raises on a genuine, non-404 failure", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: false, errors: [{ code: 9109, message: "forbidden" }] }), {
+          status: 403,
+        }),
+      );
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .deleteDnsRecord("zone-1", "dns-1")
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect(error.fault).toBe("permission");
+    });
+  });
+
+  describe("createAccessApp", () => {
+    it("sends type: self_hosted and the policy ids on the request body", async () => {
+      // The binding assertion: on the REQUEST body. A policy that is not `non_identity`
+      // (asserted below, on createMonitorPolicy) demands a human login, which the monitor
+      // probe cannot give — and a wrong `type` here would leave the app unreachable in a
+      // way that reads as "every probe redirects", not as an obvious misconfiguration.
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const sent = JSON.parse(String(init?.body));
+        expect(sent).toEqual({
+          name: "app",
+          domain: "app.example.com",
+          type: "self_hosted",
+          policies: [{ id: "policy-human" }, { id: "policy-monitor" }],
+        });
+        return jsonResponse(envelope({ success: true, result: { id: "app-1", aud: "aud-1" } }));
+      });
+      const app = await client({ fetch: fetchMock }).createAccessApp({
+        domain: "app.example.com",
+        name: "app",
+        policyIds: ["policy-human", "policy-monitor"],
+      });
+      expect(app).toEqual({ id: "app-1", aud: "aud-1" });
+    });
+  });
+
+  describe("findAccessApp", () => {
+    it("returns the id and aud of the app matching the domain", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/apps`,
+        );
+        return jsonResponse(
+          envelope({
+            success: true,
+            result: [
+              { id: "app-1", aud: "aud-1", domain: "other.example.com" },
+              { id: "app-2", aud: "aud-2", domain: "app.example.com" },
+            ],
+          }),
+        );
+      });
+      const app = await client({ fetch: fetchMock }).findAccessApp("app.example.com");
+      expect(app).toEqual({ id: "app-2", aud: "aud-2" });
+    });
+
+    it("returns null rather than throwing when no app matches the domain", async () => {
+      const fetchMock = vi.fn(async () => jsonResponse(envelope({ success: true, result: [] })));
+      const app = await client({ fetch: fetchMock }).findAccessApp("app.example.com");
+      expect(app).toBeNull();
+    });
+  });
+
+  describe("deleteAccessApp", () => {
+    it("succeeds on an existing app", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("DELETE");
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/apps/app-1`,
+        );
+        return jsonResponse(envelope({ success: true, result: { id: "app-1" } }));
+      });
+      await expect(client({ fetch: fetchMock }).deleteAccessApp("app-1")).resolves.toBeUndefined();
+    });
+
+    it("is idempotent: a 404 on an already-deleted app is not an error — rollback calls this", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({ success: false, errors: [{ code: 12112, message: "not found" }] }),
+          {
+            status: 404,
+          },
+        ),
+      );
+      await expect(client({ fetch: fetchMock }).deleteAccessApp("app-1")).resolves.toBeUndefined();
+    });
+  });
+
+  describe("createServiceToken", () => {
+    it("returns the id, clientId, clientSecret and expiresAt when the secret is under client_secret", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: {
+              id: "token-1",
+              client_id: "client-1",
+              client_secret: "shh-secret",
+              expires_at: "2027-09-12T00:00:00Z",
+            },
+          }),
+        ),
+      );
+      const token = await client({ fetch: fetchMock }).createServiceToken("Homestead Monitor");
+      expect(token).toEqual({
+        id: "token-1",
+        clientId: "client-1",
+        clientSecret: "shh-secret",
+        expiresAt: Date.parse("2027-09-12T00:00:00Z"),
+      });
+    });
+
+    it("accepts the secret under an alternate `secret` field — the field name is unverified", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: {
+              id: "token-1",
+              client_id: "client-1",
+              secret: "shh-secret",
+              expires_at: null,
+            },
+          }),
+        ),
+      );
+      const token = await client({ fetch: fetchMock }).createServiceToken("Homestead Monitor");
+      expect(token).toEqual({
+        id: "token-1",
+        clientId: "client-1",
+        clientSecret: "shh-secret",
+        expiresAt: null,
+      });
+    });
+
+    it("raises rather than returning an empty string when the secret is missing", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: { id: "token-1", client_id: "client-1", expires_at: null },
+          }),
+        ),
+      );
+      const error = await client({ fetch: fetchMock })
+        .createServiceToken("Homestead Monitor")
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect((error as CloudflareError).message).not.toBe("");
+    });
+
+    it("raises rather than returning an empty string when the secret is present but empty", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: {
+              id: "token-1",
+              client_id: "client-1",
+              client_secret: "",
+              expires_at: null,
+            },
+          }),
+        ),
+      );
+      const error = await client({ fetch: fetchMock })
+        .createServiceToken("Homestead Monitor")
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+    });
+
+    it("never puts the secret in a thrown error's message", async () => {
+      const fetchMock = vi.fn(async () => {
+        throw new Error("connection refused");
+      });
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .createServiceToken("Homestead Monitor")
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error.message).not.toContain("shh-secret");
+    });
+  });
+
+  describe("rotateServiceToken", () => {
+    it("posts to the rotate endpoint and returns the new secret", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("POST");
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/service_tokens/token-1/rotate`,
+        );
+        return jsonResponse(
+          envelope({
+            success: true,
+            result: {
+              client_id: "client-1",
+              client_secret: "new-secret",
+              expires_at: "2027-09-12T00:00:00Z",
+            },
+          }),
+        );
+      });
+      const rotated = await client({ fetch: fetchMock }).rotateServiceToken("token-1");
+      expect(rotated).toEqual({
+        clientId: "client-1",
+        clientSecret: "new-secret",
+        expiresAt: Date.parse("2027-09-12T00:00:00Z"),
+      });
+    });
+
+    it("raises rather than returning an empty string when the rotated secret is missing", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({ success: true, result: { client_id: "client-1", expires_at: null } }),
+        ),
+      );
+      const error = await client({ fetch: fetchMock })
+        .rotateServiceToken("token-1")
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+    });
+  });
+
+  describe("listServiceTokens", () => {
+    it("returns every token with its parsed expiry", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: [
+              { id: "token-1", name: "Homestead Monitor", expires_at: "2027-09-12T00:00:00Z" },
+              { id: "token-2", name: "other", expires_at: null },
+            ],
+          }),
+        ),
+      );
+      const tokens = await client({ fetch: fetchMock }).listServiceTokens();
+      expect(tokens).toEqual([
+        { id: "token-1", name: "Homestead Monitor", expiresAt: Date.parse("2027-09-12T00:00:00Z") },
+        { id: "token-2", name: "other", expiresAt: null },
+      ]);
+    });
+
+    it("never puts a secret in the result — the list endpoint does not return one", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: [{ id: "token-1", name: "Homestead Monitor", expires_at: null }],
+          }),
+        ),
+      );
+      const tokens = await client({ fetch: fetchMock }).listServiceTokens();
+      expect(tokens[0]).not.toHaveProperty("clientSecret");
+    });
+  });
+
+  describe("deleteServiceToken", () => {
+    // Not in the plan's original interface list — added because `ensureMonitorAccess`
+    // (Task 2) needs to compensate a service token whose paired policy creation failed,
+    // the same "compensate inline rather than leave an orphan" idiom `provision-tunnel.ts`
+    // already uses for its `register-app` step. Same shape as the other delete methods
+    // in this batch, so it costs nothing extra to reuse the one request path for it too.
+    it("succeeds on an existing token", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("DELETE");
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/service_tokens/token-1`,
+        );
+        return jsonResponse(envelope({ success: true, result: { id: "token-1" } }));
+      });
+      await expect(
+        client({ fetch: fetchMock }).deleteServiceToken("token-1"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("is idempotent: a 404 on an already-deleted token is not an error", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({ success: false, errors: [{ code: 12112, message: "not found" }] }),
+          {
+            status: 404,
+          },
+        ),
+      );
+      await expect(
+        client({ fetch: fetchMock }).deleteServiceToken("token-1"),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("createMonitorPolicy", () => {
+    it("sends decision: non_identity and the token in the include list on the request body", async () => {
+      // The binding assertion: on the REQUEST body. Anything other than `non_identity`
+      // demands a human login, which the monitor probe cannot give — and the failure mode
+      // is every external probe getting a redirect, not an obvious misconfiguration.
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const sent = JSON.parse(String(init?.body));
+        expect(sent).toEqual({
+          name: "Homestead Monitor",
+          decision: "non_identity",
+          include: [{ service_token: { token_id: "token-1" } }],
+        });
+        return jsonResponse(envelope({ success: true, result: { id: "policy-1" } }));
+      });
+      const policy = await client({ fetch: fetchMock }).createMonitorPolicy(
+        "Homestead Monitor",
+        "token-1",
+      );
+      expect(policy).toEqual({ id: "policy-1" });
+    });
+  });
 });
