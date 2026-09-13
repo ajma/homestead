@@ -602,6 +602,7 @@ describe("GET /api/apps/:id/expose", () => {
       accessAppId: string | null;
       accessAppAud: string | null;
       runningJobId: string | null;
+      driftFindings: unknown[];
     };
     expect(body).toEqual({
       exposed: true,
@@ -610,6 +611,7 @@ describe("GET /api/apps/:id/expose", () => {
       accessAppId: expect.any(String),
       accessAppAud: expect.any(String),
       runningJobId: null,
+      driftFindings: [],
     });
     await app.close();
   });

@@ -77,6 +77,11 @@ function stubFetch(opts: {
   zones?: CloudflareZone[];
   exposePost?: () => Response | Promise<Response>;
   deprovisionDelete?: () => Response | Promise<Response>;
+  reconcilePost?: () => Response | Promise<Response>;
+  /** What `GET /api/apps/:id/expose` answers AFTER a successful reconcile POST — the
+   * refetch `handleCheckDrift` triggers. Defaults to the same `exposure` fixture the rest
+   * of this stub answers with, since most tests don't care about this refetch at all. */
+  exposureAfterReconcile?: AppExposureStatus;
 }) {
   let exposure = opts.exposure ?? NOT_EXPOSED;
   const tunnel = opts.tunnel ?? NOT_PROVISIONED;
@@ -101,6 +106,11 @@ function stubFetch(opts: {
       if (opts.deprovisionDelete) return opts.deprovisionDelete();
       exposure = NOT_EXPOSED;
       return json(200, { ok: true });
+    }
+    if (url === "/api/cloudflare/reconcile" && method === "POST") {
+      if (opts.reconcilePost) return opts.reconcilePost();
+      if (opts.exposureAfterReconcile) exposure = opts.exposureAfterReconcile;
+      return json(200, { checked: 1, drifted: opts.exposureAfterReconcile ? 1 : 0 });
     }
     throw new Error(`unhandled request: ${method} ${url}`);
   });
@@ -257,6 +267,7 @@ describe("ExposurePanel", () => {
         accessAppId: "access-1",
         accessAppAud: "aud-value",
         runningJobId: null,
+        driftFindings: [],
       },
     });
     mount();
@@ -280,6 +291,7 @@ describe("ExposurePanel", () => {
         accessAppId: "access-1",
         accessAppAud: "aud-value",
         runningJobId: null,
+        driftFindings: [],
       },
     });
     mount();
@@ -306,6 +318,7 @@ describe("ExposurePanel", () => {
         accessAppId: "access-1",
         accessAppAud: "aud-value",
         runningJobId: null,
+        driftFindings: [],
       },
       deprovisionDelete: () =>
         json(500, {
@@ -332,5 +345,126 @@ describe("ExposurePanel", () => {
     await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
     expect(screen.getByText(/access-app/)).toBeTruthy();
     expect(screen.getByText(/remove it in Cloudflare by hand, then retry this call/)).toBeTruthy();
+  });
+
+  describe("drift (2F Task 6)", () => {
+    const READY_EXPOSURE: AppExposureStatus = {
+      exposed: true,
+      hostname: "jellyfin.example.com",
+      state: "ready",
+      accessAppId: "access-1",
+      accessAppAud: "aud-value",
+      runningJobId: null,
+      driftFindings: [],
+    };
+
+    it("shows no drift banner at all when the exposure is clean", async () => {
+      stubFetch({ tunnel: PROVISIONED, exposure: READY_EXPOSURE });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("jellyfin.example.com")).toBeTruthy());
+      expect(screen.queryByText(/drifted/i)).toBeNull();
+      // The trigger is still offered even when nothing is currently wrong — this is the
+      // on-demand version of a periodic check, not a repair button that only appears
+      // once something breaks.
+      expect(screen.getByRole("button", { name: "Check for drift" })).toBeTruthy();
+    });
+
+    it("shows the drift banner listing every finding when the exposure has drifted", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        exposure: {
+          ...READY_EXPOSURE,
+          state: "drifted",
+          driftFindings: [
+            {
+              kind: "ingress_rule_missing",
+              message: "The tunnel's ingress config no longer has a rule for jellyfin.example.com.",
+            },
+            {
+              kind: "dns_record_missing",
+              message: "The DNS record for jellyfin.example.com is missing.",
+            },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/has drifted/)).toBeTruthy());
+      expect(screen.getByText(/no longer has a rule/)).toBeTruthy();
+      expect(screen.getByText(/DNS record for jellyfin.example.com is missing/)).toBeTruthy();
+    });
+
+    it("gives a deleted Access application its own, more urgent banner — separate from the rest", async () => {
+      // §6's own emphasis: this is the one finding that means the hostname is routed and
+      // UNPROTECTED right now, not just recorded slightly wrong — it must read as more
+      // than one row in a plain list.
+      stubFetch({
+        tunnel: PROVISIONED,
+        exposure: {
+          ...READY_EXPOSURE,
+          state: "drifted",
+          driftFindings: [
+            {
+              kind: "access_app_deleted",
+              message:
+                "The Access application protecting jellyfin.example.com has been deleted in Cloudflare — this hostname is still routed and no longer requires sign-in.",
+            },
+            {
+              kind: "ingress_service_mismatch",
+              message: "jellyfin.example.com is routed to something else.",
+            },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/Not protected/)).toBeTruthy());
+      const urgent = screen.getByText(/Not protected/).closest('[role="alert"]');
+      expect(urgent?.textContent).toContain("no longer requires sign-in");
+      // The other finding still shows, in its own, separate, less alarming banner.
+      expect(screen.getByText(/routed to something else/)).toBeTruthy();
+      expect(screen.getByText(/has drifted from what Cloudflare reports/)).toBeTruthy();
+    });
+
+    it("Check for drift calls the reconcile route, never a Cloudflare write, and refreshes this app's own status", async () => {
+      const fetchMock = stubFetch({
+        tunnel: PROVISIONED,
+        exposure: READY_EXPOSURE,
+        exposureAfterReconcile: {
+          ...READY_EXPOSURE,
+          state: "drifted",
+          driftFindings: [{ kind: "dns_record_missing", message: "The DNS record is missing." }],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("jellyfin.example.com")).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "Check for drift" }));
+
+      await waitFor(() => expect(screen.getByText(/has drifted/)).toBeTruthy());
+      const reconcileCall = fetchMock.mock.calls.find(
+        (call) => call[0] === "/api/cloudflare/reconcile",
+      );
+      expect(reconcileCall).toBeTruthy();
+      expect((reconcileCall?.[1] as RequestInit)?.method).toBe("POST");
+    });
+
+    it("shows an inline error, and stays clickable, when the drift check itself fails", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        exposure: READY_EXPOSURE,
+        reconcilePost: () => json(500, { error: "internal" }),
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("jellyfin.example.com")).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "Check for drift" }));
+
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/Could not check/));
+      expect(
+        (screen.getByRole("button", { name: "Check for drift" }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+    });
   });
 });

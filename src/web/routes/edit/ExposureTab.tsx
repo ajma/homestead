@@ -1,3 +1,4 @@
+import type { DriftFinding } from "@shared/cloudflare.js";
 import type { AdminApp } from "@shared/dto";
 import {
   describeDeprovisionError,
@@ -8,6 +9,7 @@ import {
   useCloudflareZones,
   useDeprovisionApp,
   useExposeApp,
+  useReconcileExposures,
 } from "@web/api/cloudflare";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { JobOutput } from "@web/components/JobOutput";
@@ -47,6 +49,49 @@ const EMPTY_FORM: FormState = {
 };
 
 type ExposureApp = Pick<AdminApp, "id" | "displayName" | "systemKind">;
+
+/**
+ * §6's drift findings (2F Task 6), rendered — never auto-corrected; there is no button
+ * here that touches Cloudflare, only `ExposurePanel`'s own "Check for drift" above this.
+ * `access_app_deleted` is pulled out and shown first, in its own more strongly-styled
+ * banner: it is the one finding that means this hostname is routed and UNPROTECTED right
+ * now, not merely recorded slightly wrong, and a flat bulleted list would bury it as one
+ * row among several equally-weighted ones.
+ */
+function DriftBanner({ findings }: { findings: DriftFinding[] }) {
+  const accessAppDeleted = findings.filter((f) => f.kind === "access_app_deleted");
+  const rest = findings.filter((f) => f.kind !== "access_app_deleted");
+
+  return (
+    <div className="space-y-2">
+      {accessAppDeleted.map((finding, index) => (
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: a fixed snapshot from one reconcile run, never reordered or individually removed.
+          key={index}
+          role="alert"
+          className="space-y-1 rounded-2xl border-2 border-rose-600 bg-rose-50 p-3 text-sm text-rose-900 dark:bg-rose-950 dark:text-rose-200"
+        >
+          <p className="font-semibold">Not protected: the Access application is gone.</p>
+          <p>{finding.message}</p>
+        </div>
+      ))}
+      {rest.length > 0 && (
+        <div
+          role="alert"
+          className="space-y-1 rounded-2xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+        >
+          <p className="font-semibold">This exposure has drifted from what Cloudflare reports.</p>
+          <ul className="list-disc space-y-1 pl-5">
+            {rest.map((finding, index) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: same reasoning as above.
+              <li key={index}>{finding.message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * The edit page's exposure tab (2F Task 3) — one of eleven Cloudflare routes this phase's
@@ -91,6 +136,10 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
   // it did NOT end up exposed — the sequence failed and rolled back.
   const [lastExposeFailed, setLastExposeFailed] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+
+  const reconcileExposures = useReconcileExposures();
+  const [checkingDrift, setCheckingDrift] = useState(false);
+  const [driftCheckError, setDriftCheckError] = useState<string | null>(null);
 
   // Picks up an expose job already running when this tab mounts — someone clicked Expose
   // and reloaded the page, or another admin's tab started one — via
@@ -171,6 +220,33 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
     await deprovisionMutation.mutateAsync();
   }
 
+  /**
+   * §6: "a periodic reconcile ... flags drift ... rather than silently correcting it" —
+   * this button is the on-demand version of that periodic check (2F Task 6 wires the
+   * check and this trigger, not a background scheduler; see `reconcile.ts`'s own doc
+   * comment). It never asks Cloudflare to fix anything, only to compare — `useReconcileExposures`
+   * hits a route that only ever calls `CloudflareClient`'s read methods.
+   *
+   * Runs the SYSTEM-WIDE reconcile, not one scoped to this app alone (there is no
+   * per-app route — see that hook's own doc comment on why one broad invalidation is
+   * enough), then refetches this tab's own exposure status so a finding lands on screen
+   * immediately rather than waiting for this query's ordinary staleness to expire.
+   */
+  function handleCheckDrift() {
+    setDriftCheckError(null);
+    setCheckingDrift(true);
+    reconcileExposures().then(
+      async () => {
+        await exposureQuery.refetch();
+        setCheckingDrift(false);
+      },
+      () => {
+        setCheckingDrift(false);
+        setDriftCheckError("Could not check for drift. Try again.");
+      },
+    );
+  }
+
   if (exposureQuery.isPending || tunnelStatus.isPending) {
     return <p className="text-sm text-slate-500">Loading…</p>;
   }
@@ -208,7 +284,17 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
           </div>
         </dl>
 
-        <div>
+        {exposure.state === "drifted" && <DriftBanner findings={exposure.driftFindings} />}
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={handleCheckDrift}
+            disabled={checkingDrift}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-700"
+          >
+            {checkingDrift ? "Checking…" : "Check for drift"}
+          </button>
           <button
             type="button"
             onClick={() => setConfirmingRemove(true)}
@@ -217,6 +303,11 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
             Remove exposure
           </button>
         </div>
+        {driftCheckError && (
+          <p role="alert" className="text-sm text-red-600">
+            {driftCheckError}
+          </p>
+        )}
 
         {confirmingRemove && (
           <ConfirmDialog

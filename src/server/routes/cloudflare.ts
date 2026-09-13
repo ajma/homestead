@@ -16,6 +16,7 @@ import {
   MonitorAccessStore,
   rotateMonitorSecret,
 } from "../cloudflare/monitor-access.js";
+import { reconcileExposures } from "../cloudflare/reconcile.js";
 
 // `.trim()` before `.min(1)`: a token pasted out of the Cloudflare dashboard frequently
 // carries a trailing newline or space, invisible in a `type="password"` field. Untrimmed,
@@ -256,5 +257,38 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
       aud: resolved.aud,
       source: envConfigured ? "environment" : "database",
     } satisfies AccessConfigStatus;
+  });
+
+  /**
+   * The periodic reconcile (§6), triggered on demand rather than by a background timer —
+   * this phase wires the check and its UI, not a scheduler; see `reconcile.ts`'s own doc
+   * comment for what it actually does and, more importantly, what it never does. `cf:write`,
+   * not `cf:read`, even though every Cloudflare call this makes is a read: unlike the
+   * status routes above, this one changes local state (`exposures.state`/`lastError`) that
+   * every exposure-status read after it reflects, which is closer to Provision or Expose
+   * than to a plain status fetch.
+   */
+  app.post("/api/cloudflare/reconcile", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:write");
+    const creds = await store.get();
+    if (!creds) {
+      return reply.code(409).send({ error: "not_configured" });
+    }
+
+    const client = createCloudflareClient({
+      token: creds.token,
+      accountId: creds.accountId,
+      fetch: app.deps.fetch,
+    });
+
+    const outcomes = await reconcileExposures({ db, client });
+    const drifted = outcomes.filter((o) => o.findings.length > 0).length;
+
+    await audit(db, ctx, {
+      action: "cloudflare.reconcile_ran",
+      detail: { checked: outcomes.length, drifted },
+    });
+
+    return { checked: outcomes.length, drifted };
   });
 }

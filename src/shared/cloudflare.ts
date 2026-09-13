@@ -152,4 +152,43 @@ export type AppExposureStatus =
       accessAppId: string | null;
       accessAppAud: string | null;
       runningJobId: string | null;
+      /** What the last reconcile (2F Task 6) found wrong, if anything — always an array,
+       * empty rather than absent when `state !== "drifted"`, so a caller never has to
+       * distinguish "never checked" from "checked, nothing wrong" (`GET /api/apps/:id/expose`
+       * makes no promise about the former either way; see `reconcile.ts`'s own doc comment
+       * on which exposures get checked at all). Never present on the server's own decision
+       * to correct anything — see `DriftFinding`'s doc comment for why that property matters
+       * enough to repeat here. */
+      driftFindings: DriftFinding[];
     };
+
+/**
+ * One thing a periodic reconcile (§6, `cloudflare/reconcile.ts`) found does not match
+ * between the `exposures` row and Cloudflare's own live state. `kind` is a stable slug a
+ * caller can switch on without parsing `message` — the exposure tab uses it to give
+ * `"access_app_deleted"` a visibly more urgent treatment than the others, since a deleted
+ * Access application is the one drift that means a hostname is routed and unprotected
+ * right now, not just recorded slightly wrong. `check_failed` is not really "drift" (the
+ * comparison itself couldn't complete — a network error, most likely) but is reported
+ * through the same shape rather than swallowed, because an admin needs to know a check
+ * didn't run just as much as they need to know what one found.
+ *
+ * `message` is pre-rendered server-side, not reconstructed from `kind` in the browser —
+ * the same "server already knows enough to say the whole sentence" choice
+ * `deprovision.ts`'s own per-resource messages make, reused via `describeDeprovisionError`
+ * rather than re-derived client-side.
+ */
+export type DriftFindingKind =
+  | "dns_record_missing"
+  | "ingress_rule_missing"
+  | "ingress_service_mismatch"
+  | "access_app_deleted"
+  | "check_failed";
+
+/**
+ * §6: "flags drift in the UI rather than silently correcting it." Nothing in this type,
+ * or in anything that produces it, is a Cloudflare write — `reconcile.ts`'s own doc
+ * comment on `checkExposureDrift` is where that property is actually enforced; this type
+ * only carries what was found, never an action taken.
+ */
+export type DriftFinding = { kind: DriftFindingKind; message: string };

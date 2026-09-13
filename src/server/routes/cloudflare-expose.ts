@@ -10,6 +10,7 @@ import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { deprovision } from "../cloudflare/deprovision.js";
 import { exposeSteps } from "../cloudflare/expose.js";
 import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
+import { parseDriftFindings } from "../cloudflare/reconcile.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
 import type { Db } from "../db/client.js";
 import { exposures, jobs } from "../db/schema.js";
@@ -113,6 +114,11 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       accessAppId: exposure.accessAppId,
       accessAppAud: exposure.accessAppAud,
       runningJobId,
+      // 2F Task 6: `[]` whenever `state !== "drifted"` in practice (`reconcileExposures`
+      // clears `lastError` back to `null` the moment a re-check finds nothing wrong — see
+      // its own doc comment), but read through `parseDriftFindings` regardless rather than
+      // trusted raw, the same defensive-JSON-column treatment `reconcile.ts` documents.
+      driftFindings: parseDriftFindings(exposure.lastError),
     } satisfies AppExposureStatus;
   });
 

@@ -464,3 +464,29 @@ export function useAccessConfig() {
     queryFn: () => apiFetch<AccessConfigStatus>("/api/cloudflare/access"),
   });
 }
+
+/**
+ * `POST /api/cloudflare/reconcile` (2F Task 6) — triggers the periodic reconcile on
+ * demand and returns only a count, never per-exposure detail: the one caller of this
+ * (`ExposureTab`) already has its own `GET /api/apps/:id/expose` for that, via
+ * `useAppExposure`. A plain function, not `useMutation`, for the same class of reason
+ * `useProvisionTunnel` avoids it — this changes real local state (every exposure's
+ * `state`/`lastError`) that other queries need to see immediately, and the caller drives
+ * its own `checking` state the way every other consequential action in this codebase does.
+ *
+ * Invalidates every `["cloudflare", "expose", ...]` leaf, not just the current app's — a
+ * system-wide reconcile can change ANY exposure's drift status, and `appExposureKey`'s own
+ * doc comment already establishes that TanStack's `invalidateQueries` matches by prefix,
+ * which is exactly what makes one broad invalidation here reach all of them.
+ */
+export function useReconcileExposures() {
+  const queryClient = useQueryClient();
+  return async function reconcileExposures(): Promise<{ checked: number; drifted: number }> {
+    const result = await apiFetch<{ checked: number; drifted: number }>(
+      "/api/cloudflare/reconcile",
+      { method: "POST" },
+    );
+    queryClient.invalidateQueries({ queryKey: ["cloudflare", "expose"] });
+    return result;
+  };
+}

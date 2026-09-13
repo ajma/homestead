@@ -633,4 +633,202 @@ describe("cloudflare routes", () => {
       await app.close();
     });
   });
+
+  describe("POST /api/cloudflare/reconcile", () => {
+    /** Answers the three read calls `reconcile.ts` makes — DNS record lookup, tunnel
+     * config, Access application lookup — plus `/zones`, needed only because
+     * `withConfiguredAdmin` verifies credentials through it before this route ever runs.
+     * `dnsFound`/`accessFound`/`ingressMatches` default to "everything matches, no
+     * drift"; a test overrides only the one it means to break, the same shape
+     * `reconcile.test.ts`'s own `fakeClient` uses. */
+    function reconcileFetch(
+      opts: {
+        dnsFound?: boolean;
+        accessFound?: boolean;
+        ingressMatches?: boolean;
+        expectedContent?: string;
+        ingressService?: string;
+      } = {},
+    ): { fetch: typeof fetch; calls: Array<{ url: string; method: string }> } {
+      const calls: Array<{ url: string; method: string }> = [];
+      const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, method: init?.method ?? "GET" });
+        // Checked before the plain `/zones` match below: `findDnsRecord`'s own URL is
+        // `.../zones/{zoneId}/dns_records`, which also contains the substring "/zones" —
+        // an earlier version of this double matched THAT on the zones branch first,
+        // handing `findDnsRecord` a zones envelope shaped just enough like a DNS record
+        // list to parse (an `id` field is all `dnsRecordsResultSchema` strictly requires)
+        // and silently reporting every exposure as drifted. Order matters here.
+        if (url.includes("/dns_records")) {
+          const found = opts.dnsFound ?? true;
+          return jsonResponse({
+            success: true,
+            errors: [],
+            result: found
+              ? [
+                  {
+                    id: "dns-1",
+                    type: "CNAME",
+                    proxied: true,
+                    content: opts.expectedContent ?? "tunnel-1.cfargotunnel.com",
+                  },
+                ]
+              : [],
+          });
+        }
+        if (url.endsWith("/configurations")) {
+          const matches = opts.ingressMatches ?? true;
+          return jsonResponse({
+            success: true,
+            errors: [],
+            result: {
+              config: {
+                ingress: [
+                  {
+                    hostname: "jellyfin.example.com",
+                    service: matches
+                      ? (opts.ingressService ?? "http://localhost:8096")
+                      : "http://localhost:9999",
+                  },
+                ],
+              },
+            },
+          });
+        }
+        if (url.endsWith("/access/apps")) {
+          const found = opts.accessFound ?? true;
+          return jsonResponse({
+            success: true,
+            errors: [],
+            result: found ? [{ id: "access-1", aud: "aud-1", domain: "jellyfin.example.com" }] : [],
+          });
+        }
+        // Only `withConfiguredAdmin`'s own credential-verification PUT reaches this —
+        // checked last, and deliberately loose (`includes`, not `endsWith`) is fine here
+        // precisely because the three more specific branches above already claimed every
+        // URL that could also contain this substring.
+        if (url.includes("/zones")) {
+          return jsonResponse(successEnvelope([{ id: "z1", name: "example.com" }]));
+        }
+        throw new Error(`reconcileFetch: unexpected URL ${url}`);
+      }) as unknown as typeof fetch;
+      return { fetch: fetchFn, calls };
+    }
+
+    async function seedReadyExposure(app: Awaited<ReturnType<typeof buildTestApp>>) {
+      const appId = ulid();
+      await app.deps.db.insert(apps).values({
+        id: appId,
+        hostId: LOCAL_HOST_ID,
+        slug: "jellyfin",
+        displayName: "Jellyfin",
+        directory: "jellyfin",
+        composeFile: "compose.yaml",
+        projectName: "jellyfin",
+      });
+      await app.deps.db.insert(exposures).values({
+        id: ulid(),
+        appId,
+        hostname: "jellyfin.example.com",
+        zoneId: "z1",
+        tunnelId: "tunnel-1",
+        ingressService: "http://localhost:8096",
+        accessAppId: "access-1",
+        accessAppAud: "aud-1",
+        state: "ready",
+      });
+      return appId;
+    }
+
+    it("404s — well, 409s — when credentials aren't configured", async () => {
+      const { app, cookie } = await withAdmin();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/reconcile",
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: "not_configured" });
+      await app.close();
+    });
+
+    it("reports nothing checked and nothing drifted when there are no exposures", async () => {
+      const { fetch } = reconcileFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/reconcile",
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ checked: 0, drifted: 0 });
+      await app.close();
+    });
+
+    it("flags a drifted exposure, records an audit entry, and never calls a Cloudflare write endpoint", async () => {
+      const { fetch, calls } = reconcileFetch({ dnsFound: false });
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+      await seedReadyExposure(app);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/reconcile",
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ checked: 1, drifted: 1 });
+
+      const [exposureRow] = await app.deps.db.select().from(exposures);
+      expect(exposureRow?.state).toBe("drifted");
+      expect(exposureRow?.lastError).toContain("dns_record_missing");
+
+      const entries = await app.deps.db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "cloudflare.reconcile_ran"));
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.detail).toEqual({ checked: 1, drifted: 1 });
+
+      // Every call this run made to Cloudflare was a read (GET), never a PUT, POST, or
+      // DELETE — the binding check for §6's "flags, never corrects" rule at the HTTP
+      // layer, mirroring `reconcile.test.ts`'s own client-level version of the same
+      // assertion. `calls[0]` is `/zones` (`withConfiguredAdmin`'s own credential
+      // verification, a GET too) — included rather than filtered out, since it is still a
+      // real call this test can assert never mutated anything.
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.method).toBe("GET");
+      }
+    });
+
+    it("reports a clean exposure as checked but not drifted", async () => {
+      const { fetch } = reconcileFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+      await seedReadyExposure(app);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/reconcile",
+        headers: { cookie },
+      });
+      expect(res.json()).toEqual({ checked: 1, drifted: 0 });
+
+      const [exposureRow] = await app.deps.db.select().from(exposures);
+      expect(exposureRow?.state).toBe("ready");
+      expect(exposureRow?.lastError).toBeNull();
+    });
+
+    it("gives a viewer 403", async () => {
+      const { app, cookie: adminCookie } = await withAdmin();
+      const { cookie } = await createViewer(app, adminCookie);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/reconcile",
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+  });
 });
