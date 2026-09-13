@@ -126,6 +126,15 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/api/cloudflare/credentials", async (request, reply) => {
     const ctx = requireCapability(request, "cf:write");
     await store.clear();
+    // Whole-branch review, Critical: a new account's policies are a different account's
+    // policies. Before this call existed, `AccessPoliciesStore.clear()` had no production
+    // caller at all — removing credentials here left the old account's `humanPolicyId`
+    // recorded, and saving a different account's credentials afterward made every user
+    // delete/disable sync against a policy id the new token could never reach, permanently
+    // (`routes/users.ts`'s `accessSync()` treats a recorded id as "still configured", it
+    // never re-checks it). Clearing both stores together means "no credentials" and "no
+    // recorded Access setup" can never drift apart.
+    await monitorStore.clear();
     await audit(db, ctx, { action: "cloudflare.credentials_deleted" });
     return reply.code(204).send();
   });

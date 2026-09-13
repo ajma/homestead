@@ -358,6 +358,41 @@ describe("cloudflare routes", () => {
     await app.close();
   });
 
+  // Whole-branch review, Critical (half 1). Before this fix, `AccessPoliciesStore.clear()`
+  // had no production caller at all — deleting credentials cleared only
+  // `CloudflareCredentialStore`, leaving a recorded `humanPolicyId` behind. Saving a
+  // DIFFERENT Cloudflare account's credentials afterward left that stale id addressed
+  // under the new account, and `routes/users.ts`'s `accessSync()` treated a recorded id as
+  // permanently configured — every disable and delete then failed against a policy the new
+  // account's token could never reach. Reproduced here without a second real account: the
+  // observable bug is that the OLD policy id survives a credentials delete at all.
+  it("clears the recorded Access policies when credentials are deleted, not only the credentials themselves", async () => {
+    const { app, cookie } = await withAdmin();
+    const { AccessPoliciesStore } = await import("@server/cloudflare/access-policies");
+    const accessPoliciesStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
+    await accessPoliciesStore.set(
+      {
+        tokenId: "monitor-token",
+        clientId: "monitor-client",
+        monitorPolicyId: "monitor-policy",
+        humanPolicyId: "human-policy-stale",
+        expiresAt: null,
+      },
+      "monitor-secret",
+    );
+    expect(await accessPoliciesStore.get()).not.toBeNull();
+
+    await app.inject({
+      method: "DELETE",
+      url: "/api/cloudflare/credentials",
+      headers: { cookie },
+    });
+
+    expect(await accessPoliciesStore.get()).toBeNull();
+    expect(await accessPoliciesStore.getMonitorOnly()).toBeNull();
+    await app.close();
+  });
+
   describe("monitor access", () => {
     it("GET returns not configured before anything has been created", async () => {
       const { app, cookie } = await withAdmin();

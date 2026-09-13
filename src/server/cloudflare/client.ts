@@ -375,8 +375,12 @@ export type CloudflareClient = {
    * clear a policy down to zero includes. */
   updateEmailPolicy(policyId: string, name: string, emails: string[]): Promise<void>;
   /** `null` for a missing policy rather than throwing — same contract as `findAccessApp`/
-   * `findDnsRecord`. Both the reconcile check and `ensureAccessPolicies`'s dedup (Task 2)
-   * need to ask "does this policy still exist" without a 404 aborting the caller. */
+   * `findDnsRecord`. Its real caller is `routes/users.ts`'s `syncBeforeRemoval` — the
+   * whole-branch review's Critical fix: a disable or delete must find out whether the
+   * recorded human policy still exists before blocking on it, since a 404 there means
+   * "already admits nobody" rather than "still protecting something, but unreachable".
+   * (Neither the reconcile check nor `ensureAccessPolicies`'s dedup calls this — an earlier
+   * version of this comment claimed both did, before either was written to.) */
   getPolicy(policyId: string): Promise<{ id: string; name: string } | null>;
 };
 

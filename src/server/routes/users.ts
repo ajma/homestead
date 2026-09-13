@@ -3,7 +3,7 @@ import { and, eq, exists, isNotNull, isNull, ne, notExists, or, sql } from "driz
 import { alias } from "drizzle-orm/sqlite-core";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { audit } from "../audit.js";
+import { type AuditContext, audit } from "../audit.js";
 import { requireAdmin, requireAuth } from "../auth/context.js";
 import { AccessPoliciesStore } from "../cloudflare/access-policies.js";
 import { type CloudflareClient, createCloudflareClient } from "../cloudflare/client.js";
@@ -81,6 +81,68 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       fetch: app.deps.fetch,
     });
     return { client, policyId: accessPolicies.humanPolicyId };
+  }
+
+  /**
+   * The blocking half of Ruling 2 (disable/delete must succeed in Cloudflare before the
+   * local write), with the Critical fix from the whole-branch review: a recorded
+   * `humanPolicyId` that Cloudflare no longer has must never be permanent. Before this
+   * existed, `syncAccessUsersExcluding` throwing on a stale id turned into an unconditional
+   * 502 on every future disable and delete — `store.get()` still reported "configured"
+   * (nothing ever re-checked or cleared the id), so "Retry setup" was a no-op and the only
+   * recovery was editing SQLite by hand. Reachable two ordinary ways: saving a different
+   * Cloudflare account's credentials over an old one (closed by `clear()` now also clearing
+   * this store — see `routes/cloudflare.ts`), or an admin deleting the policy itself in
+   * Cloudflare's dashboard — which this half exists for.
+   *
+   * `getPolicy` (`client.ts`) — added this phase for exactly this question and never
+   * called until now — answers "does the policy still exist" without a failed PUT's status
+   * code standing in for it. `null` means Cloudflare has already stopped enforcing this
+   * policy: it admits nobody, so there is nothing this removal can be blocked on, and
+   * continuing to treat the stale id as configured only reproduces the lockout. Rather than
+   * silently degrading, this clears `humanPolicyId` (not the whole store — the token and
+   * monitor policy are still perfectly good) and audits the fact, which also repairs "Retry
+   * setup": `AccessPoliciesStore.get()` now reports incomplete, so `ensureAccessPolicies`
+   * takes the same `completeHumanPolicy` path a Phase-2 upgrade does, recreating only the
+   * missing policy. Any OTHER failure (network, auth, rate limit, a genuine 5xx) still
+   * blocks the removal — those don't tell us the policy is gone, only that this call
+   * couldn't find out either way, and Ruling 2 says fail closed on that uncertainty.
+   *
+   * `null` return means "proceed with the local write"; anything else is the 502 body the
+   * caller should send instead.
+   */
+  async function syncBeforeRemoval(
+    sync: { client: CloudflareClient; policyId: string },
+    ctx: AuditContext,
+    excludeUserId: string,
+  ): Promise<{ error: string; fault: CloudflareError["fault"] } | null> {
+    let policy: { id: string; name: string } | null;
+    try {
+      policy = await sync.client.getPolicy(sync.policyId);
+    } catch (error) {
+      return { error: "cloudflare_error", fault: faultOf(error) };
+    }
+
+    if (policy === null) {
+      await accessPoliciesStore.clearHumanPolicy();
+      await audit(db, ctx, {
+        action: "cloudflare.access_policy_missing",
+        detail: { policyId: sync.policyId },
+      });
+      return null;
+    }
+
+    try {
+      await syncAccessUsersExcluding({
+        db,
+        client: sync.client,
+        policyId: sync.policyId,
+        excludeUserId,
+      });
+      return null;
+    } catch (error) {
+      return { error: "cloudflare_error", fault: faultOf(error) };
+    }
   }
 
   /**
@@ -328,16 +390,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 
         const sync = await accessSync();
         if (sync) {
-          try {
-            await syncAccessUsersExcluding({
-              db,
-              client: sync.client,
-              policyId: sync.policyId,
-              excludeUserId: id,
-            });
-          } catch (error) {
-            return reply.code(502).send({ error: "cloudflare_error", fault: faultOf(error) });
-          }
+          const failure = await syncBeforeRemoval(sync, ctx, id);
+          if (failure) return reply.code(502).send(failure);
         }
       }
     }
@@ -468,16 +522,8 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 
       const sync = await accessSync();
       if (sync) {
-        try {
-          await syncAccessUsersExcluding({
-            db,
-            client: sync.client,
-            policyId: sync.policyId,
-            excludeUserId: id,
-          });
-        } catch (error) {
-          return reply.code(502).send({ error: "cloudflare_error", fault: faultOf(error) });
-        }
+        const failure = await syncBeforeRemoval(sync, ctx, id);
+        if (failure) return reply.code(502).send(failure);
       }
     }
 

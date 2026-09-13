@@ -202,7 +202,16 @@ export class AccessPoliciesStore {
 
   /** Not transactional, the same reasoning as `TunnelStore.clear()`: a partial clear
    * still gets `get()` to `null` (any one of the required settings missing is already
-   * "absent"), which is the outcome this method promises. */
+   * "absent"), which is the outcome this method promises.
+   *
+   * Called when credentials themselves are removed (`DELETE /api/cloudflare/credentials`)
+   * — a new account's policies are a different account's policies, so a token id, both
+   * policy ids and the monitor secret all become meaningless the moment the credentials
+   * that could manage them are gone. Whole-branch review, Critical: before this call
+   * existed here, `AccessPoliciesStore.clear()` had no production caller at all, so a
+   * credentials swap left a stale `humanPolicyId` recorded under a new account —
+   * `accessSync()` (`routes/users.ts`) treated that as "configured", and every delete or
+   * disable failed against a policy id the new account's token could never reach. */
   async clear(): Promise<void> {
     await this.secrets.delete(MONITOR_CLIENT_SECRET_KEY);
     await this.deleteSetting(TOKEN_ID_KEY);
@@ -210,6 +219,30 @@ export class AccessPoliciesStore {
     await this.deleteSetting(MONITOR_POLICY_ID_KEY);
     await this.deleteSetting(HUMAN_POLICY_ID_KEY);
     await this.deleteSetting(EXPIRES_AT_KEY);
+  }
+
+  /**
+   * Clears ONLY the human policy id — the token, monitor policy id, secret and expiry are
+   * untouched. For the other half of the Critical fix: Cloudflare reporting the recorded
+   * human policy itself gone (a 404 the caller confirmed with `CloudflareClient.getPolicy`)
+   * while the monitor half is still perfectly good — the account was never touched, only
+   * the one policy was deleted or the credentials were swapped without also clearing this
+   * store (see `clear()`'s own doc comment for that half).
+   *
+   * `get()` requires `humanPolicyId` (Phase 3A), so this alone makes it report "not fully
+   * configured" again — which is what lets `ensureAccessPolicies` treat the installation as
+   * eligible for repair rather than as already complete. `getMonitorOnly()` stays satisfied
+   * by the token/monitor-policy/expiry trio this leaves in place, so the very next
+   * `ensureAccessPolicies` call (an admin clicking "Retry setup", or a future credentials
+   * save) takes the exact `completeHumanPolicy` upgrade path Phase 2 installs already use —
+   * recreating only the missing human policy, never rotating the token every external
+   * probe currently authenticates with. Before this method existed, a caller's only way to
+   * make `get()` report "incomplete" again was the full `clear()` above, which would have
+   * thrown away that still-good monitor token and policy for a failure that has nothing to
+   * do with them.
+   */
+  async clearHumanPolicy(): Promise<void> {
+    await this.deleteSetting(HUMAN_POLICY_ID_KEY);
   }
 
   private async readSetting(key: string): Promise<string | null> {

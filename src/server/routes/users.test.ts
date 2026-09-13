@@ -24,11 +24,21 @@ function jsonResponse(body: unknown, status = 200): Response {
  * assert on the exact email list `syncAccessUsers`/`syncAccessUsersExcluding` sent, and
  * `fetchCalls` counts EVERY request regardless of path — the one assertion the "Access not
  * configured" tests need is that this stays at zero.
+ *
+ * Also answers `GET .../access/policies/:id` (`CloudflareClient.getPolicy`) — the whole-
+ * branch review's Critical fix has `syncBeforeRemoval` (`routes/users.ts`) check the human
+ * policy still exists before blocking a disable or delete on it, so every test that
+ * reaches that code path now issues this GET first, not just the PUT. Answers success by
+ * default; `setPolicyMissing(true)` makes it answer 404 instead, simulating the policy
+ * having been deleted out from under a recorded id, and `setFailing(true)` (pre-existing)
+ * makes BOTH the GET and the PUT fail, the same "Cloudflare unreachable" shape either
+ * verb would see from a genuine outage.
  */
 async function configureAccess(app: FastifyInstance): Promise<{
   updateEmailPolicyCalls: Array<{ policyId: string; emails: string[] }>;
   fetchCalls: number;
   setFailing: (failing: boolean) => void;
+  setPolicyMissing: (missing: boolean) => void;
 }> {
   const credentialStore = new CloudflareCredentialStore(app.deps.db, app.deps.secrets);
   await credentialStore.save({ token: TOKEN, accountId: ACCOUNT_ID }, 1_700_000_000);
@@ -48,6 +58,7 @@ async function configureAccess(app: FastifyInstance): Promise<{
   const updateEmailPolicyCalls: Array<{ policyId: string; emails: string[] }> = [];
   let fetchCalls = 0;
   let failing = false;
+  let policyMissing = false;
   const accountPrefix = `/client/v4/accounts/${ACCOUNT_ID}`;
 
   app.deps.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -55,11 +66,42 @@ async function configureAccess(app: FastifyInstance): Promise<{
     const url = new URL(typeof input === "string" ? input : input.toString());
     const method = (init?.method ?? "GET").toUpperCase();
     const match = url.pathname.match(new RegExp(`^${accountPrefix}/access/policies/([^/]+)$`));
+
+    if (match && method === "GET") {
+      if (failing) {
+        return jsonResponse(
+          { success: false, errors: [{ code: 1000, message: "cloudflare unreachable" }] },
+          400,
+        );
+      }
+      if (policyMissing) {
+        return jsonResponse(
+          { success: false, errors: [{ code: 1003, message: "policy not found" }] },
+          404,
+        );
+      }
+      return jsonResponse({
+        success: true,
+        errors: [],
+        result: { id: match[1], name: "Homestead Access" },
+      });
+    }
+
     if (match && method === "PUT") {
       if (failing) {
         return jsonResponse(
           { success: false, errors: [{ code: 1000, message: "cloudflare unreachable" }] },
           400,
+        );
+      }
+      // Real Cloudflare would 404 a `PUT` to a policy id that no longer exists just as
+      // readily as it would a `GET` — kept in sync with the GET branch above so a test
+      // (or a mutation) that skips straight to the PUT still sees the same "gone" answer
+      // the GET would have given it first.
+      if (policyMissing) {
+        return jsonResponse(
+          { success: false, errors: [{ code: 1003, message: "policy not found" }] },
+          404,
         );
       }
       const body = JSON.parse(String(init?.body ?? "{}")) as {
@@ -81,6 +123,9 @@ async function configureAccess(app: FastifyInstance): Promise<{
     },
     setFailing: (value: boolean) => {
       failing = value;
+    },
+    setPolicyMissing: (value: boolean) => {
+      policyMissing = value;
     },
   };
 }
@@ -499,14 +544,54 @@ describe("user management", () => {
 describe("Cloudflare Access sync (Task 3)", () => {
   // The most likely-to-be-got-wrong case, and the most damaging one (Task 3's own brief):
   // an installation that never configured Cloudflare Access must delete, disable and
-  // create users exactly as before, calling Cloudflare not at all. `buildTestApp`'s default
-  // `app.deps.fetch` THROWS on any call — see `test-helpers.ts` — so these tests need no
-  // explicit assertion beyond "the request succeeds": a Cloudflare call that happened at
-  // all would have thrown and turned the response into a 500, not the status asserted below.
+  // create users exactly as before, calling Cloudflare not at all.
+  //
+  // F2 (whole-branch review, Important): this used to rely on `buildTestApp`'s default
+  // `app.deps.fetch` THROWING on any call, on the reasoning that a Cloudflare call which
+  // happened at all would turn the response into a 500 instead of the status asserted
+  // below. That reasoning is sound for disable and delete, which AWAIT the sync and let a
+  // throw propagate — but false for create, and for the same reason false for re-enable
+  // and for `/api/setup/admin`'s own best-effort attempt: all three call
+  // `.catch(() => {})` around the sync (Ruling 2 covers removal specifically; adding
+  // access is never allowed to fail an otherwise-successful mutation), so a Cloudflare
+  // call that happened on one of those paths would throw, get silently discarded, and the
+  // response would stay exactly the one asserted below. Measured: forcing `accessSync()`
+  // to return a live client made "create works normally" stay green while its disable and
+  // delete siblings correctly failed. `countFetchCalls` below installs its own counting
+  // fetch and asserts zero calls directly, which catches a stray call on every path
+  // regardless of whether that path awaits the throw or swallows it.
   describe("Access not configured — zero Cloudflare calls", () => {
+    /**
+     * Installs a counting `app.deps.fetch` WITHOUT configuring any Cloudflare credentials
+     * or Access policies — genuinely unconfigured, so `accessSync()` returns `null` before
+     * any client is ever built and this fetch should never run at all. Counting, rather
+     * than throwing-and-hoping the throw surfaces, is what makes the assertion genuine on
+     * every path below, including the ones that swallow it — see this `describe` block's
+     * own comment.
+     */
+    function countFetchCalls(testApp: FastifyInstance): { calls: () => number } {
+      let calls = 0;
+      testApp.deps.fetch = (async () => {
+        calls++;
+        throw new Error("cloudflare fetch should not be called — Access is not configured");
+      }) as unknown as typeof fetch;
+      return { calls: () => calls };
+    }
+
+    it("bootstrapping the first admin makes no Cloudflare call", async () => {
+      const app = await buildTestApp();
+      const { calls } = countFetchCalls(app);
+
+      await signUpAdmin(app);
+
+      expect(calls()).toBe(0);
+      await app.close();
+    });
+
     it("create works normally", async () => {
       const app = await buildTestApp();
       const { cookie } = await signUpAdmin(app);
+      const { calls } = countFetchCalls(app);
 
       const res = await app.inject({
         method: "POST",
@@ -522,6 +607,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
       });
 
       expect(res.statusCode).toBe(201);
+      expect(calls()).toBe(0);
       await app.close();
     });
 
@@ -540,6 +626,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
           scopeAllApps: true,
         },
       });
+      const { calls } = countFetchCalls(app);
 
       const res = await app.inject({
         method: "PATCH",
@@ -549,6 +636,42 @@ describe("Cloudflare Access sync (Task 3)", () => {
       });
 
       expect(res.statusCode).toBe(200);
+      expect(calls()).toBe(0);
+      await app.close();
+    });
+
+    it("re-enabling a user works normally", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      await app.inject({
+        method: "PATCH",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+      const { calls } = countFetchCalls(app);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+        payload: { disabled: false },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(calls()).toBe(0);
       await app.close();
     });
 
@@ -567,6 +690,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
           scopeAllApps: true,
         },
       });
+      const { calls } = countFetchCalls(app);
 
       const res = await app.inject({
         method: "DELETE",
@@ -575,6 +699,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
       });
 
       expect(res.statusCode).toBe(204);
+      expect(calls()).toBe(0);
       await app.close();
     });
   });
@@ -886,6 +1011,143 @@ describe("Cloudflare Access sync (Task 3)", () => {
       expect(res.statusCode).toBe(204);
       // Already excluded from the policy — no email to remove, so no call was made.
       expect(fetchCalls).toBe(callsBeforeDelete);
+      await app.close();
+    });
+  });
+
+  // F3 (whole-branch review, Important): both routes check `last_admin` before syncing to
+  // Cloudflare, and the code comments explain why — a sole admin removing themselves must
+  // never be stripped from the Access policy only to have the local removal itself refused
+  // afterward, which would leave them locally intact but shut out of every exposed app.
+  // Measured: moving DELETE's fast path to AFTER the sync broke no test in this file —
+  // every existing last-admin test runs unconfigured, and every Access-configured test
+  // targets a viewer. This test configures Access AND attempts to remove the sole admin,
+  // pinning both the response and the fact that Cloudflare was never touched — the ordering
+  // itself, not just the status code a reordering happens to still produce.
+  describe("Access configured — the last admin (F3)", () => {
+    it("refuses to delete the sole admin without ever calling Cloudflare", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const me = await app.inject({ method: "GET", url: "/api/me", headers: { cookie } });
+      const { updateEmailPolicyCalls, fetchCalls } = await configureAccess(app);
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${me.json().id}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "last_admin" });
+      expect(updateEmailPolicyCalls).toHaveLength(0);
+      expect(fetchCalls).toBe(0);
+      await app.close();
+    });
+
+    it("refuses to disable the sole admin without ever calling Cloudflare", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const me = await app.inject({ method: "GET", url: "/api/me", headers: { cookie } });
+      const { updateEmailPolicyCalls, fetchCalls } = await configureAccess(app);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${me.json().id}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "last_admin" });
+      expect(updateEmailPolicyCalls).toHaveLength(0);
+      expect(fetchCalls).toBe(0);
+      await app.close();
+    });
+  });
+
+  // Critical (whole-branch review). `accessSync()` treats a recorded `humanPolicyId` as
+  // permanently valid — nothing ever re-checked or cleared it. Measured: credentials for a
+  // new account plus a stale policy id, with Cloudflare answering 404 on the policy, made
+  // BOTH `DELETE /api/users/:id` and `PATCH {disabled: true}` return 502 PERMANENTLY, with
+  // the user surviving — and "Retry setup" could not fix it, because `AccessPoliciesStore
+  // .get()` still looked complete. The fix: `syncBeforeRemoval` (`routes/users.ts`) checks
+  // `getPolicy` first; a 404 means the policy already admits nobody, so it clears just
+  // `humanPolicyId` (leaving the still-good monitor token and policy alone), audits the
+  // fact, and lets the mutation proceed rather than blocking on a policy that cannot be
+  // un-deleted by refusing local writes.
+  describe("Access configured — the recorded human policy is gone (Critical fix)", () => {
+    it("does not permanently block deleting a user, and repairs Retry Setup", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setPolicyMissing } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      setPolicyMissing(true);
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(204);
+      const { users } = await import("../db/schema.js");
+      const [row] = await app.deps.db.select().from(users).where(eq(users.id, viewerId));
+      expect(row).toBeUndefined();
+
+      // Retry Setup is meaningful again: only the human policy id was cleared, so `get()`
+      // reports incomplete while the monitor token and its policy — what every external
+      // probe authenticates with — are untouched.
+      const accessPoliciesStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
+      expect(await accessPoliciesStore.get()).toBeNull();
+      expect(await accessPoliciesStore.getMonitorOnly()).not.toBeNull();
+      await app.close();
+    });
+
+    it("does not permanently block disabling a user", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setPolicyMissing } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      setPolicyMissing(true);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const { users } = await import("../db/schema.js");
+      const [row] = await app.deps.db.select().from(users).where(eq(users.id, viewerId));
+      expect(row?.disabledAt).not.toBeNull();
+
+      const accessPoliciesStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
+      expect(await accessPoliciesStore.get()).toBeNull();
       await app.close();
     });
   });
