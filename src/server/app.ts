@@ -1,7 +1,7 @@
 import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
-import { eq } from "drizzle-orm";
-import Fastify, { type FastifyInstance } from "fastify";
+import { eq, sql } from "drizzle-orm";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { ZodError } from "zod";
 import type { AppLock } from "./apps/app-lock.js";
 import type { ComposeConfigCache } from "./apps/compose-config.js";
@@ -112,6 +112,25 @@ function accessJwksFetcher(fetchImpl: typeof fetch, teamDomain: string): JwksFet
     if (!res.ok) throw new Error(`Failed to fetch Access JWKS: ${res.status}`);
     return (await res.json()) as { keys: import("jose").JWK[] };
   };
+}
+
+/**
+ * True when the connection's immediate TCP peer — not `request.ip` — is one of
+ * `config.trustedProxies`.
+ *
+ * Deliberately `request.socket.remoteAddress`, not `request.ip`. `request.ip` is what
+ * `trustProxy` (registered above) resolves the address TO once it decides to believe
+ * forwarded headers — for genuine tunnel traffic that is typically the original
+ * visitor's own address, which is never in `trustedProxies`. `request.socket` is the
+ * raw, unresolved peer Fastify actually accepted the connection from, exactly the fact
+ * `trustProxy` itself consults to decide whether to trust that hop at all. cloudflared
+ * runs with `network_mode: host` and connects over loopback (`trustedProxies`'
+ * default), so a request that reaches Homestead with cloudflared nowhere in the chain —
+ * a LAN client hitting the port directly — has its OWN address as the raw peer, never
+ * the loopback address the tunnel connects from.
+ */
+function requestArrivedViaTrustedProxy(request: FastifyRequest, trustedProxies: string[]): boolean {
+  return trustedProxies.includes(request.socket.remoteAddress ?? "");
 }
 
 export type AppDeps = {
@@ -225,6 +244,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
    * Every other guard here fails CLOSED, silently, rather than throwing or partially
    * authenticating:
    *
+   * - The request did not arrive via a trusted proxy (`requestArrivedViaTrustedProxy`,
+   *   above): see that function's own doc comment. §6/§9 draw the line at cloudflared —
+   *   "externally exposed apps remain reachable on the LAN without passing through
+   *   Access" — which makes an Access assertion presented directly on the LAN
+   *   meaningless: Cloudflare never evaluated its policy for this request, so revoking
+   *   someone from the Access application would not take effect until the bearer token
+   *   they copied out of their browser happens to expire. Rejecting it here, before the
+   *   header is even read, keeps this indistinguishable from "no header at all".
    * - `resolveAccessSettings` unresolved (2E Task 2 — nothing marks an app
    *   `systemKind: "self"` yet, and no environment override either) means Access is not
    *   configured for this deployment. The header is ignored ENTIRELY, not partially
@@ -233,16 +260,22 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
    * - `verifyAccessJwt` throwing (bad signature, wrong issuer, expired, OR — the check
    *   that matters most, see that function's own doc comment — an `aud` naming a
    *   DIFFERENT Access application in the same Cloudflare account) rejects the same way.
-   * - No Homestead user with the asserted email: NOT auto-provisioned. Cloudflare
-   *   Access admits whoever its own policy admits; deciding who becomes a Homestead
-   *   user is the admin's call, made through user management, not implied by a JWT
-   *   claim this code did not choose to trust with that decision.
+   *   The reason is logged at `debug` (never the token) so a mistyped team domain is
+   *   diagnosable instead of silent.
+   * - No Homestead user with the asserted email (compared case-insensitively, since the
+   *   IdP behind Access is not this database and has no reason to agree on case): NOT
+   *   auto-provisioned. Cloudflare Access admits whoever its own policy admits;
+   *   deciding who becomes a Homestead user is the admin's call, made through user
+   *   management, not implied by a JWT claim this code did not choose to trust with
+   *   that decision.
    * - A disabled user's row: rejected, the same as the password hook just above (Phase
    *   1C's carry-forward: a stale `AuthContext` must not keep a disabled user's streams
    *   open, and that applies identically to a freshly-verified Access assertion).
    */
   app.addHook("preHandler", async (request) => {
     if (request.auth) return;
+
+    if (!requestArrivedViaTrustedProxy(request, deps.config.trustedProxies)) return;
 
     const header = request.headers[ACCESS_JWT_HEADER];
     const token = Array.isArray(header) ? header[0] : header;
@@ -259,11 +292,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         aud: settings.aud,
         fetchJwks: accessJwksFetcher(deps.fetch, settings.teamDomain),
       }));
-    } catch {
+    } catch (err) {
+      // `debug`, not `warn`: an unauthenticated caller controls how often this fires,
+      // and `warn` would let them drive log volume. The error alone (never the token)
+      // is enough to tell "wrong audience" from "team domain does not resolve" from
+      // "expired" without exposing anything secret.
+      request.log.debug({ err }, "access assertion rejected");
       return;
     }
 
-    const [row] = await deps.db.select().from(users).where(eq(users.email, email));
+    const [row] = await deps.db
+      .select()
+      .from(users)
+      .where(sql`lower(${users.email}) = lower(${email})`);
     if (!row || row.disabledAt !== null) return;
 
     request.auth = await authContextFrom(deps.db, row, "access");
