@@ -1,10 +1,4 @@
-import {
-  clearJwksCache,
-  injectJwksCache,
-  isAccessEnabled,
-  verifyAccessJwt,
-} from "@server/auth/access-plugin";
-import { loadConfig } from "@server/config";
+import { clearJwksCache, injectJwksCache, verifyAccessJwt } from "@server/auth/access-plugin";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -228,25 +222,8 @@ describe("JWKS refetch is not an amplification vector", () => {
   });
 });
 
-const base = {
-  HOMESTEAD_SECRET_KEY: Buffer.alloc(32, 1).toString("base64"),
-  HOMESTEAD_BASE_URL: "http://localhost:3000",
-};
-
-describe("dormancy", () => {
-  it("is disabled with no Access configuration", () => {
-    expect(isAccessEnabled(loadConfig({ ...base }))).toBe(false);
-  });
-
-  it("is disabled with only one of the two values", () => {
-    expect(isAccessEnabled(loadConfig({ ...base, HOMESTEAD_ACCESS_AUD: "x" }))).toBe(false);
-  });
-
-  it("is enabled with both", () => {
-    expect(
-      isAccessEnabled(
-        loadConfig({ ...base, HOMESTEAD_ACCESS_AUD: "x", HOMESTEAD_ACCESS_TEAM_DOMAIN: "acme" }),
-      ),
-    ).toBe(true);
-  });
-});
+// `isAccessEnabled` was removed (2E fix-wave, Minor 5): it answered "does the
+// environment supply both values", which stopped being what "Access is enabled" means
+// the moment Task 2 added a database source. `config.test.ts` already covers the
+// environment-only computation (`Config.accessEnabled`) this used to expose; nothing
+// else depended on the wrapper.

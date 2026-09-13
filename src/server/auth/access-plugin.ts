@@ -1,5 +1,4 @@
 import { createLocalJWKSet, decodeProtectedHeader, type JWK, jwtVerify } from "jose";
-import type { Config } from "../config.js";
 
 export type JwksFetcher = () => Promise<{ keys: JWK[] }>;
 
@@ -23,8 +22,19 @@ export function clearJwksCache(): void {
   jwksCache.clear();
 }
 
-/** Exported for testing only - injects a cache entry with a specific timestamp */
+/**
+ * Exported for testing only - injects a cache entry with a specific timestamp.
+ *
+ * Guarded rather than merely labelled: this writes arbitrary keys into the same
+ * module-global cache `verifyAccessJwt` trusts for every request, under whatever team
+ * domain the caller names. Phase 2E is what makes that cache a live authentication
+ * trust store rather than dormant code, so an unguarded write path into it is worth
+ * closing even though nothing production-reachable calls it today.
+ */
 export function injectJwksCache(teamDomain: string, keys: JWK[], fetchedAt: number): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("injectJwksCache is a test-only affordance and must not run outside tests");
+  }
   jwksCache.set(teamDomain, { keys, fetchedAt });
 }
 
@@ -100,9 +110,4 @@ export async function verifyAccessJwt(opts: {
     throw new Error("Access token carries no email claim");
   }
   return { email };
-}
-
-/** True only when both configuration values are present. */
-export function isAccessEnabled(config: Config): boolean {
-  return config.accessEnabled;
 }
