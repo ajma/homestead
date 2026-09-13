@@ -248,8 +248,14 @@ export class AccessPoliciesStore {
  * discovered later as a surprise — the upgrade path, when someone decides the gap is worth
  * closing, is per-app Access policies (one reusable `allow` policy per exposed app, scoped
  * to that app's own viewers) in place of this single shared one.
+ *
+ * Exported (Task 3) for `sync-access-users.ts`, the ONLY other caller — the point of
+ * `createAccessPolicies` seeding the policy once at creation time and `syncAccessUsers`
+ * keeping it current afterward is that they read the identical set, computed the identical
+ * way, so a user added the instant after `ensureAccessPolicies` finishes is neither missing
+ * from the first read nor handled by some almost-but-not-quite-identical second query.
  */
-async function enabledUserEmails(db: Db): Promise<string[]> {
+export async function enabledUserEmails(db: Db): Promise<string[]> {
   const rows = await db.select({ email: users.email }).from(users).where(isNull(users.disabledAt));
   return rows.map((row) => row.email);
 }

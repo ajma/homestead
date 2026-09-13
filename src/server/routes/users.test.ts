@@ -1,6 +1,89 @@
+import { AccessPoliciesStore } from "@server/cloudflare/access-policies";
+import { CloudflareCredentialStore } from "@server/cloudflare/credentials";
 import { buildTestApp, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
+import type { FastifyInstance } from "fastify";
 import { describe, expect, it } from "vitest";
+
+const TOKEN = "cfat_super-secret-token-value";
+const ACCOUNT_ID = "acct-123";
+const HUMAN_POLICY_ID = "human-policy-1";
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * Configures a test app as though `ensureAccessPolicies` (Task 2) already ran — credentials
+ * saved, both policies recorded — without going through the real HTTP setup flow, the same
+ * shortcut `cloudflare-expose.test.ts`'s `withFullSetup` takes. `updateEmailPolicyCalls`
+ * records every `PUT .../access/policies/:id` this test's fake fetch answers, so a test can
+ * assert on the exact email list `syncAccessUsers`/`syncAccessUsersExcluding` sent, and
+ * `fetchCalls` counts EVERY request regardless of path — the one assertion the "Access not
+ * configured" tests need is that this stays at zero.
+ */
+async function configureAccess(app: FastifyInstance): Promise<{
+  updateEmailPolicyCalls: Array<{ policyId: string; emails: string[] }>;
+  fetchCalls: number;
+  setFailing: (failing: boolean) => void;
+}> {
+  const credentialStore = new CloudflareCredentialStore(app.deps.db, app.deps.secrets);
+  await credentialStore.save({ token: TOKEN, accountId: ACCOUNT_ID }, 1_700_000_000);
+
+  const accessPoliciesStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
+  await accessPoliciesStore.set(
+    {
+      tokenId: "monitor-token",
+      clientId: "monitor-client",
+      monitorPolicyId: "monitor-policy",
+      humanPolicyId: HUMAN_POLICY_ID,
+      expiresAt: null,
+    },
+    "monitor-secret",
+  );
+
+  const updateEmailPolicyCalls: Array<{ policyId: string; emails: string[] }> = [];
+  let fetchCalls = 0;
+  let failing = false;
+  const accountPrefix = `/client/v4/accounts/${ACCOUNT_ID}`;
+
+  app.deps.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    fetchCalls++;
+    const url = new URL(typeof input === "string" ? input : input.toString());
+    const method = (init?.method ?? "GET").toUpperCase();
+    const match = url.pathname.match(new RegExp(`^${accountPrefix}/access/policies/([^/]+)$`));
+    if (match && method === "PUT") {
+      if (failing) {
+        return jsonResponse(
+          { success: false, errors: [{ code: 1000, message: "cloudflare unreachable" }] },
+          400,
+        );
+      }
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        include: Array<{ email: { email: string } }>;
+      };
+      updateEmailPolicyCalls.push({
+        policyId: match[1] ?? "",
+        emails: body.include.map((entry) => entry.email.email),
+      });
+      return jsonResponse({ success: true, errors: [], result: null });
+    }
+    throw new Error(`users.test.ts: unexpected fetch ${method} ${url.pathname}`);
+  }) as unknown as typeof fetch;
+
+  return {
+    updateEmailPolicyCalls,
+    get fetchCalls() {
+      return fetchCalls;
+    },
+    setFailing: (value: boolean) => {
+      failing = value;
+    },
+  };
+}
 
 describe("bootstrap", () => {
   it("reports that setup is needed when there are no users", async () => {
@@ -410,6 +493,401 @@ describe("user management", () => {
     expect(notFound.statusCode).toBe(404);
 
     await app.close();
+  });
+});
+
+describe("Cloudflare Access sync (Task 3)", () => {
+  // The most likely-to-be-got-wrong case, and the most damaging one (Task 3's own brief):
+  // an installation that never configured Cloudflare Access must delete, disable and
+  // create users exactly as before, calling Cloudflare not at all. `buildTestApp`'s default
+  // `app.deps.fetch` THROWS on any call — see `test-helpers.ts` — so these tests need no
+  // explicit assertion beyond "the request succeeds": a Cloudflare call that happened at
+  // all would have thrown and turned the response into a 500, not the status asserted below.
+  describe("Access not configured — zero Cloudflare calls", () => {
+    it("create works normally", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+      await app.close();
+    });
+
+    it("patch (disable) works normally", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      await app.close();
+    });
+
+    it("delete works normally", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(204);
+      await app.close();
+    });
+  });
+
+  describe("Access configured — ordinary cases", () => {
+    it("creating a user adds their email to the human policy", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { updateEmailPolicyCalls } = await configureAccess(app);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+      expect(updateEmailPolicyCalls).toHaveLength(1);
+      expect(updateEmailPolicyCalls[0]?.policyId).toBe(HUMAN_POLICY_ID);
+      expect(updateEmailPolicyCalls[0]?.emails.sort()).toEqual(
+        ["admin@example.com", "viewer@example.com"].sort(),
+      );
+      await app.close();
+    });
+
+    it("deleting a user removes their email from the human policy", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { updateEmailPolicyCalls } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      updateEmailPolicyCalls.length = 0;
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(204);
+      expect(updateEmailPolicyCalls).toHaveLength(1);
+      expect(updateEmailPolicyCalls[0]?.emails).toEqual(["admin@example.com"]);
+      await app.close();
+    });
+
+    it("disabling a user removes their email from the human policy", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { updateEmailPolicyCalls } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      updateEmailPolicyCalls.length = 0;
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(updateEmailPolicyCalls).toHaveLength(1);
+      expect(updateEmailPolicyCalls[0]?.emails).toEqual(["admin@example.com"]);
+      await app.close();
+    });
+
+    it("re-enabling a user restores their email to the human policy", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { updateEmailPolicyCalls } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      await app.inject({
+        method: "PATCH",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+      updateEmailPolicyCalls.length = 0;
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${created.json().id}`,
+        headers: { cookie },
+        payload: { disabled: false },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(updateEmailPolicyCalls).toHaveLength(1);
+      expect(updateEmailPolicyCalls[0]?.emails.sort()).toEqual(
+        ["admin@example.com", "viewer@example.com"].sort(),
+      );
+      await app.close();
+    });
+
+    it("bootstrapping the first admin adds their email", async () => {
+      const app = await buildTestApp();
+      // Access cannot really be configured before an admin exists (every Cloudflare route
+      // requires one) — this proves the call site is at least harmless/defensive: it
+      // resolves to "not configured" via `accessSync()` and never reaches `fetch` at all,
+      // since `configureAccess` runs AFTER bootstrap, the only order possible here.
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/admin",
+        payload: { email: "admin@example.com", password: "correct-horse-battery", name: "Admin" },
+      });
+      expect(res.statusCode).toBe(201);
+      await app.close();
+    });
+  });
+
+  describe("Access configured — Cloudflare unreachable", () => {
+    it("a delete fails and the user still exists", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setFailing } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      setFailing(true);
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(502);
+      const { users } = await import("../db/schema.js");
+      const [row] = await app.deps.db.select().from(users).where(eq(users.id, viewerId));
+      expect(row).toBeDefined();
+      await app.close();
+    });
+
+    it("a disable fails and the user is still enabled", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setFailing } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      setFailing(true);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+
+      expect(res.statusCode).toBe(502);
+      const { users } = await import("../db/schema.js");
+      const [row] = await app.deps.db.select().from(users).where(eq(users.id, viewerId));
+      expect(row?.disabledAt).toBeNull();
+      await app.close();
+    });
+
+    it("adding a user still succeeds even when Cloudflare is unreachable — Ruling 2 covers removal, not addition", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setFailing } = await configureAccess(app);
+      setFailing(true);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+      await app.close();
+    });
+
+    it("re-enabling a user still succeeds even when Cloudflare is unreachable", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setFailing } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      await app.inject({
+        method: "PATCH",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+      setFailing(true);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+        payload: { disabled: false },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const { users } = await import("../db/schema.js");
+      const [row] = await app.deps.db.select().from(users).where(eq(users.id, viewerId));
+      expect(row?.disabledAt).toBeNull();
+      await app.close();
+    });
+
+    it("deleting an already-disabled user needs no Cloudflare call and always succeeds", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setFailing, fetchCalls } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      await app.inject({
+        method: "PATCH",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+        payload: { disabled: true },
+      });
+      setFailing(true);
+      const callsBeforeDelete = fetchCalls;
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(204);
+      // Already excluded from the policy — no email to remove, so no call was made.
+      expect(fetchCalls).toBe(callsBeforeDelete);
+      await app.close();
+    });
   });
 });
 
