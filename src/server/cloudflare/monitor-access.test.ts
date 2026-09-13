@@ -117,6 +117,47 @@ describe("MonitorAccessStore", () => {
     await expect(store.get()).resolves.toEqual(record);
   });
 
+  it("getCredentials() returns null when unset", async () => {
+    const { store } = await makeStore();
+    await expect(store.getCredentials()).resolves.toBeNull();
+  });
+
+  it("getCredentials() returns the client id and secret together", async () => {
+    const { store } = await makeStore();
+    await store.set(
+      { tokenId: "token-1", clientId: "client-1", policyId: "policy-1", expiresAt: null },
+      "the-secret",
+    );
+    await expect(store.getCredentials()).resolves.toEqual({
+      clientId: "client-1",
+      clientSecret: "the-secret",
+    });
+  });
+
+  it("getCredentials() reflects a rotation on the very next read", async () => {
+    // The whole reason this method reads live rather than returning a cached value: a
+    // caller holding onto a stale secret past a rotation would keep authenticating with
+    // a credential Cloudflare no longer accepts.
+    const { store } = await makeStore();
+    await store.set(
+      { tokenId: "token-1", clientId: "client-1", policyId: "policy-1", expiresAt: null },
+      "old-secret",
+    );
+    await expect(store.getCredentials()).resolves.toEqual({
+      clientId: "client-1",
+      clientSecret: "old-secret",
+    });
+
+    await store.set(
+      { tokenId: "token-1", clientId: "client-2", policyId: "policy-1", expiresAt: null },
+      "new-secret",
+    );
+    await expect(store.getCredentials()).resolves.toEqual({
+      clientId: "client-2",
+      clientSecret: "new-secret",
+    });
+  });
+
   it("clear() removes the record and the secret", async () => {
     const { store, secrets } = await makeStore();
     await store.set(
@@ -126,6 +167,7 @@ describe("MonitorAccessStore", () => {
     await store.clear();
     await expect(store.get()).resolves.toBeNull();
     await expect(secrets.get(MONITOR_CLIENT_SECRET_KEY)).resolves.toBeNull();
+    await expect(store.getCredentials()).resolves.toBeNull();
   });
 });
 
