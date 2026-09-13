@@ -9,7 +9,7 @@ import { AccessPoliciesStore } from "../cloudflare/access-policies.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { deprovision } from "../cloudflare/deprovision.js";
-import { exposeSteps } from "../cloudflare/expose.js";
+import { exposeSteps, internalServiceUrl } from "../cloudflare/expose.js";
 import { parseDriftFindings } from "../cloudflare/reconcile.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
 import type { Db } from "../db/client.js";
@@ -22,29 +22,19 @@ import { loadApp } from "./apps.js";
  * outside that filter. */
 export const EXPOSE_KIND = "cloudflare_expose";
 
-/** `cloudflared` fetches this exact URL — spec §6's networking section:
- * `http://localhost:<published-port>`, dialled from inside the `cloudflared` container
- * (`network_mode: host`, so it can reach anything on the NAS or its LAN — §6), NOT the
- * Homestead server itself. This is not the same SSRF exposure `routes/probes.ts`'s
- * `targetSchema` guards against (the server fetching a probe target), even though it
- * reuses the same http(s)-only shape: the value here is written into the tunnel's
- * ingress array, which is why `ssh://`, `unix:`, `tcp://` and the special `http_status:`
- * services are still worth rejecting through this route — an admin has no other reason to
- * write one of those here, and cloudflared's own ingress config already has room for
- * behaviour this project does not want to expose through a plain string field. */
-const ingressServiceSchema = z.string().refine((value) => {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}, "ingressService must be an http or https URL");
-
 const exposeBody = z.object({
   hostname: z.string().trim().min(1),
   zoneId: z.string().trim().min(1),
-  ingressService: ingressServiceSchema,
+  /** The compose service `cloudflared` should route to — Task 4: this route no longer
+   * accepts a raw URL from the admin (an `ingressService` string, free to typo into a port
+   * nothing serves). Both this and `port` below are validated against the app's OWN
+   * resolved compose config before anything is provisioned — see the route body. */
+  serviceName: z.string().trim().min(1),
+  /** The published port on `serviceName` — validated to be one `serviceName` actually
+   * publishes (`ResolvedService.publishedPorts`, `compose-config.ts`) before this route
+   * constructs `http://localhost:<port>` (`internalServiceUrl`) and hands it to
+   * `exposeSteps`. */
+  port: z.number().int().positive(),
   /** The admin-chosen Access policy demanding a human identity — spec §6. Homestead does
    * not create or manage this policy; it is referenced by id, the same way the shared
    * monitor policy is (see `expose.ts`'s `ExposeDeps.humanPolicyId`). */
@@ -78,7 +68,7 @@ async function runningExposeJobId(db: Db, appId: string): Promise<string | null>
 }
 
 export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void> {
-  const { db, secrets, stepJobs, tunnelConfigLock } = app.deps;
+  const { db, secrets, stepJobs, tunnelConfigLock, composeConfig } = app.deps;
   const credentialStore = new CloudflareCredentialStore(db, secrets);
   const tunnelStore = new TunnelStore(db, secrets);
   const monitorStore = new AccessPoliciesStore(db, secrets);
@@ -175,6 +165,32 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       return reply.code(409).send({ error: "not_configured" });
     }
 
+    // Task 4: validate `serviceName`/`port` against the app's OWN resolved compose file —
+    // checked here, after every state prerequisite above (tunnel, monitor, credentials)
+    // but before anything is provisioned, so a typo'd service or port never gets as far as
+    // constructing a URL and splicing it into the tunnel's ingress config. Placed last
+    // among the checks (rather than first) so the routes' many existing state-prerequisite
+    // tests never need a working compose fixture just to reach an unrelated 409 — this is
+    // the one check specific to the request BODY's own content, not to whether exposing is
+    // possible at all right now.
+    const composeTarget = { directory: appRow.directory, composeFile: appRow.composeFile };
+    const resolved = await composeConfig.resolve(composeTarget);
+    if (!resolved.valid) {
+      return reply.code(422).send({ error: "compose_invalid", message: resolved.message });
+    }
+    const service = resolved.resolved.services.find((s) => s.name === body.serviceName);
+    if (!service) {
+      return reply.code(422).send({ error: "service_not_found" });
+    }
+    if (service.publishedPorts.length === 0) {
+      // Say so clearly rather than constructing a URL to nowhere — a service that
+      // publishes no ports cannot be exposed, whatever port number the request asked for.
+      return reply.code(422).send({ error: "service_publishes_no_ports" });
+    }
+    if (!service.publishedPorts.includes(body.port)) {
+      return reply.code(422).send({ error: "port_not_published" });
+    }
+
     const client = createCloudflareClient({
       token: credentials.token,
       accountId: credentials.accountId,
@@ -189,7 +205,7 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       hostname: body.hostname,
       zoneId: body.zoneId,
       tunnelId: tunnel.tunnelId,
-      ingressService: body.ingressService,
+      internalUrl: internalServiceUrl(body.port),
       humanPolicyId: body.policyId,
       monitorPolicyId: monitorAccess.monitorPolicyId,
       // `undefined` for every non-self app — see `ExposeDeps.selfAccessTeamDomain`'s own

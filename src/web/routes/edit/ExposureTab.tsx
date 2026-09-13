@@ -17,25 +17,11 @@ import type { EditAppContext } from "@web/routes/EditApp";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
 
-/**
- * Client-side mirror of `cloudflare-expose.ts`'s `ingressServiceSchema` — same rule
- * (only `http:`/`https:` is fetchable) as `ProbesPanel`'s own `isHttpUrl`, duplicated
- * for the same reason that one is: this exists purely for immediate form feedback, and
- * the server's copy stays the one actually enforced.
- */
-function isHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
 type FormState = {
   hostname: string;
   zoneId: string;
-  ingressService: string;
+  serviceName: string;
+  port: string;
   policyId: string;
   teamDomain: string;
 };
@@ -43,7 +29,8 @@ type FormState = {
 const EMPTY_FORM: FormState = {
   hostname: "",
   zoneId: "",
-  ingressService: "",
+  serviceName: "",
+  port: "",
   policyId: "",
   teamDomain: "",
 };
@@ -178,9 +165,14 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
       setFormError("Choose a zone.");
       return;
     }
-    const ingressService = form.ingressService.trim();
-    if (!isHttpUrl(ingressService)) {
-      setFormError("Enter a valid http:// or https:// URL for the internal service.");
+    const serviceName = form.serviceName.trim();
+    if (serviceName === "") {
+      setFormError("Enter the compose service to route to.");
+      return;
+    }
+    const port = Number(form.port);
+    if (!Number.isInteger(port) || port <= 0) {
+      setFormError("Enter the published port as a positive whole number.");
       return;
     }
     const policyId = form.policyId.trim();
@@ -194,7 +186,7 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
       return;
     }
 
-    const body: ExposeAppBody = { hostname, zoneId: form.zoneId, ingressService, policyId };
+    const body: ExposeAppBody = { hostname, zoneId: form.zoneId, serviceName, port, policyId };
     if (isSelf) body.teamDomain = teamDomain;
 
     // Drops the previous attempt's transcript, if any — a retry's own output should not
@@ -434,15 +426,26 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
 
           <label className="flex flex-col gap-1 text-sm">
             <span className="font-medium text-slate-900 dark:text-slate-100">
-              Internal service URL
+              Compose service name
             </span>
             <input
               type="text"
-              value={form.ingressService}
+              value={form.serviceName}
               onChange={(event) =>
-                setForm((prev) => ({ ...prev, ingressService: event.target.value }))
+                setForm((prev) => ({ ...prev, serviceName: event.target.value }))
               }
-              placeholder="http://localhost:8096"
+              placeholder="app"
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-900 dark:text-slate-100">Published port</span>
+            <input
+              type="number"
+              value={form.port}
+              onChange={(event) => setForm((prev) => ({ ...prev, port: event.target.value }))}
+              placeholder="8096"
               className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
             />
           </label>

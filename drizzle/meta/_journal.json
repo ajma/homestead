@@ -36,6 +36,13 @@
       "when": 1789288975751,
       "tag": "0004_curvy_mandrill",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789326829813,
+      "tag": "0005_high_gunslinger",
+      "breakpoints": true
     }
   ]
 }

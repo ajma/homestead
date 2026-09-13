@@ -183,7 +183,7 @@ function baseDeps(
     hostname,
     zoneId: "zone-1",
     tunnelId: "tunnel-1",
-    ingressService: "http://localhost:8096",
+    internalUrl: "http://localhost:8096",
     humanPolicyId: "human-policy-1",
     monitorPolicyId: "monitor-policy-1",
   };
@@ -238,7 +238,7 @@ function dbFailingNthInsert(db: Db, n: number): Db {
 }
 
 describe("exposeSteps — happy path", () => {
-  it("splices ingress, creates DNS and Access app, and creates the probe", async () => {
+  it("splices ingress, creates DNS and Access app, and creates both probes", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const { client, ingress } = fakeClient();
@@ -261,14 +261,24 @@ describe("exposeSteps — happy path", () => {
       ingressRuleCreatedByUs: true,
       dnsRecordCreatedByUs: true,
       accessAppCreatedByUs: true,
+      probeCreatedByUs: true,
+      probeInternalCreatedByUs: true,
       state: "ready",
     });
     expect(row?.dnsRecordId).toBeDefined();
     expect(row?.accessAppId).toBeDefined();
     expect(row?.accessAppAud).toBeDefined();
+    expect(row?.probeId).toBeDefined();
+    expect(row?.probeInternalId).toBeDefined();
 
-    const [probe] = await db.select().from(probes).where(eq(probes.appId, appId));
-    expect(probe).toMatchObject({ kind: "http_external", target: "https://jellyfin.example.com" });
+    const probeRows = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRows).toHaveLength(2);
+    expect(probeRows).toContainEqual(
+      expect.objectContaining({ kind: "http_external", target: "https://jellyfin.example.com" }),
+    );
+    expect(probeRows).toContainEqual(
+      expect.objectContaining({ kind: "http_internal", target: "http://localhost:8096" }),
+    );
   });
 
   it("passes the human policy AND the shared monitor policy to createAccessApp (F5)", async () => {
@@ -311,11 +321,86 @@ describe("exposeSteps — happy path", () => {
     const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
 
     expect(outcome.ok).toBe(true);
+    // The pre-existing http_external probe is adopted, not duplicated — but a fresh
+    // http_internal probe is still created, since none existed for this app at all.
+    const probeRows = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRows).toHaveLength(2);
+    const external = probeRows.find((p) => p.kind === "http_external");
+    const internal = probeRows.find((p) => p.kind === "http_internal");
+    expect(external?.id).toBe(usersOwnProbeId);
+    expect(internal?.target).toBe("http://localhost:8096");
+    const row = await exposureFor(db, appId);
+    expect(row).toMatchObject({
+      probeId: usersOwnProbeId,
+      probeCreatedByUs: false,
+      probeInternalId: internal?.id,
+      probeInternalCreatedByUs: true,
+    });
+  });
+
+  it("adopts an app's own pre-existing http_internal probe instead of duplicating it", async () => {
+    // The internal-probe mirror of the http_external adoption test above — Task 4 gives
+    // the internal probe the identical adoption treatment.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_internal",
+      target: "http://localhost:8096",
+    });
+    const { client } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(true);
+    const probeRows = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRows).toHaveLength(2);
+    const internal = probeRows.find((p) => p.kind === "http_internal");
+    expect(internal?.id).toBe(usersOwnProbeId);
+    const row = await exposureFor(db, appId);
+    expect(row).toMatchObject({
+      probeInternalId: usersOwnProbeId,
+      probeInternalCreatedByUs: false,
+    });
+  });
+
+  it("refuses to adopt an existing http_internal probe that targets a different URL — 2F's ruling, followed for consistency", async () => {
+    // The internal-probe mirror of Defect 2 below: an app that already has its own
+    // http_internal check pointed elsewhere must not be adopted silently, and the whole
+    // run must unwind (2C's rollback discipline) rather than leave a partially-created
+    // exposure with only the external probe watching it.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_internal",
+      target: "http://localhost:9999",
+      label: "my own internal check",
+    });
+    const { client, ingress, dnsRecords, accessApps } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toBeInstanceOf(ProbeTargetConflictError);
+      expect(String(outcome.error)).toContain("http://localhost:9999");
+    }
+    // Nothing this run created survives, including the http_external probe it would
+    // otherwise have created in the SAME transaction as the internal conflict.
+    expect(ingress()).toEqual([{ service: "http_status:404" }]);
+    expect(dnsRecords.has("jellyfin.example.com")).toBe(false);
+    expect(accessApps.has("jellyfin.example.com")).toBe(false);
+    expect(await exposureFor(db, appId)).toBeUndefined();
     const probeRows = await db.select().from(probes).where(eq(probes.appId, appId));
     expect(probeRows).toHaveLength(1);
-    expect(probeRows[0]?.id).toBe(usersOwnProbeId);
-    const row = await exposureFor(db, appId);
-    expect(row).toMatchObject({ probeId: usersOwnProbeId, probeCreatedByUs: false });
+    expect(probeRows[0]).toMatchObject({ id: usersOwnProbeId, target: "http://localhost:9999" });
   });
 
   it("refuses to adopt an existing http_external probe that targets a different URL (Defect 2)", async () => {
@@ -606,7 +691,7 @@ describe("exposeSteps — create-probe (structurally unreachable through a full 
   // succeeded (no rollback), and a failing `run` means `undo` is skipped for the failing
   // step itself (step-sequence.ts, rule 1). Same situation `provision-tunnel.ts`'s
   // `compose-up` is in, tested the same way: directly, against the step object.
-  it("creates the probe, and its own undo removes it", async () => {
+  it("creates both probes, and its own undo removes both", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const { client } = fakeClient();
@@ -620,13 +705,48 @@ describe("exposeSteps — create-probe (structurally unreachable through a full 
     await steps[3]?.run(ctx);
 
     expect(ctx.probeId).toBeDefined();
-    const [before] = await db.select().from(probes).where(eq(probes.appId, appId));
-    expect(before).toBeDefined();
+    expect(ctx.probeInternalId).toBeDefined();
+    const before = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(before).toHaveLength(2);
 
     await steps[3]?.undo?.(ctx);
 
-    const [after] = await db.select().from(probes).where(eq(probes.appId, appId));
-    expect(after).toBeUndefined();
+    const after = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(after).toHaveLength(0);
+  });
+
+  it("undo removes only the probe THIS run created when the other was adopted", async () => {
+    // The two probes are independent, gated separately — the internal-probe mirror of
+    // every other "adoption survives a rollback" test in this file. Pre-seeds the
+    // app's OWN http_internal probe (adopted, `probeInternalCreatedByUs: false`), so
+    // `undo` must remove only the http_external probe this run created and leave the
+    // adopted internal one untouched.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_internal",
+      target: "http://localhost:8096",
+    });
+    const { client } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+    const steps = exposeSteps(deps);
+    const ctx: ExposeCtx = {};
+
+    await steps[0]?.run(ctx);
+    await steps[1]?.run(ctx);
+    await steps[2]?.run(ctx);
+    await steps[3]?.run(ctx);
+
+    expect(ctx.probeInternalCreatedByUs).toBe(false);
+    expect(ctx.probeCreatedByUs).toBe(true);
+
+    await steps[3]?.undo?.(ctx);
+
+    const remaining = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(remaining.map((p) => p.id)).toEqual([usersOwnProbeId]);
   });
 });
 

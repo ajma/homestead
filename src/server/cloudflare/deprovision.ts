@@ -22,7 +22,12 @@ export type DeprovisionDeps = {
 
 export type ExposureRow = typeof exposures.$inferSelect;
 
-export type DeprovisionResource = "probe" | "access-app" | "dns-record" | "ingress-rule";
+export type DeprovisionResource =
+  | "probe-external"
+  | "probe-internal"
+  | "access-app"
+  | "dns-record"
+  | "ingress-rule";
 
 export type DeprovisionOutcome =
   | { ok: true }
@@ -101,15 +106,17 @@ async function isIngressRuleLive(
  *    resource that failed to delete keeps its flag `true`, so calling this again neither
  *    re-deletes a resource already gone (the flag is now `false`, skipped outright) nor
  *    silently gives up on the one that is not (the flag is still `true`, retried).
- * 4. **The probe is deleted by the id `create-probe` recorded, never by `(appId, kind)`.**
- *    2D's whole-branch review (F1) measured the old behaviour: an admin's own
- *    `http_external` probe on the same app — created any time through
+ * 4. **Each probe is deleted by the id `create-probe` recorded for IT, never by
+ *    `(appId, kind)`.** 2D's whole-branch review (F1) measured the old behaviour: an
+ *    admin's own `http_external` probe on the same app — created any time through
  *    `routes/probes.ts`, entirely independent of exposure — matches the same
  *    `(appId, "http_external")` pair Homestead's own probe does, and a kind-only match
  *    deleted BOTH, taking the user's own check history with it. `probeId` is the fourth
  *    adopted-resource case, gated by `probeCreatedByUs` the same way the three
- *    Cloudflare-side resources are. A row created before this column existed has
- *    `probeId: null` — nothing here is safe to delete by kind, so it is left alone,
+ *    Cloudflare-side resources are; `probeInternalId`/`probeInternalCreatedByUs` (Task 4)
+ *    is the fifth, gated and deleted exactly the same way, independently — one may be
+ *    adopted while the other was created by this run. A row created before either column
+ *    existed has it `null` — nothing here is safe to delete by kind, so it is left alone,
  *    exactly like any other resource whose ownership cannot be established.
  *
  * **The ingress rule never restores an adopted rule's original content.** `expose.ts`'s
@@ -170,11 +177,14 @@ export async function deprovision(
 ): Promise<DeprovisionOutcome> {
   const failures: Array<{ resource: DeprovisionResource; error: unknown }> = [];
 
-  // 1. The probe — reverses `create-probe`, the last step `exposeSteps` runs. Gated on
-  // `probeCreatedByUs` and deleted by the recorded `probeId`, never by `(appId, kind)` —
-  // see this function's own doc comment, invariant 4. An adopted probe (the admin's own)
-  // is left alone, exactly like an adopted DNS record, Access application, or ingress
-  // rule.
+  // 1. The two probes — reverse `create-probe`, the last step `exposeSteps` runs. Each is
+  // gated on its OWN `*CreatedByUs` flag and deleted by ITS OWN recorded id, never by
+  // `(appId, kind)` — see this function's own doc comment, invariant 4. An adopted probe
+  // (the admin's own) is left alone, exactly like an adopted DNS record, Access
+  // application, or ingress rule. The two are independent: one may be adopted while the
+  // other was created by this run, so each gets its own try/catch rather than sharing one
+  // — a failure removing the external probe must not stop the internal one from being
+  // removed (or vice versa).
   if (exposure.probeCreatedByUs && exposure.probeId) {
     try {
       await retryOnBusy(() =>
@@ -187,7 +197,26 @@ export async function deprovision(
           .where(eq(exposures.id, exposure.id)),
       );
     } catch (error) {
-      failures.push({ resource: "probe", error });
+      failures.push({ resource: "probe-external", error });
+    }
+  }
+
+  // Task 4's sibling to the block above, for the `http_internal` probe — the internal
+  // probe now carries the exact same by-id-not-by-kind exposure the external one does
+  // (2D's whole-branch review, F1), so it gets the identical treatment.
+  if (exposure.probeInternalCreatedByUs && exposure.probeInternalId) {
+    try {
+      await retryOnBusy(() =>
+        deps.db.delete(probes).where(eq(probes.id, exposure.probeInternalId as string)),
+      );
+      await retryOnBusy(() =>
+        deps.db
+          .update(exposures)
+          .set({ probeInternalCreatedByUs: false })
+          .where(eq(exposures.id, exposure.id)),
+      );
+    } catch (error) {
+      failures.push({ resource: "probe-internal", error });
     }
   }
 

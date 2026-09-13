@@ -170,9 +170,9 @@ async function seedApp(db: Db, slug: string): Promise<string> {
   return id;
 }
 
-/** Inserts a fully "ready" exposure row plus the probe `create-probe` would have made,
- * with the exposure's `probeId` recorded exactly the way `create-probe` records it —
- * every flag defaults to `true` (everything created by Homestead), overridable per
+/** Inserts a fully "ready" exposure row plus the two probes `create-probe` would have
+ * made — `probeId`/`probeInternalId` recorded exactly the way `create-probe` records
+ * them — every flag defaults to `true` (everything created by Homestead), overridable per
  * test. */
 async function seedExposure(
   db: Db,
@@ -181,12 +181,11 @@ async function seedExposure(
 ): Promise<ExposureRow> {
   const id = ulid();
   const probeId = ulid();
-  await db.insert(probes).values({
-    id: probeId,
-    appId,
-    kind: "http_external",
-    target: `https://${HOSTNAME}`,
-  });
+  const probeInternalId = ulid();
+  await db.insert(probes).values([
+    { id: probeId, appId, kind: "http_external", target: `https://${HOSTNAME}` },
+    { id: probeInternalId, appId, kind: "http_internal", target: "http://localhost:8096" },
+  ]);
   await db.insert(exposures).values({
     id,
     appId,
@@ -202,6 +201,8 @@ async function seedExposure(
     ingressRuleCreatedByUs: true,
     probeId,
     probeCreatedByUs: true,
+    probeInternalId,
+    probeInternalCreatedByUs: true,
     state: "ready",
     ...overrides,
   });
@@ -219,7 +220,7 @@ function baseDeps(
 }
 
 describe("deprovision — happy path", () => {
-  it("removes all four resources and deletes the exposures row", async () => {
+  it("removes all five resources and deletes the exposures row", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const { client, ingress, dnsRecords, accessApps } = fakeClient();
@@ -353,20 +354,74 @@ describe("deprovision — every *CreatedByUs: false resource is left alone", () 
     expect(remaining.map((p) => p.id)).toEqual([usersOwnProbeId]);
   });
 
-  it("leaves any probe alone when the exposure predates the probeId column", async () => {
-    // A row created before this migration has `probeId: null` — nothing here is safe to
-    // delete by kind (that's exactly the F1 defect), so a pre-migration exposure simply
-    // leaves whatever probe rows exist on the app untouched rather than guessing.
+  it("leaves any probe alone when the exposure predates the probeId/probeInternalId columns", async () => {
+    // A row created before either migration has both ids `null` — nothing here is safe
+    // to delete by kind (that's exactly the F1 defect), so a pre-migration exposure
+    // simply leaves whatever probe rows exist on the app untouched rather than guessing.
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const { client } = fakeClient();
-    const exposure = await seedExposure(db, appId, { probeId: null, probeCreatedByUs: false });
+    const exposure = await seedExposure(db, appId, {
+      probeId: null,
+      probeCreatedByUs: false,
+      probeInternalId: null,
+      probeInternalCreatedByUs: false,
+    });
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(true);
+    // Both probes `seedExposure` created still exist — the exposure row itself carries
+    // no id for either, so neither is safe to touch.
+    const remaining = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(remaining).toHaveLength(2);
+  });
+
+  it("leaves the internal probe alone when only probeInternalId predates the migration, while still removing the external one", async () => {
+    // The half-migrated case: `probeId` is set (this exposure has always tracked its
+    // external probe) but `probeInternalId` is `null` (a row created before Task 4's
+    // migration). The external probe — recorded and owned — is still removed normally;
+    // the internal one, untracked, is left alone.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client } = fakeClient();
+    const exposure = await seedExposure(db, appId, {
+      probeInternalId: null,
+      probeInternalCreatedByUs: false,
+    });
 
     const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
 
     expect(outcome.ok).toBe(true);
     const remaining = await db.select().from(probes).where(eq(probes.appId, appId));
+    // Only the untracked http_internal probe survives; the tracked http_external one is gone.
     expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.kind).toBe("http_internal");
+  });
+
+  it("does not delete a user's own http_internal probe, and deletes it only by the recorded id", async () => {
+    // The internal-probe mirror of the F1 test above: an admin's own http_internal probe,
+    // created any time through `routes/probes.ts` and entirely independent of exposure,
+    // must survive a deprovision that only owns a DIFFERENT http_internal probe (the one
+    // `create-probe` made, tracked by `probeInternalId`).
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client } = fakeClient();
+    const exposure = await seedExposure(db, appId);
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_internal",
+      target: "http://localhost:9999",
+      label: "my own internal check",
+    });
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(true);
+    const remaining = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(remaining.map((p) => p.id)).toEqual([usersOwnProbeId]);
   });
 });
 
@@ -537,7 +592,7 @@ describe("deprovision — the ingress-rule step shares the tunnel's mutex with a
       hostname: "other-app.example.com",
       zoneId: ZONE_ID,
       tunnelId: TUNNEL_ID,
-      ingressService: "http://localhost:9000",
+      internalUrl: "http://localhost:9000",
       humanPolicyId: "human-policy-1",
       monitorPolicyId: "monitor-policy-1",
     };

@@ -123,8 +123,11 @@ function fillExposeForm() {
     target: { value: "jellyfin.example.com" },
   });
   fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
-  fireEvent.change(screen.getByLabelText(/Internal service URL/), {
-    target: { value: "http://localhost:8096" },
+  fireEvent.change(screen.getByLabelText(/Compose service name/), {
+    target: { value: "app" },
+  });
+  fireEvent.change(screen.getByLabelText(/Published port/), {
+    target: { value: "8096" },
   });
   fireEvent.change(screen.getByLabelText(/Access policy id/), {
     target: { value: "human-policy-1" },

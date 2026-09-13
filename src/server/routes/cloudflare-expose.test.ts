@@ -172,13 +172,30 @@ async function withFullSetup(opts: { systemKind?: "self" } = {}) {
     systemKind: opts.systemKind ?? null,
   });
 
+  // Task 4: the route now validates `serviceName`/`port` against the app's OWN resolved
+  // compose file, so every test that reaches that point needs a real (fake) compose
+  // resolution to succeed against — same fixture shape `apps-compose.test.ts` uses.
+  app.deps.host.files.set(
+    "jellyfin/compose.yaml",
+    "services:\n  app:\n    ports:\n      - 8096:8096\n",
+  );
+  app.deps.host.composeResults.set("config --format json", {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      name: "jellyfin",
+      services: { app: { image: "jellyfin/jellyfin", ports: [{ published: 8096 }] } },
+    }),
+    stderr: "",
+  });
+
   return { app, cookie, appId };
 }
 
 const exposeBody = {
   hostname: "jellyfin.example.com",
   zoneId: ZONE_ID,
-  ingressService: "http://localhost:8096",
+  serviceName: "app",
+  port: 8096,
   policyId: "human-policy-1",
 };
 
@@ -227,23 +244,78 @@ describe("POST /api/apps/:id/expose", () => {
     await app.close();
   });
 
-  it("rejects an ingressService that is not an http(s) URL (F8)", async () => {
-    // Measured surviving mutation: weakening `ingressServiceSchema`'s refinement to
-    // `return true` left the full suite green — nothing exercised the validation itself,
-    // only the shape of a request that already passed it. `ssh://`, `unix:`, `tcp://`
-    // and `http_status:*` are all real cloudflared ingress service forms this route must
-    // not let an admin write through a plain string field (`cloudflare-expose.ts`'s own
-    // doc comment on `ingressServiceSchema`).
+  it("rejects a service name the app's compose file does not have", async () => {
+    // Task 4: a typo'd service name must not reach `exposeSteps` at all — the route
+    // validates against the app's OWN resolved compose config, not a free-text URL.
     const { app, cookie, appId } = await withFullSetup();
 
     const res = await app.inject({
       method: "POST",
       url: `/api/apps/${appId}/expose`,
       headers: { cookie },
-      payload: { ...exposeBody, ingressService: "ssh://localhost:22" },
+      payload: { ...exposeBody, serviceName: "does-not-exist" },
     });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("service_not_found");
+    await app.close();
+  });
+
+  it("rejects a port the chosen service does not publish (binding check: an unvalidated port must not reach the URL)", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: { ...exposeBody, port: 9999 },
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("port_not_published");
+    await app.close();
+  });
+
+  it("says so clearly, rather than constructing a URL to nowhere, when the chosen service publishes no ports", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        name: "jellyfin",
+        services: { app: { image: "jellyfin/jellyfin", ports: [] } },
+      }),
+      stderr: "",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("service_publishes_no_ports");
+    await app.close();
+  });
+
+  it("rejects an invalid compose file rather than guessing at a service inside it", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 1,
+      stdout: "",
+      stderr: "compose file is invalid",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("compose_invalid");
     await app.close();
   });
 
@@ -419,13 +491,18 @@ describe("POST /api/apps/:id/expose", () => {
       ingressRuleCreatedByUs: true,
       dnsRecordCreatedByUs: true,
       accessAppCreatedByUs: true,
+      probeCreatedByUs: true,
+      probeInternalCreatedByUs: true,
     });
 
-    const [probeRow] = await app.deps.db.select().from(probes).where(eq(probes.appId, appId));
-    expect(probeRow).toMatchObject({
-      kind: "http_external",
-      target: "https://jellyfin.example.com",
-    });
+    const probeRows = await app.deps.db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRows).toHaveLength(2);
+    expect(probeRows).toContainEqual(
+      expect.objectContaining({ kind: "http_external", target: "https://jellyfin.example.com" }),
+    );
+    expect(probeRows).toContainEqual(
+      expect.objectContaining({ kind: "http_internal", target: "http://localhost:8096" }),
+    );
 
     await app.close();
   });

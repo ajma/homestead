@@ -284,7 +284,12 @@ export function useAppExposure(appId: string) {
 export type ExposeAppBody = {
   hostname: string;
   zoneId: string;
-  ingressService: string;
+  /** The compose service to route to, and the port it publishes — Task 4: the server
+   * constructs `http://localhost:<port>` itself and validates both against the app's own
+   * resolved compose file, rather than accepting a free-text URL (`routes/cloudflare-
+   * expose.ts`'s own comment on `exposeBody`). */
+  serviceName: string;
+  port: number;
   policyId: string;
   /** Only sent for the app marked `systemKind: "self"` — see `exposeBody`'s own comment
    * in `routes/cloudflare-expose.ts` for why the server requires it only there. */
