@@ -56,6 +56,10 @@ function mount(seedApp: AdminApp = app) {
   };
 }
 
+function openAdvanced() {
+  fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+}
+
 function ok(body: unknown) {
   vi.stubGlobal(
     "fetch",
@@ -149,6 +153,7 @@ describe("OverviewTab", () => {
   it("PATCHes systemKind: self when the checkbox is checked", async () => {
     ok(app);
     mount();
+    openAdvanced();
 
     fireEvent.click(screen.getByLabelText(/This is Homestead itself/));
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
@@ -162,6 +167,7 @@ describe("OverviewTab", () => {
     const selfApp: AdminApp = { ...app, systemKind: "self" };
     ok(selfApp);
     mount(selfApp);
+    openAdvanced();
 
     expect((screen.getByLabelText(/This is Homestead itself/) as HTMLInputElement).checked).toBe(
       true,
@@ -176,6 +182,7 @@ describe("OverviewTab", () => {
 
   it("hides the self-override checkbox for the Cloudflare system app", () => {
     mount({ ...app, systemKind: "cloudflared" });
+    openAdvanced();
     expect(screen.queryByLabelText(/This is Homestead itself/)).toBeNull();
   });
 
@@ -191,6 +198,7 @@ describe("OverviewTab", () => {
       ),
     );
     mount();
+    openAdvanced();
 
     fireEvent.click(screen.getByLabelText(/This is Homestead itself/));
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
@@ -203,6 +211,7 @@ describe("OverviewTab", () => {
   it("names the app in the delete confirmation and does not delete when cancelled", () => {
     ok(app);
     mount();
+    openAdvanced();
 
     fireEvent.click(screen.getByRole("button", { name: /Delete app/ }));
 
@@ -220,6 +229,7 @@ describe("OverviewTab", () => {
       vi.fn(async () => new Response(null, { status: 204 })),
     );
     mount();
+    openAdvanced();
 
     fireEvent.click(screen.getByRole("button", { name: /Delete app/ }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
@@ -326,6 +336,29 @@ describe("OverviewTab", () => {
     mount();
     expect(screen.getByLabelText(/Description/).className).toContain("max-w-lg");
     expect(screen.getByLabelText(/Category/).className).toContain("max-w-lg");
+  });
+
+  it("tucks the self-marking checkbox and Danger zone behind a collapsed Advanced section", () => {
+    mount();
+
+    // Collapsed by default — neither control is reachable until expanded. This is a real
+    // conditional render (not just CSS), so these queries correctly find nothing: jsdom
+    // does not hide a closed <details>'s content from queries the way a real browser's UA
+    // stylesheet would, which is why this section is a state-driven button instead.
+    expect(screen.queryByLabelText(/This is Homestead itself/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Delete app/ })).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Advanced" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    openAdvanced();
+
+    // Expanding reveals both, self-marking first and Danger zone last.
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    screen.getByLabelText(/This is Homestead itself/);
+    screen.getByRole("button", { name: /Delete app/ });
+    const panel = toggle.parentElement as HTMLElement;
+    const html = panel.innerHTML;
+    expect(html.indexOf("This is Homestead itself")).toBeLessThan(html.indexOf("Danger zone"));
   });
 
   it("puts the label beside the control at lg: and up, stacked below it", () => {
