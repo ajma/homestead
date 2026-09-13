@@ -68,6 +68,48 @@ function fakeClient() {
       const tunnel = tunnels.find((t) => t.id === tunnelId);
       if (tunnel) tunnel.deletedAt = Date.now();
     },
+    // None of the Task 1 endpoints below are used by provisioning — this file tests
+    // `tunnelProvisionSteps`' composition, which never reaches DNS, Access or service
+    // tokens. Same "not used by provisioning" contract as `listZones` above.
+    async getTunnelConfig() {
+      throw new Error("not used by provisioning");
+    },
+    async putTunnelConfig() {
+      throw new Error("not used by provisioning");
+    },
+    async createDnsRecord() {
+      throw new Error("not used by provisioning");
+    },
+    async deleteDnsRecord() {
+      throw new Error("not used by provisioning");
+    },
+    async findDnsRecord() {
+      throw new Error("not used by provisioning");
+    },
+    async createAccessApp() {
+      throw new Error("not used by provisioning");
+    },
+    async deleteAccessApp() {
+      throw new Error("not used by provisioning");
+    },
+    async findAccessApp() {
+      throw new Error("not used by provisioning");
+    },
+    async createServiceToken() {
+      throw new Error("not used by provisioning");
+    },
+    async rotateServiceToken() {
+      throw new Error("not used by provisioning");
+    },
+    async listServiceTokens() {
+      throw new Error("not used by provisioning");
+    },
+    async deleteServiceToken() {
+      throw new Error("not used by provisioning");
+    },
+    async createMonitorPolicy() {
+      throw new Error("not used by provisioning");
+    },
   };
 
   return { client, tunnels, calls };

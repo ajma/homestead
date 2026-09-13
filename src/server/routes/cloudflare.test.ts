@@ -48,6 +48,70 @@ async function withAdmin() {
   return { app, cookie };
 }
 
+/**
+ * A `fetch` that answers `GET /zones` (for credential verification) plus the three
+ * monitor-access endpoints `ensureMonitorAccess`/`rotateMonitorSecret` call. Not a real
+ * Cloudflare double — a router by URL shape, since these route tests exercise the HTTP
+ * layer end to end rather than substituting a fake `CloudflareClient` the way
+ * `provision-tunnel.test.ts` and `monitor-access.test.ts` do.
+ */
+function monitorFetch(): {
+  fetch: typeof fetch;
+  calls: { tokens: number; policies: number; rotations: number };
+} {
+  const calls = { tokens: 0, policies: 0, rotations: 0 };
+  const fetchFn = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/zones")) {
+      return jsonResponse(successEnvelope([{ id: "z1", name: "example.com" }]));
+    }
+    if (url.endsWith("/access/service_tokens")) {
+      calls.tokens++;
+      return jsonResponse({
+        success: true,
+        errors: [],
+        result: {
+          id: "token-1",
+          client_id: "client-1",
+          client_secret: "secret-1",
+          expires_at: "2027-09-12T00:00:00Z",
+        },
+      });
+    }
+    if (/\/access\/service_tokens\/[^/]+\/rotate$/.test(url)) {
+      calls.rotations++;
+      return jsonResponse({
+        success: true,
+        errors: [],
+        result: {
+          client_id: "client-1",
+          client_secret: "rotated-secret",
+          expires_at: "2028-09-12T00:00:00Z",
+        },
+      });
+    }
+    if (url.endsWith("/access/policies")) {
+      calls.policies++;
+      return jsonResponse({ success: true, errors: [], result: { id: "policy-1" } });
+    }
+    throw new Error(`monitorFetch: unexpected URL ${url}`);
+  }) as unknown as typeof fetch;
+  return { fetch: fetchFn, calls };
+}
+
+async function withConfiguredAdmin(fetchImpl: typeof fetch) {
+  const app = await buildTestApp();
+  const { cookie } = await signUpAdmin(app);
+  app.deps.fetch = fetchImpl;
+  await app.inject({
+    method: "PUT",
+    url: "/api/cloudflare/credentials",
+    headers: { cookie },
+    payload: { token: TOKEN, accountId: ACCOUNT_ID },
+  });
+  return { app, cookie };
+}
+
 describe("cloudflare routes", () => {
   it("PUT verifies by listing zones, stores on success, and returns the status", async () => {
     const { app, cookie } = await withAdmin();
@@ -268,5 +332,189 @@ describe("cloudflare routes", () => {
     const serialised = JSON.stringify(allRows);
     expect(serialised).not.toContain(TOKEN);
     await app.close();
+  });
+
+  describe("monitor access", () => {
+    it("GET returns not configured before anything has been created", async () => {
+      const { app, cookie } = await withAdmin();
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      expect(res.json()).toEqual({ configured: false });
+      await app.close();
+    });
+
+    it("POST creates the token and policy, and GET reflects it afterwards", async () => {
+      const { fetch, calls } = monitorFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+
+      const postRes = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      expect(postRes.statusCode).toBe(200);
+      expect(postRes.json()).toMatchObject({
+        configured: true,
+        clientId: "client-1",
+        policyId: "policy-1",
+        expiresAt: Date.parse("2027-09-12T00:00:00Z"),
+      });
+      expect(calls.tokens).toBe(1);
+      expect(calls.policies).toBe(1);
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      expect(getRes.json()).toEqual(postRes.json());
+      await app.close();
+    });
+
+    it("POST is idempotent — a second call does not create a second token", async () => {
+      const { fetch, calls } = monitorFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+
+      const first = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+
+      expect(second.json()).toEqual(first.json());
+      expect(calls.tokens).toBe(1);
+      expect(calls.policies).toBe(1);
+      await app.close();
+    });
+
+    it("POST returns 409 when Cloudflare credentials are not configured", async () => {
+      const { app, cookie } = await withAdmin();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: "not_configured" });
+      await app.close();
+    });
+
+    it("GET never returns the secret", async () => {
+      const { fetch } = monitorFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+      await app.inject({ method: "POST", url: "/api/cloudflare/monitor", headers: { cookie } });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      expect(res.body).not.toContain("secret-1");
+      await app.close();
+    });
+
+    it("rotate replaces the secret and keeps the same clientId's token/policy pairing, but 409s if nothing exists yet", async () => {
+      const { fetch, calls } = monitorFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+
+      const notYetRes = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor/rotate",
+        headers: { cookie },
+      });
+      expect(notYetRes.statusCode).toBe(409);
+      expect(notYetRes.json()).toMatchObject({ error: "monitor_not_configured" });
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      const rotated = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor/rotate",
+        headers: { cookie },
+      });
+
+      expect(rotated.statusCode).toBe(200);
+      expect(rotated.json()).toMatchObject({
+        configured: true,
+        policyId: created.json().policyId,
+        expiresAt: Date.parse("2028-09-12T00:00:00Z"),
+      });
+      expect(calls.rotations).toBe(1);
+      expect(rotated.body).not.toContain("rotated-secret");
+      await app.close();
+    });
+
+    it("gives a viewer 403 on all three monitor routes", async () => {
+      const { fetch } = monitorFetch();
+      const { app, cookie: adminCookie } = await withConfiguredAdmin(fetch);
+      await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie: adminCookie },
+      });
+      const { cookie } = await createViewer(app, adminCookie);
+
+      const getRes = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      const postRes = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor",
+        headers: { cookie },
+      });
+      const rotateRes = await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor/rotate",
+        headers: { cookie },
+      });
+
+      for (const res of [getRes, postRes, rotateRes]) {
+        expect(res.statusCode).toBe(403);
+      }
+      await app.close();
+    });
+
+    it("writes an audit row for ensure and for rotate, without the secret", async () => {
+      const { fetch } = monitorFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+
+      await app.inject({ method: "POST", url: "/api/cloudflare/monitor", headers: { cookie } });
+      await app.inject({
+        method: "POST",
+        url: "/api/cloudflare/monitor/rotate",
+        headers: { cookie },
+      });
+
+      const ensuredRows = await app.deps.db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "cloudflare.monitor_access_ensured"));
+      expect(ensuredRows).toHaveLength(1);
+
+      const rotatedRows = await app.deps.db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "cloudflare.monitor_secret_rotated"));
+      expect(rotatedRows).toHaveLength(1);
+
+      const allRows = await app.deps.db.select().from(auditLog);
+      const serialised = JSON.stringify(allRows);
+      expect(serialised).not.toContain("secret-1");
+      expect(serialised).not.toContain("rotated-secret");
+      await app.close();
+    });
   });
 });

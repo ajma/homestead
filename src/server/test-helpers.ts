@@ -11,6 +11,7 @@ import { JobRunner } from "./apps/job-runner.js";
 import { StepJobRunner } from "./apps/step-job-runner.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost } from "./bootstrap.js";
+import { TunnelConfigLock } from "./cloudflare/expose.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -276,6 +277,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
   const appLock = new AppLock();
   const jobs = new JobRunner({ db, host, composeConfig, appLock });
   const stepJobs = new StepJobRunner({ db, appLock });
+  const tunnelConfigLock = new TunnelConfigLock();
   const registryDigests = new Map<string, string>();
   const images = new ImageUpdateChecker({
     db,
@@ -344,10 +346,12 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     composeConfig,
     jobs,
     stepJobs,
+    appLock,
     images,
     scheduler,
     events,
     icons: { metadata: iconMetadata, store: iconStore },
+    tunnelConfigLock,
     preflight: async () => ({ ok: true }),
     // Overridable per test the same way `preflight` is (see its comment above): a plain
     // function property on `app.deps`, read fresh at request time by the Cloudflare

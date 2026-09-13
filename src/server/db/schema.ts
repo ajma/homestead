@@ -182,6 +182,16 @@ export const exposures = sqliteTable("exposures", {
   ingressService: text("ingress_service").notNull(),
   accessAppId: text("access_app_id"),
   accessAppAud: text("access_app_aud"),
+  // The `probes` row this exposure is responsible for — `null` on a row created before
+  // this column existed. No FK constraint on purpose: SQLite's `ALTER TABLE ADD COLUMN`
+  // cannot add a REFERENCES clause carrying an `ON DELETE` action to an existing table
+  // (only a fresh `CREATE TABLE` can), and a plain, action-less FK would instead make an
+  // ordinary probe delete (`routes/probes.ts`'s DELETE, which knows nothing about
+  // exposures) fail outright with `foreign_keys = ON` — worse than the soft reference
+  // this is. Every reader already treats a stale or missing id as "nothing to act on"
+  // (`deprovision.ts`), so a dangling value here after a probe is deleted directly is
+  // harmless by construction, not by luck.
+  probeId: text("probe_id"),
   dnsRecordCreatedByUs: integer("dns_record_created_by_us", { mode: "boolean" })
     .notNull()
     .default(false),
@@ -191,6 +201,12 @@ export const exposures = sqliteTable("exposures", {
   accessAppCreatedByUs: integer("access_app_created_by_us", { mode: "boolean" })
     .notNull()
     .default(false),
+  // `true` when `create-probe` (expose.ts) created the probes row above; `false` when it
+  // adopted the app's own pre-existing `http_external` probe. Same adopted-resource
+  // pattern as the three flags above, applied to the fourth resource this sequence
+  // touches — see `expose.ts`'s `create-probe` step and `deprovision.ts`'s own doc
+  // comment.
+  probeCreatedByUs: integer("probe_created_by_us", { mode: "boolean" }).notNull().default(false),
   state: text("state", { enum: ["provisioning", "ready", "error", "drifted"] })
     .notNull()
     .default("provisioning"),

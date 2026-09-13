@@ -1,4 +1,4 @@
-import type { CloudflareZone } from "@shared/cloudflare.js";
+import type { CloudflareZone, MonitorAccessStatus } from "@shared/cloudflare.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { audit } from "../audit.js";
@@ -6,6 +6,11 @@ import { requireCapability } from "../auth/context.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { CloudflareError } from "../cloudflare/errors.js";
+import {
+  ensureMonitorAccess,
+  MonitorAccessStore,
+  rotateMonitorSecret,
+} from "../cloudflare/monitor-access.js";
 
 // `.trim()` before `.min(1)`: a token pasted out of the Cloudflare dashboard frequently
 // carries a trailing newline or space, invisible in a `type="password"` field. Untrimmed,
@@ -31,6 +36,23 @@ function faultOf(error: unknown): CloudflareError["fault"] {
 export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   const { db, secrets } = app.deps;
   const store = new CloudflareCredentialStore(db, secrets);
+  const monitorStore = new MonitorAccessStore(db, secrets);
+
+  /** `MonitorAccess` (never carries the secret — see `monitor-access.ts`) to the wire
+   * shape `MonitorAccessStatus` — the same discriminated-union treatment
+   * `CloudflareCredentialStore.status()` gives credentials, for the same reason: a
+   * caller cannot accidentally read `clientId` off a status that has none. */
+  function toMonitorStatus(
+    access: Awaited<ReturnType<typeof monitorStore.get>>,
+  ): MonitorAccessStatus {
+    if (!access) return { configured: false };
+    return {
+      configured: true,
+      clientId: access.clientId,
+      policyId: access.policyId,
+      expiresAt: access.expiresAt,
+    };
+  }
 
   /**
    * Verification strategy: `listZones()`, not a dedicated verify endpoint.
@@ -119,6 +141,86 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
       });
       const zones = await client.listZones();
       return zones satisfies CloudflareZone[];
+    } catch (error) {
+      const fault = faultOf(error);
+      return reply.code(502).send({ error: "cloudflare_error", fault });
+    }
+  });
+
+  /**
+   * Read-only status of the one shared monitor service token and policy — gated on
+   * `cf:read` like `GET /zones` and `GET /tunnel` above, for the same reason (every role
+   * today holds both `cf:read` and `cf:write` or neither, so this is cosmetic until a
+   * read-only role exists). Never touches Cloudflare: this reads what `MonitorAccessStore`
+   * already has recorded, the same "status is a local read" shape `GET /credentials` and
+   * `GET /tunnel` both use.
+   */
+  app.get("/api/cloudflare/monitor", async (request) => {
+    requireCapability(request, "cf:read");
+    return toMonitorStatus(await monitorStore.get());
+  });
+
+  /**
+   * Creates the one shared monitor token and policy if they do not exist yet, or
+   * returns the existing ones unchanged — `ensureMonitorAccess`'s own idempotency (see
+   * its doc comment) is what makes a double-click or a retry safe here, not anything
+   * this route does on top of it.
+   */
+  app.post("/api/cloudflare/monitor", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:write");
+    const creds = await store.get();
+    if (!creds) {
+      return reply.code(409).send({ error: "not_configured" });
+    }
+
+    try {
+      const client = createCloudflareClient({
+        token: creds.token,
+        accountId: creds.accountId,
+        fetch: app.deps.fetch,
+      });
+      const access = await ensureMonitorAccess({ store: monitorStore, client });
+      await audit(db, ctx, {
+        action: "cloudflare.monitor_access_ensured",
+        targetId: access.tokenId,
+      });
+      return toMonitorStatus(access);
+    } catch (error) {
+      const fault = faultOf(error);
+      return reply.code(502).send({ error: "cloudflare_error", fault });
+    }
+  });
+
+  /**
+   * Rotates the shared monitor token's secret in place — same token id, same policy id,
+   * a new secret every app's probe picks up on its next credential read (2E). 409s if
+   * there is nothing to rotate yet, the same "not configured" shape the credentials and
+   * zones routes use, rather than surfacing `rotateMonitorSecret`'s internal error text.
+   */
+  app.post("/api/cloudflare/monitor/rotate", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:write");
+    const existing = await monitorStore.get();
+    if (!existing) {
+      return reply.code(409).send({ error: "monitor_not_configured" });
+    }
+
+    const creds = await store.get();
+    if (!creds) {
+      return reply.code(409).send({ error: "not_configured" });
+    }
+
+    try {
+      const client = createCloudflareClient({
+        token: creds.token,
+        accountId: creds.accountId,
+        fetch: app.deps.fetch,
+      });
+      const access = await rotateMonitorSecret({ store: monitorStore, client });
+      await audit(db, ctx, {
+        action: "cloudflare.monitor_secret_rotated",
+        targetId: access.tokenId,
+      });
+      return toMonitorStatus(access);
     } catch (error) {
       const fault = faultOf(error);
       return reply.code(502).send({ error: "cloudflare_error", fault });

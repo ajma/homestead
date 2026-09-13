@@ -3,11 +3,13 @@ import rateLimit from "@fastify/rate-limit";
 import { eq } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
+import type { AppLock } from "./apps/app-lock.js";
 import type { ComposeConfigCache } from "./apps/compose-config.js";
 import type { ImageUpdateChecker } from "./apps/image-updates.js";
 import type { JobRunner } from "./apps/job-runner.js";
 import type { StepJobRunner } from "./apps/step-job-runner.js";
 import type { Auth } from "./auth/auth.js";
+import type { TunnelConfigLock } from "./cloudflare/expose.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
 import type { Db } from "./db/client.js";
@@ -19,6 +21,7 @@ import type { IconStore } from "./icons/store.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
 import { cloudflareRoutes } from "./routes/cloudflare.js";
+import { cloudflareExposeRoutes } from "./routes/cloudflare-expose.js";
 import { cloudflareTunnelRoutes } from "./routes/cloudflare-tunnel.js";
 import { containerRoutes } from "./routes/containers.js";
 import type { EventBus } from "./routes/events.js";
@@ -80,6 +83,14 @@ export type AppDeps = {
    * `jobs` at construction (see `index.ts`/`test-helpers.ts`), which is what makes a step
    * sequence and a compose job exclude each other on the same app. */
   stepJobs: StepJobRunner;
+  /** The SAME instance `jobs` and `stepJobs` were constructed with (see
+   * `index.ts`/`test-helpers.ts`) — exposed directly here too so a route that needs to
+   * exclude itself against an app's in-flight job WITHOUT going through `JobRunner` or
+   * `StepJobRunner`'s own `start` can still do so. `cloudflare-expose.ts`'s DELETE route
+   * is the first: it has no step sequence of its own to hand to `stepJobs.start`, but
+   * still must not run concurrently with that same app's expose job (2D's whole-branch
+   * review, F7). */
+  appLock: AppLock;
   images: ImageUpdateChecker;
   scheduler: Scheduler;
   events: EventBus;
@@ -90,6 +101,11 @@ export type AppDeps = {
    * `preflight` above, so tests can override it wholesale without a second injection
    * mechanism. */
   fetch: typeof globalThis.fetch;
+  /** ONE instance shared by every concurrent expose in the process — see its own doc
+   * comment in `cloudflare/expose.ts` for why this is a different lock from `AppLock`
+   * (per-tunnel and global, not per-app) and must not be constructed fresh per request,
+   * which would serialise nothing. */
+  tunnelConfigLock: TunnelConfigLock;
 };
 
 declare module "fastify" {
@@ -202,6 +218,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(probeRoutes);
   await app.register(cloudflareRoutes);
   await app.register(cloudflareTunnelRoutes);
+  await app.register(cloudflareExposeRoutes);
   await app.register(eventRoutes);
   await app.register(launcherRoutes);
   await app.register(iconRoutes);

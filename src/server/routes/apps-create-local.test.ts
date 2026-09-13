@@ -10,6 +10,7 @@ import { JobRunner } from "@server/apps/job-runner";
 import { StepJobRunner } from "@server/apps/step-job-runner";
 import { createAuth } from "@server/auth/auth";
 import { ensureLocalHost, LOCAL_HOST_ID } from "@server/bootstrap";
+import { TunnelConfigLock } from "@server/cloudflare/expose";
 import { loadConfig } from "@server/config";
 import { SecretStore } from "@server/crypto/secrets";
 import { createDb, runMigrations } from "@server/db/client";
@@ -132,10 +133,12 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
     composeConfig,
     jobs,
     stepJobs,
+    appLock,
     images,
     scheduler,
     events,
     icons: { metadata: iconMetadata, store: iconStore },
+    tunnelConfigLock: new TunnelConfigLock(),
     preflight: async () => ({ ok: true }),
     fetch: (async () => {
       throw new Error("cloudflare fetch should not be called in tests without an override");
