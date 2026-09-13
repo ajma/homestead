@@ -291,9 +291,24 @@ export function OverviewTab() {
           type="button"
           onClick={() => setAdvancedOpen((prev) => !prev)}
           aria-expanded={advancedOpen}
-          className={`w-full text-left text-sm font-medium text-slate-900 dark:text-slate-100 ${CARD_PADDING}`}
+          className={`flex w-full items-center justify-between text-left text-sm font-medium text-slate-900 dark:text-slate-100 ${CARD_PADDING}`}
         >
           Advanced
+          {/* `aria-expanded` above is what assistive tech reads; this is a purely visual
+              cue for sighted users, so it stays out of the accessibility tree rather than
+              being announced as a redundant image alongside that. */}
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={`h-4 w-4 shrink-0 transition-transform duration-200 ${advancedOpen ? "rotate-180" : ""}`}
+          >
+            <path d="M5 7.5 10 12.5 15 7.5" />
+          </svg>
         </button>
         {advancedOpen && (
           <div
