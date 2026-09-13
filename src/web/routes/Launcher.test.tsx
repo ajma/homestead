@@ -174,7 +174,7 @@ describe("Launcher", () => {
     // the class string, since jsdom has no layout engine to measure a rendered width.
     mount(client([tile()]));
     const shell = screen.getByRole("searchbox").parentElement;
-    expect(shell?.className).toContain("max-w-[1680px]");
+    expect(shell?.className).toContain("max-w-[1328px]");
     expect(shell?.className).not.toContain("max-w-5xl");
   });
 });

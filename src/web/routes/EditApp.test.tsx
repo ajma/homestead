@@ -3,7 +3,7 @@ import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { adminAppKey } from "@web/api/admin";
-import { EDIT_CONTENT_MAX_WIDTH } from "@web/lib/density";
+import { PAGE_MAX_WIDTH } from "@web/lib/density";
 import { EditApp, useWideEditLayout } from "@web/routes/EditApp";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -259,7 +259,7 @@ describe("EditApp", () => {
       stubFetch(app);
       mount();
       const row = screen.getByTestId("edit-content-row");
-      for (const cls of EDIT_CONTENT_MAX_WIDTH.split(" ")) {
+      for (const cls of `lg:mx-auto lg:${PAGE_MAX_WIDTH}`.split(" ")) {
         expect(row.className).toContain(cls);
       }
     });
@@ -268,9 +268,33 @@ describe("EditApp", () => {
       stubFetch(app);
       mount("/apps/jellyfin/config");
       const row = screen.getByTestId("edit-content-row");
-      for (const cls of EDIT_CONTENT_MAX_WIDTH.split(" ")) {
+      for (const cls of `lg:mx-auto lg:${PAGE_MAX_WIDTH}`.split(" ")) {
         expect(row.className).not.toContain(cls);
       }
+    });
+
+    // The regression the user actually reported: switching between Manage (`PAGE_SHELL`,
+    // built from `PAGE_MAX_WIDTH`) and an app's edit page used to visibly jump because the
+    // two pages capped at different widths (1680px vs 1328px). Asserting both resolve to
+    // the literal same token — not just "some max-width" — is what would catch a future
+    // edit that widens one without the other back out of sync.
+    it("resolves to the same width token Manage's PAGE_SHELL uses", () => {
+      stubFetch(app);
+      mount();
+      const row = screen.getByTestId("edit-content-row");
+      expect(row.className).toContain(PAGE_MAX_WIDTH);
+    });
+
+    it("gives the sticky app header an inner container capped at the same width as the content row", () => {
+      stubFetch(app);
+      mount();
+      const header = screen.getByRole("banner");
+      // The bar itself stays full-bleed (no max-width class directly on it) — only its
+      // first child, the content container, is constrained.
+      expect(header.className).not.toContain("max-w-");
+      const inner = header.firstElementChild as HTMLElement;
+      expect(inner.className).toContain("mx-auto");
+      expect(inner.className).toContain(PAGE_MAX_WIDTH);
     });
   });
 

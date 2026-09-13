@@ -60,7 +60,7 @@ describe("Settings", () => {
     );
 
     const shell = container.firstElementChild as HTMLElement;
-    expect(shell.className).toContain("max-w-[1680px]");
+    expect(shell.className).toContain("max-w-[1328px]");
     expect(shell.className).not.toContain("max-w-5xl");
     expect(shell.className).toContain("space-y-6");
     expect(shell.className).toContain("md:space-y-4");
