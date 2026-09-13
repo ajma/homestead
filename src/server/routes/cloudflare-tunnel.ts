@@ -88,6 +88,32 @@ export async function cloudflareTunnelRoutes(app: FastifyInstance): Promise<void
       tunnelName: CLOUDFLARED_TUNNEL_NAME,
     });
 
+    // Audited BEFORE `stepJobs.start`, not after — unlike `routes/jobs.ts`'s lifecycle
+    // actions, where `runner.start` returns as soon as the job row is inserted and the
+    // audit call right after it effectively still lands "on start". `StepJobRunner.start`
+    // is different: it does not return until the WHOLE sequence — including any rollback
+    // — has finished (see its own class doc, and the whole-branch review's ruling on why
+    // that is deliberate for now, not a bug). An audit call placed after it, as this used
+    // to do, produces zero audit rows for the entire run: measured, a crash after
+    // `create-tunnel` — power loss, OOM-kill, a restart — leaves a real Cloudflare tunnel
+    // with no record that anyone ever asked for it, on the one action this project's
+    // audit log exists to catch. Moving it here means the row exists the instant an admin
+    // asks, regardless of how the sequence ends.
+    //
+    // NOT fixed here, and deliberately left for 2D: the blocking `await` inside `start`
+    // itself. Detaching it — resolving once the job row is written and letting the
+    // sequence run to completion in the background — would let this route return long
+    // before a 5-minute `compose-up` finishes, which also fixes the initiating tab's lack
+    // of live output (`CloudflarePanel.tsx`) and the 524 this design hits once Homestead
+    // is reached through the very tunnel it provisions. Every piece that needs is already
+    // built (`GET /api/cloudflare/tunnel`'s `runningJobId`, `jobs.ts`'s `waitForTerminalJob`,
+    // the panel's adopt-on-mount effect) — only `await sequence` in `step-job-runner.ts`
+    // stands in the way, and touching it is out of scope for this phase.
+    await audit(db, ctx, {
+      action: "cloudflare.tunnel_provision_started",
+      ip: request.ip,
+    });
+
     let id: string;
     try {
       // `appId: null` — see `StepJobRunner.start`'s doc: this sequence's own steps create
@@ -102,21 +128,14 @@ export async function cloudflareTunnelRoutes(app: FastifyInstance): Promise<void
       // gets `AppBusyError` there, same as `JobRunner.start` throws for an app-scoped
       // lock. Uncaught, that error has no `statusCode` and would 500 through the generic
       // handler in `app.ts`; mapped here the same way `routes/jobs.ts` maps `JobBusyError`,
-      // so a race reads as "try again shortly", not as a server bug.
+      // so a race reads as "try again shortly", not as a server bug. The audit row above
+      // still stands in this case — an admin genuinely did ask, even though this
+      // particular request lost the race for the lock.
       if (error instanceof AppBusyError) {
         return reply.code(409).send({ error: "tunnel_provision_running" });
       }
       throw error;
     }
-
-    // Audited on start, not on completion — the same convention `routes/jobs.ts` uses for
-    // a lifecycle action: this records that an admin asked for the tunnel to be
-    // provisioned, not that it succeeded. The job row (and, on failure, its transcript and
-    // `undoFailures`) is the record of the outcome.
-    await audit(db, ctx, {
-      action: "cloudflare.tunnel_provision_started",
-      ip: request.ip,
-    });
 
     return reply.code(202).send({ jobId: id });
   });

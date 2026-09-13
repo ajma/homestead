@@ -1,5 +1,5 @@
 import { TunnelStore } from "@server/cloudflare/tunnel-store";
-import { jobs } from "@server/db/schema";
+import { auditLog, jobs } from "@server/db/schema";
 import { TUNNEL_PROVISION_KIND } from "@server/routes/cloudflare-tunnel";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
@@ -247,6 +247,41 @@ describe("POST /api/cloudflare/tunnel", () => {
     gated.release();
     const firstRes = await first;
     expect(firstRes.statusCode).toBe(202);
+
+    await app.close();
+  });
+
+  it("writes the audit row before the sequence runs, not once it completes (Important 2)", async () => {
+    // Measured in the whole-branch review: `stepJobs.start` does not return until the
+    // whole sequence — including any rollback — has finished, so an audit call placed
+    // AFTER it (as this route used to do) produces zero audit rows for the entire run. A
+    // crash mid-flight — after `create-tunnel` has already made a real Cloudflare tunnel
+    // — used to leave no record that anyone ever asked. Gate `compose-up`, the last step,
+    // so the sequence is provably still running while this test inspects the audit log.
+    const { app, cookie } = await withStoredCredentials();
+    app.deps.fetch = tunnelFetch(ACCOUNT_ID);
+    app.deps.host.gateCompose();
+
+    const post = app.inject({ method: "POST", url: "/api/cloudflare/tunnel", headers: { cookie } });
+    await until(
+      async () => {
+        const [row] = await app.deps.db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.kind, TUNNEL_PROVISION_KIND));
+        return row?.status ?? null;
+      },
+      (status) => status === "running",
+    );
+
+    const midFlight = await app.deps.db.select().from(auditLog);
+    expect(
+      midFlight.filter((row) => row.action === "cloudflare.tunnel_provision_started"),
+    ).toHaveLength(1);
+
+    app.deps.host.releaseCompose();
+    const res = await post;
+    expect(res.statusCode).toBe(202);
 
     await app.close();
   });
