@@ -133,6 +133,7 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
     composeConfig,
     jobs,
     stepJobs,
+    appLock,
     images,
     scheduler,
     events,

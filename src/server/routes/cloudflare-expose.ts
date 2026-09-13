@@ -19,9 +19,16 @@ import { loadApp } from "./apps.js";
  * outside that filter. */
 export const EXPOSE_KIND = "cloudflare_expose";
 
-/** The server fetches this exact URL — spec §6's `cloudflared` networking section:
- * `http://localhost:<published-port>`. Validated as http(s) for the same SSRF reason
- * `routes/probes.ts`'s `targetSchema` validates a probe target. */
+/** `cloudflared` fetches this exact URL — spec §6's networking section:
+ * `http://localhost:<published-port>`, dialled from inside the `cloudflared` container
+ * (`network_mode: host`, so it can reach anything on the NAS or its LAN — §6), NOT the
+ * Homestead server itself. This is not the same SSRF exposure `routes/probes.ts`'s
+ * `targetSchema` guards against (the server fetching a probe target), even though it
+ * reuses the same http(s)-only shape: the value here is written into the tunnel's
+ * ingress array, which is why `ssh://`, `unix:`, `tcp://` and the special `http_status:`
+ * services are still worth rejecting through this route — an admin has no other reason to
+ * write one of those here, and cloudflared's own ingress config already has room for
+ * behaviour this project does not want to expose through a plain string field. */
 const ingressServiceSchema = z.string().refine((value) => {
   try {
     const parsed = new URL(value);
@@ -61,6 +68,21 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
     const [existingExposure] = await db.select().from(exposures).where(eq(exposures.appId, id));
     if (existingExposure) {
       return reply.code(409).send({ error: "already_exposed" });
+    }
+
+    // `exposures.hostname` is `.unique()` (schema.ts) same as `appId` above, but was never
+    // pre-checked here — a second app exposed at a hostname another app already holds hit
+    // the unique constraint deep inside `splice-ingress`'s insert, surfacing as a bare 500
+    // after already splicing the new app's service into the tunnel over the first app's
+    // rule (2D's whole-branch review, F11). Checked here for the same reason
+    // `already_exposed` is: a clean 409 before anything is touched, not a failure a job's
+    // own inline compensation has to unwind.
+    const [hostnameTaken] = await db
+      .select()
+      .from(exposures)
+      .where(eq(exposures.hostname, body.hostname));
+    if (hostnameTaken) {
+      return reply.code(409).send({ error: "hostname_taken" });
     }
 
     const tunnel = await tunnelStore.get();
@@ -144,37 +166,50 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       return reply.code(409).send({ error: "not_configured" });
     }
 
-    const client = createCloudflareClient({
-      token: credentials.token,
-      accountId: credentials.accountId,
-      fetch: app.deps.fetch,
-    });
-
-    // Audited BEFORE `deprovision` runs, not after — same reasoning as the POST route's
-    // own audit call: a crash partway through a real, multi-Cloudflare-call teardown
-    // must still leave a record that someone asked for it, not zero audit rows for the
-    // one action that starts pulling live resources down.
-    await audit(db, ctx, {
-      action: "cloudflare.expose_deprovision_started",
-      targetType: "app",
-      targetId: id,
-      detail: { hostname: exposure.hostname },
-    });
-
-    const outcome = await deprovision({ db, client, tunnelConfigLock }, exposure);
-
-    if (!outcome.ok) {
-      // Not a rollback and not a 4xx — the caller's request was well-formed and the app
-      // WAS exposed; some subset of the four resources could not be removed right now.
-      // The `exposures` row still exists (deliberately — see `deprovision.ts`'s own doc
-      // comment on why it is deleted last) with the flags for what succeeded already
-      // flipped, so calling this same endpoint again resumes exactly where it left off.
-      return reply.code(500).send({
-        error: "deprovision_incomplete",
-        failures: outcome.failures.map((f) => f.resource),
-      });
+    // The SAME `AppLock` the POST route's `stepJobs.start` (above) takes on this app id —
+    // without it, this route could race the app's OWN in-flight expose job, not just a
+    // concurrent compose action (2D's whole-branch review, F7 — the measured outcome was
+    // an orphaned CNAME and Access application, a stranded probe row, a deleted
+    // `exposures` row, and BOTH operations reporting success). `AppBusyError` is the same
+    // 409 mapping the POST route already gives it.
+    if (!app.deps.appLock.tryAcquire(id, "cloudflare_expose_deprovision")) {
+      return reply.code(409).send({ error: "app_busy" });
     }
+    try {
+      // Audited BEFORE `deprovision` runs, not after — same reasoning as the POST route's
+      // own audit call: a crash partway through a real, multi-Cloudflare-call teardown
+      // must still leave a record that someone asked for it, not zero audit rows for the
+      // one action that starts pulling live resources down.
+      await audit(db, ctx, {
+        action: "cloudflare.expose_deprovision_started",
+        targetType: "app",
+        targetId: id,
+        detail: { hostname: exposure.hostname },
+      });
 
-    return reply.code(200).send({ ok: true });
+      const client = createCloudflareClient({
+        token: credentials.token,
+        accountId: credentials.accountId,
+        fetch: app.deps.fetch,
+      });
+
+      const outcome = await deprovision({ db, client, tunnelConfigLock }, exposure);
+
+      if (!outcome.ok) {
+        // Not a rollback and not a 4xx — the caller's request was well-formed and the app
+        // WAS exposed; some subset of the four resources could not be removed right now.
+        // The `exposures` row still exists (deliberately — see `deprovision.ts`'s own doc
+        // comment on why it is deleted last) with the flags for what succeeded already
+        // flipped, so calling this same endpoint again resumes exactly where it left off.
+        return reply.code(500).send({
+          error: "deprovision_incomplete",
+          failures: outcome.failures.map((f) => f.resource),
+        });
+      }
+
+      return reply.code(200).send({ ok: true });
+    } finally {
+      app.deps.appLock.release(id);
+    }
   });
 }

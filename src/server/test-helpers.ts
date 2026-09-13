@@ -346,6 +346,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     composeConfig,
     jobs,
     stepJobs,
+    appLock,
     images,
     scheduler,
     events,

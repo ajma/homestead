@@ -200,6 +200,26 @@ describe("POST /api/apps/:id/expose", () => {
     await app.close();
   });
 
+  it("rejects an ingressService that is not an http(s) URL (F8)", async () => {
+    // Measured surviving mutation: weakening `ingressServiceSchema`'s refinement to
+    // `return true` left the full suite green — nothing exercised the validation itself,
+    // only the shape of a request that already passed it. `ssh://`, `unix:`, `tcp://`
+    // and `http_status:*` are all real cloudflared ingress service forms this route must
+    // not let an admin write through a plain string field (`cloudflare-expose.ts`'s own
+    // doc comment on `ingressServiceSchema`).
+    const { app, cookie, appId } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: { ...exposeBody, ingressService: "ssh://localhost:22" },
+    });
+
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
   it("refuses when the app is already exposed", async () => {
     const { app, cookie, appId } = await withFullSetup();
     await app.deps.db.insert(exposures).values({
@@ -221,6 +241,45 @@ describe("POST /api/apps/:id/expose", () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("already_exposed");
+    await app.close();
+  });
+
+  it("refuses a hostname another app already holds with 409, not a 500 (F11)", async () => {
+    // `exposures.hostname` is `.unique()` the same way `appId` is (schema.ts) — the old
+    // route only pre-checked `appId`, so a second app exposed at a hostname the first
+    // already held spliced its own service into the tunnel over the first app's rule
+    // BEFORE hitting the unique constraint deep inside the insert, surfacing as a bare
+    // 500 rather than a clean 409 before anything was touched.
+    const { app, cookie, appId } = await withFullSetup();
+    const otherAppId = ulid();
+    await app.deps.db.insert(apps).values({
+      id: otherAppId,
+      hostId: LOCAL_HOST_ID,
+      slug: "plex",
+      displayName: "Plex",
+      directory: "plex",
+      composeFile: "compose.yaml",
+      projectName: "plex",
+    });
+    await app.deps.db.insert(exposures).values({
+      id: ulid(),
+      appId: otherAppId,
+      hostname: exposeBody.hostname,
+      zoneId: ZONE_ID,
+      tunnelId: TUNNEL_ID,
+      ingressService: "http://localhost:1",
+      state: "ready",
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("hostname_taken");
     await app.close();
   });
 
@@ -398,6 +457,37 @@ describe("DELETE /api/apps/:id/expose", () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toBe("not_exposed");
+    await app.close();
+  });
+
+  it("refuses with 409 app_busy while this app's own expose job is in flight (F7)", async () => {
+    // Measured defect: this route took no `AppLock` at all, so it could race the app's
+    // OWN in-flight expose job (not just an unrelated compose action) — orphaning a live
+    // CNAME and Access application while both operations reported success. The POST
+    // route's `stepJobs.start` acquires `app.deps.appLock` by app id; this simulates that
+    // hold directly rather than needing to freeze a real job mid-sequence.
+    const { app, cookie, appId } = await withFullSetup();
+    await app.deps.db.insert(exposures).values({
+      id: ulid(),
+      appId,
+      hostname: "already.example.com",
+      zoneId: ZONE_ID,
+      tunnelId: TUNNEL_ID,
+      ingressService: "http://localhost:1",
+      state: "ready",
+    });
+    expect(app.deps.appLock.tryAcquire(appId, "test: simulated in-flight job")).toBe(true);
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("app_busy");
+
+    app.deps.appLock.release(appId);
     await app.close();
   });
 

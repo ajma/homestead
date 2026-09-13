@@ -3,6 +3,7 @@ import rateLimit from "@fastify/rate-limit";
 import { eq } from "drizzle-orm";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
+import type { AppLock } from "./apps/app-lock.js";
 import type { ComposeConfigCache } from "./apps/compose-config.js";
 import type { ImageUpdateChecker } from "./apps/image-updates.js";
 import type { JobRunner } from "./apps/job-runner.js";
@@ -82,6 +83,14 @@ export type AppDeps = {
    * `jobs` at construction (see `index.ts`/`test-helpers.ts`), which is what makes a step
    * sequence and a compose job exclude each other on the same app. */
   stepJobs: StepJobRunner;
+  /** The SAME instance `jobs` and `stepJobs` were constructed with (see
+   * `index.ts`/`test-helpers.ts`) — exposed directly here too so a route that needs to
+   * exclude itself against an app's in-flight job WITHOUT going through `JobRunner` or
+   * `StepJobRunner`'s own `start` can still do so. `cloudflare-expose.ts`'s DELETE route
+   * is the first: it has no step sequence of its own to hand to `stepJobs.start`, but
+   * still must not run concurrently with that same app's expose job (2D's whole-branch
+   * review, F7). */
+  appLock: AppLock;
   images: ImageUpdateChecker;
   scheduler: Scheduler;
   events: EventBus;

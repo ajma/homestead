@@ -113,6 +113,7 @@ await startServer({
       composeConfig,
       jobs,
       stepJobs,
+      appLock,
       images,
       scheduler,
       events,
