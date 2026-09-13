@@ -258,8 +258,22 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
   }
 
   const exposure = exposureQuery.data;
+  // Phase 2F whole-branch review, F2: `splice-ingress` inserts the `exposures` row as
+  // `provisioning` at step 1 of 5, so `GET /api/apps/:id/expose` answers
+  // `exposed: true, state: "provisioning"` for nearly the whole run. Branching on
+  // `exposure.exposed` alone (as this used to) put the steady-state "here's your
+  // hostname" view — a Remove button, no `JobOutput` — in front of a reload mid-expose,
+  // and lost the "MANUAL CLEANUP REQUIRED" transcript on a failed run, since that only
+  // ever renders inside `JobOutput`. Treating "still provisioning, or a job is running"
+  // as its own condition, checked before the steady-state branch, routes both "not
+  // exposed yet, job just started" and "exposed row exists, job still running" through
+  // the identical in-progress UI below — `jobRunning` alone would miss the first render
+  // after a reload, before the `knownRunningJobId` effect above has run.
+  const jobInProgress = exposure.exposed
+    ? exposure.state === "provisioning" || exposure.runningJobId !== null || jobRunning
+    : jobRunning;
 
-  if (exposure.exposed) {
+  if (exposure.exposed && !jobInProgress) {
     return (
       <div className="flex flex-col gap-4">
         <dl className="text-sm text-slate-700 dark:text-slate-300">
@@ -362,7 +376,7 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
         </div>
       )}
 
-      {jobRunning ? (
+      {jobInProgress ? (
         <button
           type="button"
           disabled

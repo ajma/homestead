@@ -257,6 +257,35 @@ describe("ExposurePanel", () => {
     expect(screen.queryByRole("button", { name: "Expose" })).toBeNull();
   });
 
+  it("renders the in-progress view, not the steady exposed view, for a reload mid-expose", async () => {
+    // Phase 2F whole-branch review, F2: `splice-ingress` inserts the `exposures` row as
+    // `provisioning` at step 1 of 5, so a tab that (re)mounts mid-sequence sees
+    // `exposed: true, state: "provisioning"` for nearly the whole run. Before the fix
+    // this rendered the steady-state view — no `JobOutput`, a Remove button offered, and
+    // no way to see a failing sequence's "MANUAL CLEANUP REQUIRED" list.
+    stubFetch({
+      tunnel: PROVISIONED,
+      exposure: {
+        exposed: true,
+        hostname: "jellyfin.example.com",
+        state: "provisioning",
+        accessAppId: null,
+        accessAppAud: null,
+        runningJobId: "job-mid-expose",
+        driftFindings: [],
+      },
+    });
+    mount();
+
+    await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+    expect(FakeEventSource.instances[0]?.url).toBe("/api/jobs/job-mid-expose/stream");
+    expect((screen.getByRole("button", { name: /Exposing/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(screen.queryByRole("button", { name: "Remove exposure" })).toBeNull();
+    expect(screen.queryByText("jellyfin.example.com")).toBeNull();
+  });
+
   it("shows the hostname, a link to it, the Access application and a Remove button once exposed", async () => {
     stubFetch({
       tunnel: PROVISIONED,
