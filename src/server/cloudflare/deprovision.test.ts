@@ -1,3 +1,4 @@
+import { runSteps } from "@server/apps/step-sequence";
 import { LOCAL_HOST_ID } from "@server/bootstrap";
 import type { CloudflareClient } from "@server/cloudflare/client";
 import {
@@ -5,7 +6,12 @@ import {
   deprovision,
   type ExposureRow,
 } from "@server/cloudflare/deprovision";
-import { TunnelConfigLock } from "@server/cloudflare/expose";
+import {
+  type ExposeCtx,
+  type ExposeDeps,
+  exposeSteps,
+  TunnelConfigLock,
+} from "@server/cloudflare/expose";
 import type { Db } from "@server/db/client";
 import { createDb, runMigrations } from "@server/db/client";
 import { apps, exposures, hosts, probes } from "@server/db/schema";
@@ -41,6 +47,7 @@ function fakeClient(
     { hostname: HOSTNAME, service: "http://localhost:8096" },
     { service: "http_status:404" },
   ],
+  opts: { delayMs?: number } = {},
 ): {
   client: CloudflareClient;
   ingress: () => IngressRule[];
@@ -56,6 +63,9 @@ function fakeClient(
   const deletedDnsRecordCalls: string[] = [];
   const deletedAccessAppCalls: string[] = [];
   let putTunnelConfigCalls = 0;
+  const delayMs = opts.delayMs ?? 0;
+  const delay = () =>
+    delayMs > 0 ? new Promise((resolve) => setTimeout(resolve, delayMs)) : Promise.resolve();
 
   const client: CloudflareClient = {
     listZones: unusedMethod("listZones"),
@@ -64,28 +74,53 @@ function fakeClient(
     tunnelToken: unusedMethod("tunnelToken"),
     deleteTunnel: unusedMethod("deleteTunnel"),
     async getTunnelConfig() {
+      // A real window between read and write, when `delayMs` is set — see
+      // `expose.test.ts`'s `fakeClient` for why a delay on both calls (not just this one)
+      // is what actually creates a race a caller's own mutex has to close, rather than
+      // one that happens to pass by accident. Zero by default so every OTHER test in this
+      // file (none of them exercise concurrency) is unaffected.
+      await delay();
       return { ingress: ingress.map((r) => ({ ...r })) };
     },
     async putTunnelConfig(_tunnelId, config) {
+      await delay();
       putTunnelConfigCalls++;
       ingress = config.ingress.map((r) => ({ ...r }));
     },
-    createDnsRecord: unusedMethod("createDnsRecord"),
+    // `createDnsRecord`/`findDnsRecord`/`createAccessApp`/`findAccessApp` are real, not
+    // `unusedMethod` stubs: the mutex-coverage test below drives an actual concurrent
+    // `exposeSteps` sequence against this same fake client, and those are the methods a
+    // fresh expose calls that deprovision itself never does. No test that only calls
+    // `deprovision` exercises them either way.
+    async createDnsRecord(_zoneId, r) {
+      const id = `dns-${dnsRecords.size + 1}`;
+      dnsRecords.set(r.name, { id });
+      return { id };
+    },
     async deleteDnsRecord(_zoneId, recordId) {
       deletedDnsRecordCalls.push(recordId);
       for (const [name, record] of dnsRecords) {
         if (record.id === recordId) dnsRecords.delete(name);
       }
     },
-    findDnsRecord: unusedMethod("findDnsRecord"),
-    createAccessApp: unusedMethod("createAccessApp"),
+    async findDnsRecord(_zoneId, name) {
+      return dnsRecords.get(name) ?? null;
+    },
+    async createAccessApp(a) {
+      const id = `access-${accessApps.size + 1}`;
+      const aud = `aud-${id}`;
+      accessApps.set(a.domain, { id, aud });
+      return { id, aud };
+    },
     async deleteAccessApp(appId) {
       deletedAccessAppCalls.push(appId);
       for (const [domain, a] of accessApps) {
         if (a.id === appId) accessApps.delete(domain);
       }
     },
-    findAccessApp: unusedMethod("findAccessApp"),
+    async findAccessApp(domain) {
+      return accessApps.get(domain) ?? null;
+    },
     createServiceToken: unusedMethod("createServiceToken"),
     rotateServiceToken: unusedMethod("rotateServiceToken"),
     listServiceTokens: unusedMethod("listServiceTokens"),
@@ -132,14 +167,23 @@ async function seedApp(db: Db, slug: string): Promise<string> {
   return id;
 }
 
-/** Inserts a fully "ready" exposure row plus the probe `create-probe` would have made —
- * every flag defaults to `true` (everything created by Homestead), overridable per test. */
+/** Inserts a fully "ready" exposure row plus the probe `create-probe` would have made,
+ * with the exposure's `probeId` recorded exactly the way `create-probe` records it —
+ * every flag defaults to `true` (everything created by Homestead), overridable per
+ * test. */
 async function seedExposure(
   db: Db,
   appId: string,
   overrides: Partial<ExposureRow> = {},
 ): Promise<ExposureRow> {
   const id = ulid();
+  const probeId = ulid();
+  await db.insert(probes).values({
+    id: probeId,
+    appId,
+    kind: "http_external",
+    target: `https://${HOSTNAME}`,
+  });
   await db.insert(exposures).values({
     id,
     appId,
@@ -153,14 +197,10 @@ async function seedExposure(
     accessAppAud: "aud-access-1",
     accessAppCreatedByUs: true,
     ingressRuleCreatedByUs: true,
+    probeId,
+    probeCreatedByUs: true,
     state: "ready",
     ...overrides,
-  });
-  await db.insert(probes).values({
-    id: ulid(),
-    appId,
-    kind: "http_external",
-    target: `https://${HOSTNAME}`,
   });
   const [row] = await db.select().from(exposures).where(eq(exposures.id, id));
   if (!row) throw new Error("seedExposure: row not found after insert");
@@ -282,6 +322,115 @@ describe("deprovision — every *CreatedByUs: false resource is left alone", () 
     // only ever refuse to touch what is currently there).
     expect(ingress()).toEqual([preExisting, { service: "http_status:404" }]);
   });
+
+  it("does not delete a user's own http_external probe (F1)", async () => {
+    // The measured defect: the old code deleted every `http_external` probe on the app
+    // by `(appId, kind)`, not by the id `create-probe` recorded. An admin's own probe —
+    // created any time through `routes/probes.ts`, entirely independent of exposure —
+    // matches that same pair and used to be destroyed along with it, taking its whole
+    // check history along.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client } = fakeClient();
+    const exposure = await seedExposure(db, appId);
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_external",
+      target: "https://my-own-monitoring-target.example.com",
+      label: "my own check",
+    });
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(true);
+    // Homestead's own probe (`exposure.probeId`) is gone; the user's is not.
+    const remaining = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(remaining.map((p) => p.id)).toEqual([usersOwnProbeId]);
+  });
+
+  it("leaves any probe alone when the exposure predates the probeId column", async () => {
+    // A row created before this migration has `probeId: null` — nothing here is safe to
+    // delete by kind (that's exactly the F1 defect), so a pre-migration exposure simply
+    // leaves whatever probe rows exist on the app untouched rather than guessing.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client } = fakeClient();
+    const exposure = await seedExposure(db, appId, { probeId: null, probeCreatedByUs: false });
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(true);
+    const remaining = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(remaining).toHaveLength(1);
+  });
+});
+
+describe("deprovision — the Access application is gated on the route it protects (F3)", () => {
+  it("refuses to remove a created Access application when both DNS and ingress are adopted", async () => {
+    // The exact scenario the whole-branch review measured: an entirely ordinary
+    // adoption case — DNS and ingress both predate this exposure and are never removed
+    // here — paired with an Access application Homestead itself created. The old code
+    // deleted the Access application anyway and then deleted the `exposures` row,
+    // leaving the app fully routed, fully resolving, and completely unauthenticated with
+    // no local record it had ever happened. `ok: true` must never describe that state.
+    const preExisting: IngressRule = { hostname: HOSTNAME, service: "http://someone-elses:80" };
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client, ingress, dnsRecords, accessApps, deletedAccessAppCalls } = fakeClient([
+      preExisting,
+      { service: "http_status:404" },
+    ]);
+    dnsRecords.set(HOSTNAME, { id: "dns-preexisting" });
+    accessApps.set(HOSTNAME, { id: "access-1", aud: "aud-access-1" });
+    const exposure = await seedExposure(db, appId, {
+      dnsRecordId: "dns-preexisting",
+      dnsRecordCreatedByUs: false,
+      ingressRuleCreatedByUs: false,
+    });
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.failures.map((f) => f.resource)).toEqual(["access-app"]);
+    }
+    // Nothing that was still live got touched.
+    expect(deletedAccessAppCalls).toHaveLength(0);
+    expect(accessApps.get(HOSTNAME)).toEqual({ id: "access-1", aud: "aud-access-1" });
+    expect(dnsRecords.get(HOSTNAME)).toEqual({ id: "dns-preexisting" });
+    expect(ingress()).toEqual([preExisting, { service: "http_status:404" }]);
+    // The row survives — this app is still exposed, and Homestead must not forget it.
+    const [row] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
+    expect(row).toBeDefined();
+  });
+
+  it("removes a created Access application once BOTH legs of the route are actually coming down", async () => {
+    // Contrast case: DNS is ours (removed successfully) but ingress was adopted and
+    // stays. The tunnel no longer routes this hostname to the app once ingress is
+    // removed and DNS no longer resolves to the tunnel — the route is down regardless of
+    // ingress staying — so the Access application is safe to remove.
+    const preExisting: IngressRule = { hostname: HOSTNAME, service: "http://someone-elses:80" };
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client, dnsRecords, accessApps, deletedAccessAppCalls } = fakeClient([
+      preExisting,
+      { service: "http_status:404" },
+    ]);
+    dnsRecords.set(HOSTNAME, { id: "dns-1" });
+    accessApps.set(HOSTNAME, { id: "access-1", aud: "aud-access-1" });
+    const exposure = await seedExposure(db, appId, { ingressRuleCreatedByUs: false });
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(true);
+    expect(deletedAccessAppCalls).toHaveLength(1);
+    expect(accessApps.has(HOSTNAME)).toBe(false);
+    expect(dnsRecords.has(HOSTNAME)).toBe(false);
+    const [row] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
+    expect(row).toBeUndefined();
+  });
 });
 
 describe("deprovision — the exposures row is deleted last", () => {
@@ -354,5 +503,55 @@ describe("deprovision — the exposures row is deleted last", () => {
     expect(dnsRecords.has(HOSTNAME)).toBe(false);
     const [row] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
     expect(row).toBeUndefined();
+  });
+});
+
+describe("deprovision — the ingress-rule step shares the tunnel's mutex with a concurrent expose", () => {
+  it("does not clobber a concurrent expose's hostname (or vice versa)", async () => {
+    // 2D's whole-branch review, F6: `deprovision.ts`'s ingress-rule step is the one
+    // mutex call site with zero coverage — every OTHER test in this file constructs its
+    // own private `TunnelConfigLock` per call, so nothing here has ever proven that
+    // deprovision and expose, sharing the SAME instance the way `cloudflare-expose.ts`
+    // wires them in production, actually serialise against each other. This drives a
+    // real deprovision and a real expose concurrently against one shared lock and one
+    // shared (delayed) fake tunnel, the same technique `expose.ts`'s own concurrency
+    // test uses.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const otherAppId = await seedApp(db, "other-app");
+    const { client, ingress } = fakeClient(
+      [{ hostname: HOSTNAME, service: "http://localhost:8096" }, { service: "http_status:404" }],
+      { delayMs: 15 },
+    );
+    const exposure = await seedExposure(db, appId);
+    const lock = new TunnelConfigLock();
+
+    const exposeDeps: ExposeDeps = {
+      db,
+      client,
+      tunnelConfigLock: lock,
+      appId: otherAppId,
+      hostname: "other-app.example.com",
+      zoneId: ZONE_ID,
+      tunnelId: TUNNEL_ID,
+      ingressService: "http://localhost:9000",
+      humanPolicyId: "human-policy-1",
+      monitorPolicyId: "monitor-policy-1",
+    };
+
+    const [deprovisionOutcome, exposeOutcome] = await Promise.all([
+      deprovision(baseDeps(db, client, lock), exposure),
+      runSteps(exposeSteps(exposeDeps), {} as ExposeCtx),
+    ]);
+
+    expect(deprovisionOutcome.ok).toBe(true);
+    expect(exposeOutcome.ok).toBe(true);
+
+    const hostnames = ingress().map((r) => r.hostname);
+    // The assertion a mutex-free (or lock-after-read) `deprovision.ts` ingress step
+    // fails: jellyfin's hostname must be gone, AND the concurrent expose's hostname must
+    // have survived, in the SAME final array.
+    expect(hostnames).not.toContain(HOSTNAME);
+    expect(hostnames).toContain("other-app.example.com");
   });
 });

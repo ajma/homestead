@@ -1,5 +1,5 @@
 import type { IngressRule } from "@shared/cloudflare.js";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import type { Step } from "../apps/step-sequence.js";
 import type { Db } from "../db/client.js";
@@ -75,6 +75,11 @@ export type ExposeCtx = {
   accessAppAud?: string;
   accessAppCreatedByUs?: boolean;
   probeId?: string;
+  /** `true` when this run created the `probes` row; `false` when it adopted the app's own
+   * pre-existing `http_external` probe (2D's whole-branch review, F1). Gates this step's
+   * own `undo` the same way every other adopted-resource flag in this file does — see
+   * `create-probe`'s doc comment. */
+  probeCreatedByUs?: boolean;
 };
 
 export type ExposeDeps = {
@@ -104,10 +109,11 @@ export type ExposeDeps = {
 
 /**
  * The four-step expose sequence (spec §6), for `runSteps`/`StepJobRunner`. Each step is
- * idempotent (adopts an existing Cloudflare resource rather than duplicating it) and
- * records whether IT created what it is now responsible for — the `exposures` row's
+ * idempotent (adopts an existing resource rather than duplicating it) and records whether
+ * IT created what it is now responsible for — the `exposures` row's
  * `dnsRecordCreatedByUs`/`ingressRuleCreatedByUs`/`accessAppCreatedByUs` columns, designed
- * in Phase 1A and never written before this. 2C's whole-branch review measured what
+ * in Phase 1A, plus `probeId`/`probeCreatedByUs` (added by this fix — see `create-probe`'s
+ * doc comment and 2D's whole-branch review, F1). 2C's whole-branch review measured what
  * happens when adoption and deletion share one match: a rollback deleted a tunnel it had
  * only adopted. Every `undo` below that touches a resource which might have pre-existed
  * gates the delete on the flag THIS run set, never on the fact that `ctx` merely holds an
@@ -150,7 +156,12 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
             hostname: deps.hostname,
             service: deps.ingressService,
           });
-          await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
+          // `{ ...config, ingress: updated }`, never a fresh `{ ingress: updated }` — the
+          // whole config (`warp-routing`, a tunnel-level `originRequest`, every OTHER
+          // rule's own unmodelled fields) has to go back on the wire unchanged, or this
+          // write silently erases it for every other hostname on the tunnel (2D's
+          // whole-branch review, F2).
+          await deps.client.putTunnelConfig(deps.tunnelId, { ...config, ingress: updated });
         });
         try {
           await retryOnBusy(() =>
@@ -182,7 +193,9 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
                     hostname: deps.hostname,
                     service: (originalRule as IngressRule).service,
                   });
-              await deps.client.putTunnelConfig(deps.tunnelId, { ingress: restored });
+              // Same F2 fix as the write above — the whole config, not a fresh object
+              // holding only `ingress`.
+              await deps.client.putTunnelConfig(deps.tunnelId, { ...config, ingress: restored });
             })
             .catch(() => {
               // Best effort — the same trade-off `write-files`'s undo makes: the
@@ -220,7 +233,8 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
                 hostname: deps.hostname,
                 service: (ctx.originalIngressRule as IngressRule).service,
               });
-          await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
+          // Same F2 fix as `run` above.
+          await deps.client.putTunnelConfig(deps.tunnelId, { ...config, ingress: updated });
         });
         await deps.db.delete(exposures).where(eq(exposures.id, ctx.exposureId));
       },
@@ -232,7 +246,11 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
           throw new Error("create-dns-record ran before splice-ingress produced an exposure row");
         }
         const exposureId = ctx.exposureId;
-        const existing = await deps.client.findDnsRecord(deps.zoneId, deps.hostname);
+        const existing = await deps.client.findDnsRecord(
+          deps.zoneId,
+          deps.hostname,
+          `${deps.tunnelId}.cfargotunnel.com`,
+        );
         const dnsRecordId =
           existing?.id ??
           (
@@ -330,26 +348,53 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
           throw new Error("create-probe ran before splice-ingress produced an exposure row");
         }
         const exposureId = ctx.exposureId;
-        const id = ulid();
-        // Both writes here are local, with no network call between them — unlike the two
+        // The 2C lesson, applied to the fourth resource this sequence touches (2D's
+        // whole-branch review, F1): an app can already carry its OWN `http_external`
+        // probe — `routes/probes.ts` lets an admin create one any time, independent of
+        // exposure — and this step must not duplicate it. Read under the same transaction
+        // the write below happens in, so a concurrent probe creation can't land in the
+        // gap between this check and the insert (Postgres-style TOCTOU is not this
+        // project's storage engine, but `retryOnBusy` already exists for exactly this
+        // kind of write contention — see its own doc comment).
+        let probeId: string | undefined;
+        let createdByUs: boolean | undefined;
+        // Both writes below are local, with no network call between them — unlike the two
         // steps above, they can share ONE transaction: either both land or neither does,
         // so there is no partial-failure window for `runSteps`' "the failing step is
         // never undone" rule to strand one half of this pair in.
         await retryOnBusy(() =>
           deps.db.transaction(async (tx) => {
-            await tx.insert(probes).values({
-              id,
-              appId: deps.appId,
-              kind: "http_external",
-              target: `https://${deps.hostname}`,
-            });
-            await tx.update(exposures).set({ state: "ready" }).where(eq(exposures.id, exposureId));
+            const [existing] = await tx
+              .select()
+              .from(probes)
+              .where(and(eq(probes.appId, deps.appId), eq(probes.kind, "http_external")));
+            const thisProbeId = existing?.id ?? ulid();
+            const thisCreatedByUs = existing === undefined;
+            if (thisCreatedByUs) {
+              await tx.insert(probes).values({
+                id: thisProbeId,
+                appId: deps.appId,
+                kind: "http_external",
+                target: `https://${deps.hostname}`,
+              });
+            }
+            await tx
+              .update(exposures)
+              .set({ state: "ready", probeId: thisProbeId, probeCreatedByUs: thisCreatedByUs })
+              .where(eq(exposures.id, exposureId));
+            probeId = thisProbeId;
+            createdByUs = thisCreatedByUs;
           }),
         );
-        ctx.probeId = id;
+        ctx.probeId = probeId;
+        ctx.probeCreatedByUs = createdByUs;
       },
       async undo(ctx) {
         if (ctx.probeId === undefined) return;
+        // Gated on THIS run's own flag, the same 2C lesson every other undo in this file
+        // applies: an adopted probe — the admin's own, predating this exposure — is left
+        // alone, never deleted just because `ctx` happens to hold its id.
+        if (!ctx.probeCreatedByUs) return;
         await deps.db.delete(probes).where(eq(probes.id, ctx.probeId));
       },
     },

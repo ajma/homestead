@@ -47,12 +47,14 @@ function fakeClient(initialIngress: IngressRule[] = [{ service: "http_status:404
   deletedDnsRecords: string[];
   accessApps: Map<string, { id: string; aud: string }>;
   deletedAccessApps: string[];
+  createAccessAppCalls: Array<{ domain: string; name: string; policyIds: string[] }>;
 } {
   let ingress: IngressRule[] = initialIngress;
   const dnsRecords = new Map<string, { id: string }>();
   const deletedDnsRecords: string[] = [];
   const accessApps = new Map<string, { id: string; aud: string }>();
   const deletedAccessApps: string[] = [];
+  const createAccessAppCalls: Array<{ domain: string; name: string; policyIds: string[] }> = [];
   let nextId = 1;
 
   const client: CloudflareClient = {
@@ -99,6 +101,7 @@ function fakeClient(initialIngress: IngressRule[] = [{ service: "http_status:404
       const id = `access-${nextId++}`;
       const aud = `aud-${id}`;
       accessApps.set(a.domain, { id, aud });
+      createAccessAppCalls.push(a);
       return { id, aud };
     },
     async deleteAccessApp(appId) {
@@ -124,6 +127,7 @@ function fakeClient(initialIngress: IngressRule[] = [{ service: "http_status:404
     deletedDnsRecords,
     accessApps,
     deletedAccessApps,
+    createAccessAppCalls,
   };
 }
 
@@ -259,6 +263,51 @@ describe("exposeSteps — happy path", () => {
 
     const [probe] = await db.select().from(probes).where(eq(probes.appId, appId));
     expect(probe).toMatchObject({ kind: "http_external", target: "https://jellyfin.example.com" });
+  });
+
+  it("passes the human policy AND the shared monitor policy to createAccessApp (F5)", async () => {
+    // Measured surviving mutation: dropping `monitorPolicyId` from the policy list, or
+    // passing `[]` entirely, left the full suite green — nothing anywhere asserted what
+    // `createAccessApp` actually received. Without the monitor policy attached, the
+    // external probe (2D Task 2's whole reason for existing) cannot authenticate and
+    // every exposed app's health check redirects to a login page instead.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client, createAccessAppCalls } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(true);
+    expect(createAccessAppCalls).toHaveLength(1);
+    expect(createAccessAppCalls[0]?.policyIds).toEqual(["human-policy-1", "monitor-policy-1"]);
+  });
+
+  it("adopts an app's own pre-existing http_external probe instead of duplicating it (F1)", async () => {
+    // Measured defect, the other half of F1: `create-probe` used to insert unconditionally,
+    // so an app that already carried its own external check (created through
+    // `routes/probes.ts`, independent of exposure) ended up with TWO `http_external`
+    // probes after a successful expose.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_external",
+      target: "https://my-own-monitoring-target.example.com",
+    });
+    const { client } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(true);
+    const probeRows = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRows).toHaveLength(1);
+    expect(probeRows[0]?.id).toBe(usersOwnProbeId);
+    const row = await exposureFor(db, appId);
+    expect(row).toMatchObject({ probeId: usersOwnProbeId, probeCreatedByUs: false });
   });
 
   it("records ingressRuleCreatedByUs: false when a rule for the hostname already existed", async () => {
@@ -561,6 +610,80 @@ describe("TunnelConfigLock — the read-modify-write race the spec names as a co
     // way and prove nothing. See the task report for the measured failure without the
     // lock in place.
     expect(hostnames).toContain("a.example.com");
+    expect(hostnames).toContain("b.example.com");
+  });
+});
+
+describe("TunnelConfigLock — the two other write sites this same file's own review flagged uncovered (F6)", () => {
+  // 2D's whole-branch review: `expose.ts`'s own concurrency test above proves the mutex
+  // exists at `splice-ingress`'s `run` — but `splice-ingress`'s inline compensation and
+  // its `undo` each do their OWN independent read-modify-write of the same ingress array,
+  // wrapped in the SAME lock, and neither one was ever driven concurrently against a
+  // second caller. Both survived their lock being removed with the full suite green.
+  // These two tests close that gap, using the identical delayed-fake technique.
+
+  it("splice-ingress's inline compensation does not clobber a concurrent expose's hostname", async () => {
+    const db = await seedDb();
+    const appIdA = await seedApp(db, "app-a");
+    const appIdB = await seedApp(db, "app-b");
+    const { client, ingress } = fakeClient();
+    const lock = new TunnelConfigLock();
+    const depsA = baseDeps(db, client, lock, appIdA, "a.example.com");
+    const depsB = baseDeps(db, client, lock, appIdB, "b.example.com");
+    // Forces A's `splice-ingress` local insert to fail AFTER its Cloudflare write already
+    // landed — exactly the window that runs the inline compensation at expose.ts:176-192.
+    const failingDbA = dbFailingNthInsert(db, 1);
+
+    const [resultA, outcomeB] = await Promise.all([
+      exposeSteps({ ...depsA, db: failingDbA })[0]
+        ?.run({} as ExposeCtx)
+        .catch((e: unknown) => e),
+      runSteps(exposeSteps(depsB), {} as ExposeCtx),
+    ]);
+
+    expect(resultA).toBeInstanceOf(Error);
+    expect(outcomeB.ok).toBe(true);
+
+    const hostnames = ingress().map((r) => r.hostname);
+    // A's compensation must have removed ITS OWN hostname, and must not have clobbered
+    // B's concurrent write in the process — the assertion a lock-free (or lock-after-read)
+    // compensation fails.
+    expect(hostnames).not.toContain("a.example.com");
+    expect(hostnames).toContain("b.example.com");
+  });
+
+  it("splice-ingress's undo does not clobber a concurrent expose's hostname", async () => {
+    const db = await seedDb();
+    const appIdA = await seedApp(db, "app-a");
+    const appIdB = await seedApp(db, "app-b");
+    const { client, ingress } = fakeClient();
+    const lock = new TunnelConfigLock();
+    const depsA = baseDeps(db, client, lock, appIdA, "a.example.com");
+    const depsB = baseDeps(db, client, lock, appIdB, "b.example.com");
+    // A's full sequence succeeds, then a synthetic later step fails, forcing a full
+    // rollback — including `splice-ingress`'s own `undo` (expose.ts:205-224) — the same
+    // technique the single-caller version of this test uses, just now run concurrently
+    // against B's own live expose sharing the same lock and tunnel.
+    const stepsA = [
+      ...exposeSteps(depsA),
+      {
+        name: "force-fail",
+        async run() {
+          throw new Error("boom after everything else");
+        },
+      },
+    ];
+
+    const [outcomeA, outcomeB] = await Promise.all([
+      runSteps(stepsA, {} as ExposeCtx),
+      runSteps(exposeSteps(depsB), {} as ExposeCtx),
+    ]);
+
+    expect(outcomeA.ok).toBe(false);
+    expect(outcomeB.ok).toBe(true);
+
+    const hostnames = ingress().map((r) => r.hostname);
+    expect(hostnames).not.toContain("a.example.com");
     expect(hostnames).toContain("b.example.com");
   });
 });
