@@ -203,12 +203,58 @@ const serviceTokensListResultSchema = z.array(serviceTokenListItemSchema);
 
 const policySchema = z.object({ id: z.string() });
 
+/** `getPolicy`'s response — `id` and `name` only, the two fields that method's own return
+ * type promises. Not `z.looseObject`: unlike the tunnel config round trip, nothing here
+ * ever writes this object back to Cloudflare, so there is no "everything else" to lose by
+ * dropping it on parse. */
+const policyDetailSchema = z.object({ id: z.string(), name: z.string() });
+
 /** Raises rather than resolving with `""` — see `serviceTokenCreateResultSchema`'s doc
  * comment for why this is two optional fields rather than a union, and `tunnelToken`
  * above for why an empty secret is treated as no secret at all. Never interpolates
  * whatever (possibly-empty) value it found into the thrown message: the message names
  * only the shape that was missing, never a value that could itself be a fragment of a
  * real secret. */
+/**
+ * Builds the `include` array for an email-based Access policy — one entry per email, each
+ * shaped `{ email: { email: <address> } }`. Phase 3A's brief flagged this shape as
+ * explicitly unverified against Cloudflare's own API reference (which documents the
+ * `include` entry only as an opaque `AccessRule` union, never expanding the email variant).
+ * It is used here, not hedged with a second shape, because the reference implementation —
+ * Cloudflare's own `cloudflare-go` SDK (`AccessGroupEmail`, `access_group.go`) — declares
+ * exactly this nested `{ email: { email: string } }` struct with matching JSON tags at both
+ * levels, which is as authoritative a source as exists short of a live account, and because
+ * a REQUEST (unlike a response) can only be sent one shape at a time — see
+ * `createAccessApp`'s own doc comment on why guessing two request shapes at once is worse
+ * than picking the best-evidenced one and letting a wrong guess fail loudly through the
+ * ordinary non-success envelope path.
+ */
+function emailIncludeList(emails: string[]): Array<{ email: { email: string } }> {
+  return emails.map((email) => ({ email: { email } }));
+}
+
+/**
+ * Refuses an empty email list before any network call — never sent to Cloudflare as an
+ * `include: []` policy. Phase 3A's brief calls this out by name: whether a no-includes
+ * Access policy fails open (admits everyone) or fails closed (admits no one) was not
+ * checked against a live account, and guessing wrong in the "admits everyone" direction is
+ * exactly how a policy meant to gate access ends up granting it unconditionally. Treated
+ * here as a caller error (`fault: "client"`, the same fault `classifyFault` uses for "the
+ * request WE sent was malformed") rather than a legitimate empty state — a caller with
+ * zero emails to include has nothing to protect and should not be calling this at all;
+ * `ensureAccessPolicies` (Task 2) is the one caller in this codebase, and it always has at
+ * least the admin who just finished onboarding.
+ */
+function requireEmails(emails: string[]): void {
+  if (emails.length === 0) {
+    throw new CloudflareError(
+      "client",
+      "refusing to create or update an Access policy with no email includes — an empty include list may fail open or closed depending on Cloudflare, and this client will not guess which",
+      { status: null, codes: [] },
+    );
+  }
+}
+
 function secretOf(raw: { client_secret?: string; secret?: string }): string {
   const secret = raw.client_secret ?? raw.secret ?? "";
   if (secret.length === 0) {
@@ -311,6 +357,27 @@ export type CloudflareClient = {
   /** Always sends `decision: "non_identity"` — anything else demands a human login, which
    * the monitor probe cannot give. See the method's own comment. */
   createMonitorPolicy(name: string, serviceTokenId: string): Promise<{ id: string }>;
+
+  /** Always sends `decision: "allow"` — the discriminating fact between this and
+   * `createMonitorPolicy`'s `non_identity`. Getting this backwards is silent: nothing else
+   * in the system would notice a human policy that admits a service token instead of
+   * requiring sign-in. One `include` entry per email — see `emailIncludeList`. Raises
+   * before any network call on an empty `emails` — see `requireEmails`. */
+  createEmailPolicy(name: string, emails: string[]): Promise<{ id: string }>;
+  /** Sends the FULL desired email list every time, via `PUT` — there is no add-one-email
+   * endpoint any more than there was an add-one-ingress-rule endpoint
+   * (`putTunnelConfig`'s own doc comment), and a delta computed against what this codebase
+   * believes Cloudflare holds drifts the moment anything else edits the policy. `PUT` (not
+   * `PATCH`) and "every field required, not just the changed one" are both confirmed
+   * against Cloudflare's current API reference for this exact endpoint — unlike the
+   * `include` shape above, this one was not left to inference. Raises before any network
+   * call on an empty `emails` — see `requireEmails`; there is no way to ask this method to
+   * clear a policy down to zero includes. */
+  updateEmailPolicy(policyId: string, name: string, emails: string[]): Promise<void>;
+  /** `null` for a missing policy rather than throwing — same contract as `findAccessApp`/
+   * `findDnsRecord`. Both the reconcile check and `ensureAccessPolicies`'s dedup (Task 2)
+   * need to ask "does this policy still exist" without a 404 aborting the caller. */
+  getPolicy(policyId: string): Promise<{ id: string; name: string } | null>;
 };
 
 /**
@@ -909,6 +976,65 @@ export function createCloudflareClient(opts: {
         );
       }
       return { id: parsed.data.id };
+    },
+
+    /**
+     * `decision: "allow"` on the request body is the binding assertion — the sibling of
+     * `createMonitorPolicy`'s `non_identity` assertion, and the one this project's Access
+     * setup depends on getting right: `non_identity` here would let the monitor's service
+     * token log in as a person, and nothing downstream would notice.
+     */
+    async createEmailPolicy(name, emails) {
+      requireEmails(emails);
+      const { result } = await requestEnvelope({
+        method: "POST",
+        url: accountUrl("/access/policies"),
+        body: { name, decision: "allow", include: emailIncludeList(emails) },
+      });
+      const parsed = policySchema.safeParse(result);
+      if (!parsed.success) {
+        throw new CloudflareError(
+          "cloudflare",
+          "Cloudflare's Access policy response did not match the expected shape",
+          { status: null, codes: [] },
+        );
+      }
+      return { id: parsed.data.id };
+    },
+
+    async updateEmailPolicy(policyId, name, emails) {
+      requireEmails(emails);
+      await requestEnvelope({
+        method: "PUT",
+        url: accountUrl(`/access/policies/${policyId}`),
+        body: { name, decision: "allow", include: emailIncludeList(emails) },
+      });
+    },
+
+    /**
+     * `null` on a 404, the same idiom `deleteIdempotently` uses for the delete methods —
+     * here surfaced through a `try`/`catch` rather than that shared helper because this is
+     * a `GET` that returns a value on success, not a `DELETE` that returns nothing.
+     */
+    async getPolicy(policyId) {
+      try {
+        const { result } = await requestEnvelope({
+          method: "GET",
+          url: accountUrl(`/access/policies/${policyId}`),
+        });
+        const parsed = policyDetailSchema.safeParse(result);
+        if (!parsed.success) {
+          throw new CloudflareError(
+            "cloudflare",
+            "Cloudflare's Access policy response did not match the expected shape",
+            { status: null, codes: [] },
+          );
+        }
+        return { id: parsed.data.id, name: parsed.data.name };
+      } catch (error) {
+        if (error instanceof CloudflareError && error.status === 404) return null;
+        throw error;
+      }
     },
   };
 }

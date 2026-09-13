@@ -68,6 +68,9 @@ function fakeClient(overrides: Partial<CloudflareClient> = {}): {
     async deleteServiceToken(tokenId) {
       calls.deleteServiceToken.push(tokenId);
     },
+    createEmailPolicy: unusedMethod("createEmailPolicy"),
+    updateEmailPolicy: unusedMethod("updateEmailPolicy"),
+    getPolicy: unusedMethod("getPolicy"),
     ...overrides,
   };
 

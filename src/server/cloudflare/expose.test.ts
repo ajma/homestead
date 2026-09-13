@@ -121,6 +121,9 @@ function fakeClient(initialIngress: IngressRule[] = [{ service: "http_status:404
     listServiceTokens: unusedMethod("listServiceTokens"),
     deleteServiceToken: unusedMethod("deleteServiceToken"),
     createMonitorPolicy: unusedMethod("createMonitorPolicy"),
+    createEmailPolicy: unusedMethod("createEmailPolicy"),
+    updateEmailPolicy: unusedMethod("updateEmailPolicy"),
+    getPolicy: unusedMethod("getPolicy"),
   };
 
   return {

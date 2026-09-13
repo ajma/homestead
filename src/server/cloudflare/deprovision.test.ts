@@ -126,6 +126,9 @@ function fakeClient(
     listServiceTokens: unusedMethod("listServiceTokens"),
     deleteServiceToken: unusedMethod("deleteServiceToken"),
     createMonitorPolicy: unusedMethod("createMonitorPolicy"),
+    createEmailPolicy: unusedMethod("createEmailPolicy"),
+    updateEmailPolicy: unusedMethod("updateEmailPolicy"),
+    getPolicy: unusedMethod("getPolicy"),
   };
 
   return {
