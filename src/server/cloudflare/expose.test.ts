@@ -1,4 +1,6 @@
+import type { Step } from "@server/apps/step-sequence";
 import { runSteps } from "@server/apps/step-sequence";
+import { ACCESS_TEAM_DOMAIN_SETTING_KEY } from "@server/auth/access-settings";
 import { LOCAL_HOST_ID } from "@server/bootstrap";
 import type { CloudflareClient } from "@server/cloudflare/client";
 import {
@@ -10,7 +12,7 @@ import {
 } from "@server/cloudflare/expose";
 import type { Db } from "@server/db/client";
 import { createDb, runMigrations } from "@server/db/client";
-import { apps, exposures, hosts, probes } from "@server/db/schema";
+import { apps, exposures, hosts, probes, settings } from "@server/db/schema";
 import type { IngressRule } from "@shared/cloudflare.js";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
@@ -622,6 +624,134 @@ describe("exposeSteps — create-probe (structurally unreachable through a full 
 
     const [after] = await db.select().from(probes).where(eq(probes.appId, appId));
     expect(after).toBeUndefined();
+  });
+});
+
+describe("exposeSteps — record-self-access-settings (2F Task 2)", () => {
+  it("is absent entirely when selfAccessTeamDomain is not set — an ordinary app's steps cannot touch this setting", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const steps = exposeSteps(deps);
+    expect(steps.map((s) => s.name)).not.toContain("record-self-access-settings");
+  });
+
+  it("is present, last, and records the team domain when selfAccessTeamDomain is set", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "homestead");
+    const { client } = fakeClient();
+    const deps: ExposeDeps = {
+      ...baseDeps(db, client, new TunnelConfigLock(), appId, "homestead.example.com"),
+      selfAccessTeamDomain: "my-team",
+    };
+
+    const steps = exposeSteps(deps);
+    expect(steps.at(-1)?.name).toBe("record-self-access-settings");
+
+    const ctx: ExposeCtx = {};
+    for (const step of steps) await step.run(ctx);
+
+    expect(ctx.teamDomainRecorded).toBe(true);
+    const [row] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
+    expect(row?.value).toBe("my-team");
+  });
+
+  it("is idempotent: leaves an already-recorded team domain untouched rather than overwriting it", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "homestead");
+    await db
+      .insert(settings)
+      .values({ key: ACCESS_TEAM_DOMAIN_SETTING_KEY, value: "existing-team" });
+    const { client } = fakeClient();
+    const deps: ExposeDeps = {
+      ...baseDeps(db, client, new TunnelConfigLock(), appId, "homestead.example.com"),
+      selfAccessTeamDomain: "attempted-new-team",
+    };
+
+    const steps = exposeSteps(deps);
+    const ctx: ExposeCtx = {};
+    for (const step of steps) await step.run(ctx);
+
+    expect(ctx.teamDomainRecorded).toBe(false);
+    const [row] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
+    expect(row?.value).toBe("existing-team");
+  });
+
+  it("its own undo removes only a value THIS run wrote, never one it merely found", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "homestead");
+    const { client } = fakeClient();
+    const deps: ExposeDeps = {
+      ...baseDeps(db, client, new TunnelConfigLock(), appId, "homestead.example.com"),
+      selfAccessTeamDomain: "my-team",
+    };
+    const steps = exposeSteps(deps);
+    const last = steps.at(-1);
+    if (!last?.undo) throw new Error("record-self-access-settings has no undo");
+
+    const ctx: ExposeCtx = { teamDomainRecorded: true };
+    await last.run(ctx);
+    await last.undo(ctx);
+
+    const [afterOwnWrite] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
+    expect(afterOwnWrite).toBeUndefined();
+
+    // Now prove the adopted case is left alone: a value pre-existed, so `run` never wrote
+    // it (`teamDomainRecorded: false`), and `undo` must not delete it either.
+    await db.insert(settings).values({ key: ACCESS_TEAM_DOMAIN_SETTING_KEY, value: "adopted" });
+    const adoptedCtx: ExposeCtx = {};
+    await last.run(adoptedCtx);
+    expect(adoptedCtx.teamDomainRecorded).toBe(false);
+    await last.undo(adoptedCtx);
+
+    const [afterAdoptedUndo] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
+    expect(afterAdoptedUndo?.value).toBe("adopted");
+  });
+
+  it("rolls back the whole sequence, including the team-domain write, when a later concern fails — proven via runSteps", async () => {
+    // `record-self-access-settings` is the LAST step today, so nothing currently fails
+    // after it — but proving `runSteps` unwinds it correctly (not just this file's own
+    // step object) matters because a future step appended after it must not be able to
+    // leave this setting behind. Simulated here by making the step's OWN run throw after
+    // its write has already landed, which is exactly the shape a later real failure would
+    // have from `runSteps`'s point of view.
+    const db = await seedDb();
+    const appId = await seedApp(db, "homestead");
+    const { client } = fakeClient();
+    const deps: ExposeDeps = {
+      ...baseDeps(db, client, new TunnelConfigLock(), appId, "homestead.example.com"),
+      selfAccessTeamDomain: "my-team",
+    };
+    const steps = exposeSteps(deps);
+    const failingLastStep: Step<ExposeCtx> = {
+      name: "force-failure-after-self-settings",
+      async run() {
+        throw new Error("simulated failure of a later step");
+      },
+    };
+
+    const outcome = await runSteps([...steps, failingLastStep], {});
+    expect(outcome.ok).toBe(false);
+
+    const [row] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
+    expect(row).toBeUndefined();
   });
 });
 

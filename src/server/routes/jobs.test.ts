@@ -377,6 +377,53 @@ describe("lifecycle routes", () => {
 });
 
 describe("system apps", () => {
+  it("refuses every lifecycle action on Homestead marked self by REAL detection, not a seeded row", async () => {
+    // Every other test in this block seeds `systemKind` directly (`db.update(apps).set(...)`)
+    // to exercise the guard in isolation from how marking happens. This one instead runs
+    // the actual pipeline 2F Task 2 adds (`self-detect.ts`, wired into `POST
+    // /api/apps/adopt`) end to end, so the guard is proven to fire against a row this
+    // codebase's own detection produced — the assertion the task brief calls out
+    // specifically, since every guard test before this one could pass against a
+    // `systemKind` no code path actually sets in production.
+    const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
+    const originalHostname = process.env.HOSTNAME;
+    process.env.HOSTNAME = "abc123";
+    try {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.containers = [
+        {
+          id: `abc123${"0".repeat(58)}`,
+          names: ["homestead"],
+          image: "homestead:latest",
+          state: "running",
+          status: "Up",
+          project: "homestead",
+          service: "homestead",
+          labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
+        },
+      ];
+      const id = await createApp(app, cookie, { name: "homestead" });
+
+      const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
+      expect(row?.systemKind).toBe("self");
+
+      for (const kind of ["up", "down", "restart", "pull"]) {
+        const res = await app.inject({
+          method: "POST",
+          url: `/api/apps/${id}/actions/${kind}`,
+          headers: { cookie },
+        });
+        expect(res.statusCode, `${kind} should be refused`).toBe(409);
+        expect(res.json().error, `${kind} should say why`).toBe("system_app");
+      }
+      await app.close();
+    } finally {
+      if (originalHostname === undefined) delete process.env.HOSTNAME;
+      else process.env.HOSTNAME = originalHostname;
+    }
+  });
+
   it("refuses every lifecycle action on a self-adopted Homestead", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);

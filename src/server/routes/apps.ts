@@ -1,7 +1,7 @@
 import { LibsqlError } from "@libsql/client";
 import type { AdminApp, ViewerApp } from "@shared/dto";
 import { maskEnv, parseEnv, removeEnv, serialiseEnv, upsertEnv } from "@shared/env-file.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import { normaliseProjectName, scanForApps } from "../apps/adoption.js";
 import { deployTimestamps } from "../apps/deploy-timestamps.js";
 import { runningJobs } from "../apps/running-jobs.js";
 import { scaffoldCompose } from "../apps/scaffold.js";
+import { detectSelfDirectory } from "../apps/self-detect.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { currentProjectName, statusFor } from "../apps/status-for.js";
 import { audit } from "../audit.js";
@@ -72,6 +73,13 @@ const patchBody = z.object({
   launchInternalUrl: launchUrlSchema,
   showOnLauncher: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
+  // The explicit override `self-detect.ts`'s own doc promises: detection at adopt time
+  // can only mark ONE directory `self`, and it must degrade to nothing rather than guess
+  // (no container, detection ran before this app existed, or it was simply wrong). Only
+  // `"self"` or `null` are accepted here — `"cloudflared"` is never admin-assignable; see
+  // the PATCH handler for why and for what this schema alone cannot enforce (at most one
+  // `self` app, and never touching an app already `"cloudflared"`).
+  systemKind: z.enum(["self"]).nullable().optional(),
 });
 
 const composeWriteBody = z.object({
@@ -168,7 +176,7 @@ export async function loadAppByIdOrSlug(db: Db, ctx: AuthContext, idOrSlug: stri
 }
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
-  const { db, host, composeConfig, icons } = app.deps;
+  const { db, host, composeConfig, icons, config } = app.deps;
 
   /**
    * Resolves candidate compose content without touching the app's real file.
@@ -283,6 +291,11 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
     // Hoist listAppDirectories outside the loop - calling it once per directory was N round trips.
     const allDiscovered = await host.listAppDirectories();
+    // Resolved once per request, not per directory: the answer ("Homestead itself runs
+    // from directory X, or nothing can tell") does not depend on which directory is being
+    // adopted. See `self-detect.ts`'s own doc for the detection strategy, and its failure
+    // mode outside a container (returns `null`, never a guess).
+    const selfDirectory = await detectSelfDirectory({ host, composeRoot: config.composeRoot });
 
     for (const directory of body.directories) {
       const existing = await db
@@ -350,6 +363,11 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
               projectName: resolved.resolved.projectName,
               lastComposeHash: hash,
               iconRef,
+              // `null` for every directory but the one detection resolved above — see
+              // `self-detect.ts`. Never `"cloudflared"` here: that kind is assigned only
+              // by `provision-tunnel.ts`'s own sequence, which inserts its `apps` row
+              // directly rather than through this route.
+              systemKind: directory === selfDirectory ? "self" : null,
             });
             await tx.insert(probes).values({ id: ulid(), appId: id, kind: "docker" });
           }),
@@ -587,7 +605,35 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     if (Object.keys(body).length === 0) return reply.code(400).send({ error: "no_fields" });
 
     // Check scope before the update.
-    if (!(await loadApp(db, ctx, id))) return reply.code(404).send({ error: "not_found" });
+    const current = await loadApp(db, ctx, id);
+    if (!current) return reply.code(404).send({ error: "not_found" });
+
+    // The explicit override for `self-detect.ts`'s detection — see `patchBody`'s own
+    // comment for why the schema alone cannot enforce these two invariants.
+    if (body.systemKind !== undefined) {
+      // `"cloudflared"` is provisioned and owned entirely by `provision-tunnel.ts`; this
+      // route's `self` override must never be the thing that strips it (which would
+      // silently reopen the lifecycle/delete guards 2B built specifically for that app)
+      // or the thing that assigns it (this schema cannot even express that value).
+      if (current.systemKind === "cloudflared") {
+        return reply.code(409).send({ error: "system_app" });
+      }
+      if (body.systemKind === "self") {
+        // At most one `self` app: `resolveAccessSettings` (`auth/access-settings.ts`)
+        // picks whichever row `systemKind = 'self'` returns first if more than one ever
+        // did, which is not a decision this route should let happen silently. The admin
+        // must clear the old one before assigning a new one — an explicit two-step
+        // correction, not a silent reassignment of resources they may not have meant to
+        // touch.
+        const [other] = await db
+          .select({ id: apps.id })
+          .from(apps)
+          .where(and(eq(apps.systemKind, "self"), ne(apps.id, id)));
+        if (other) {
+          return reply.code(409).send({ error: "self_already_assigned" });
+        }
+      }
+    }
 
     const updated = await db
       .update(apps)

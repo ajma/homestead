@@ -1,3 +1,4 @@
+import { resolveAccessSettings } from "@server/auth/access-settings";
 import { LOCAL_HOST_ID } from "@server/bootstrap";
 import { MonitorAccessStore } from "@server/cloudflare/monitor-access";
 import { TunnelStore } from "@server/cloudflare/tunnel-store";
@@ -129,7 +130,7 @@ function exposeFetch(): {
   return { fetch: fetchFn, ingress: () => ingress, dnsRecords, accessApps };
 }
 
-async function withFullSetup() {
+async function withFullSetup(opts: { systemKind?: "self" } = {}) {
   const app = await buildTestApp();
   const { cookie } = await signUpAdmin(app);
   app.deps.fetch = verifyingFetch();
@@ -167,6 +168,7 @@ async function withFullSetup() {
     directory: "jellyfin",
     composeFile: "compose.yaml",
     projectName: "jellyfin",
+    systemKind: opts.systemKind ?? null,
   });
 
   return { app, cookie, appId };
@@ -423,6 +425,93 @@ describe("POST /api/apps/:id/expose", () => {
       kind: "http_external",
       target: "https://jellyfin.example.com",
     });
+
+    await app.close();
+  });
+
+  it("exposing the self app writes its aud and team domain, so 2E's database path resolves (2F Task 2)", async () => {
+    // The assertion the task brief calls "the one that closes the three-times-deferred
+    // gap": `auth/access-settings.ts`'s `resolveAccessSettings` has always been able to
+    // READ these two values from the database — 2E built and tested that — but nothing
+    // ever WROTE them, because nothing ever marked an app `systemKind: "self"` (1I, then
+    // 2B, then 2E all deferred it). This test exposes a REAL self app end to end and
+    // proves `resolveAccessSettings` — the exact function the Access sign-in path calls
+    // at request time — now resolves from the database, with no environment override in
+    // play at all.
+    const { app, cookie, appId } = await withFullSetup({ systemKind: "self" });
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: { ...exposeBody, teamDomain: "my-team" },
+    });
+
+    expect(res.statusCode).toBe(202);
+    const { jobId } = res.json() as { jobId: string };
+    const jobRow = await waitForJobTerminal(app.deps.db, jobId);
+    expect(jobRow?.status).toBe("succeeded");
+
+    const [exposureRow] = await app.deps.db
+      .select()
+      .from(exposures)
+      .where(eq(exposures.appId, appId));
+    expect(exposureRow?.accessAppAud).toBeTruthy();
+
+    await expect(
+      resolveAccessSettings({ db: app.deps.db, config: app.deps.config }),
+    ).resolves.toEqual({
+      teamDomain: "my-team",
+      aud: exposureRow?.accessAppAud,
+    });
+
+    await app.close();
+  });
+
+  it("refuses to expose the self app without a teamDomain — nothing to write, so refuse before touching anything", async () => {
+    const { app, cookie, appId } = await withFullSetup({ systemKind: "self" });
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("team_domain_required");
+    // Nothing started — no job, no lock taken, no Cloudflare call.
+    expect(await app.deps.db.select().from(jobs)).toEqual([]);
+
+    await app.close();
+  });
+
+  it("never writes the team-domain setting when exposing an ordinary (non-self) app", async () => {
+    // The other half of the same gap, stated as a negative: an ordinary app's expose must
+    // never be able to repoint the account-wide Access verification setting, even if a
+    // `teamDomain` somehow ends up on the request body.
+    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: { ...exposeBody, teamDomain: "should-be-ignored" },
+    });
+
+    expect(res.statusCode).toBe(202);
+    const { jobId } = res.json() as { jobId: string };
+    await waitForJobTerminal(app.deps.db, jobId);
+
+    await expect(
+      resolveAccessSettings({ db: app.deps.db, config: app.deps.config }),
+    ).resolves.toBeNull();
 
     await app.close();
   });

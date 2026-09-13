@@ -46,6 +46,18 @@ const exposeBody = z.object({
    * not create or manage this policy; it is referenced by id, the same way the shared
    * monitor policy is (see `expose.ts`'s `ExposeDeps.humanPolicyId`). */
   policyId: z.string().trim().min(1),
+  /**
+   * Required ONLY when the app being exposed is `systemKind: "self"` — checked below,
+   * not in this schema, since that depends on a database row the schema cannot see. The
+   * account's Cloudflare Zero Trust team domain has no API this project's existing
+   * credentials are known to reach (unlike everything else this route already resolves
+   * — zones, the tunnel, the monitor policy) and no other place in this codebase
+   * captures it (`grep`-verified: `HOMESTEAD_ACCESS_TEAM_DOMAIN` is the only other
+   * source), so the admin — who necessarily already knows it, the same way they already
+   * know the human `policyId` above — supplies it here, once, at the moment 2E's
+   * database path actually needs it: when Homestead exposes itself.
+   */
+  teamDomain: z.string().trim().min(1).optional(),
 });
 
 export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void> {
@@ -68,6 +80,13 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
     const [existingExposure] = await db.select().from(exposures).where(eq(exposures.appId, id));
     if (existingExposure) {
       return reply.code(409).send({ error: "already_exposed" });
+    }
+
+    // 2F Task 2: the one case `teamDomain` is required — see `exposeBody`'s own comment
+    // on why this route asks for it here rather than resolving it some other way.
+    const isSelf = appRow.systemKind === "self";
+    if (isSelf && body.teamDomain === undefined) {
+      return reply.code(422).send({ error: "team_domain_required" });
     }
 
     // `exposures.hostname` is `.unique()` (schema.ts) same as `appId` above, but was never
@@ -117,6 +136,9 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       ingressService: body.ingressService,
       humanPolicyId: body.policyId,
       monitorPolicyId: monitorAccess.policyId,
+      // `undefined` for every non-self app — see `ExposeDeps.selfAccessTeamDomain`'s own
+      // doc comment for why that must be an absent field, not merely an unused one.
+      selfAccessTeamDomain: isSelf ? body.teamDomain : undefined,
     });
 
     let jobId: string;
