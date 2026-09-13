@@ -324,7 +324,20 @@ describe("CloudflarePanel", () => {
       ).toBe(false);
     });
 
-    it("disables the button and streams the job's output while a provision job runs", async () => {
+    it("disables the button immediately, then streams the job's output once the POST resolves — the initiating tab has no live view while the sequence is actually running (Minor 1)", async () => {
+      // Renamed, not the wiring: `watchedJobId` is set only from the POST's resolved body
+      // (`handleProvision` in `CloudflarePanel.tsx`), and the POST does not resolve until
+      // `StepJobRunner.start` finishes the WHOLE sequence — see the whole-branch review's
+      // ruling on why that blocking design stays for this phase (`cloudflare-tunnel.ts`'s
+      // comment on the audit-ordering fix explains the same thing). So `JobOutput` here
+      // only ever mounts against an ALREADY-TERMINAL job for the tab that clicked the
+      // button; this test's own `resolvePost?.()` below happens before any assertion
+      // about the stream, which is exactly why the old name ("...streams the job's output
+      // while a provision job runs") did not describe what the wiring can produce. A
+      // reloaded page or a second admin's tab genuinely does get live output, via
+      // `runningJobId` — see "adopts a provision job already running when the panel
+      // mounts" below. Fixing the behaviour itself is 2D's job, once `stepJobs.start` is
+      // detached from awaiting the full sequence.
       let resolvePost: (() => void) | undefined;
       const gate = new Promise<void>((resolve) => {
         resolvePost = resolve;

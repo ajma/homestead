@@ -429,10 +429,15 @@ export function createCloudflareClient(opts: {
     /**
      * Idempotent by design, not by special-casing a response shape: Cloudflare tunnels
      * are soft-deleted (see `tunnelSchema`'s `deleted_at`), so re-deleting an
-     * already-deleted tunnel is expected to report the same `success: true` envelope as
-     * the first call. This method does not add its own "already deleted" precondition
-     * check on top of that — such a check is exactly what would make a repeat call throw,
-     * which is the failure `client.test.ts`'s idempotency test binds against.
+     * already-deleted tunnel is ASSUMED to report the same `success: true` envelope as
+     * the first call — this is unverified, one of the plan's explicitly-unverified facts
+     * (like the active-connections question in the next paragraph), not a confirmed
+     * Cloudflare guarantee. If Cloudflare instead returns a 404 or an error code, every
+     * rollback that re-enters `deleteTunnel` turns a clean unwind into a spurious MANUAL
+     * CLEANUP banner — worth knowing before leaning on this harder. This method does not
+     * add its own "already deleted" precondition check on top of that assumption — such a
+     * check is exactly what would make a repeat call throw, which is the failure
+     * `client.test.ts`'s idempotency test binds against.
      *
      * Whether Cloudflare instead refuses a delete while the tunnel has active connections
      * is the plan's second explicitly-unverified fact. This method does not guess at a
