@@ -639,6 +639,38 @@ describe("createCloudflareClient", () => {
         .catch((e: unknown) => e);
       expect(error).toBeInstanceOf(CloudflareError);
     });
+
+    it("preserves fields this client does not model, on both the config and a rule (F2)", async () => {
+      // Measured defect: `ingressRuleSchema`/`tunnelConfigResultSchema` used to be plain
+      // `z.object`, which drops any key it doesn't declare on parse. `path` and
+      // `originRequest` are real, common ingress fields (a self-signed origin, or one
+      // hostname serving several paths) and `warp-routing` is a real tunnel-level field —
+      // none of them are read by this client, and all three used to vanish the instant
+      // `getTunnelConfig` parsed the response, long before any caller got a chance to
+      // round-trip them back through `putTunnelConfig`.
+      const rawConfig = {
+        ingress: [
+          {
+            hostname: "wiki.example.com",
+            path: "/docs/.*",
+            service: "http://localhost:3000",
+            originRequest: { noTLSVerify: true, httpHostHeader: "wiki.internal" },
+          },
+          { service: "http_status:404" },
+        ],
+        "warp-routing": { enabled: true },
+        originRequest: { connectTimeout: 30 },
+        // A field neither this schema NOR Cloudflare's documented shape names — proving
+        // this survives a field the schema has literally never heard of, not merely one
+        // it happens to already know about.
+        aFieldThisClientHasNeverHeardOf: "still here",
+      };
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: true, result: { config: rawConfig } })),
+      );
+      const config = await client({ fetch: fetchMock }).getTunnelConfig("tunnel-1");
+      expect(config).toEqual(rawConfig);
+    });
   });
 
   describe("putTunnelConfig", () => {
@@ -657,6 +689,24 @@ describe("createCloudflareClient", () => {
       ).resolves.toBeUndefined();
     });
 
+    it("sends whatever config object it is given verbatim, not just ingress (F2)", async () => {
+      // The other half of the round trip: even if `getTunnelConfig` preserved everything,
+      // a `putTunnelConfig` that reconstructs `{ ingress: config.ingress }` internally
+      // would still drop it on the write. This sends a config carrying fields this client
+      // has no opinion on and asserts the exact request body — the binding assertion,
+      // same posture `createDnsRecord`'s `proxied: true` test takes.
+      const config = {
+        ingress: [{ service: "http_status:404" }],
+        "warp-routing": { enabled: true },
+        originRequest: { connectTimeout: 30 },
+      };
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        expect(JSON.parse(String(init?.body))).toEqual({ config });
+        return jsonResponse(envelope({ success: true, result: { config } }));
+      });
+      await client({ fetch: fetchMock }).putTunnelConfig("tunnel-1", config);
+    });
+
     it("raises a CloudflareError classified the normal way on failure", async () => {
       const fetchMock = vi.fn(async () =>
         jsonResponse(envelope({ success: false, errors: [{ code: 9109, message: "nope" }] }), {
@@ -668,6 +718,35 @@ describe("createCloudflareClient", () => {
         .catch((e: unknown) => e)) as CloudflareError;
       expect(error).toBeInstanceOf(CloudflareError);
       expect(error.fault).toBe("permission");
+    });
+  });
+
+  describe("getTunnelConfig → putTunnelConfig round trip (F2)", () => {
+    it("a caller that changes only ingress sends every other field back untouched", async () => {
+      // This is the test the finding asked for: fails if ANY field is dropped along the
+      // way, including one the schema was never told about — end to end, through both
+      // methods, the way `expose.ts`/`deprovision.ts` actually use this client.
+      const rawConfig = {
+        ingress: [
+          { hostname: "wiki.example.com", path: "/docs/.*", service: "http://localhost:3000" },
+          { service: "http_status:404" },
+        ],
+        "warp-routing": { enabled: true },
+        originRequest: { connectTimeout: 30 },
+        somethingThisClientDoesNotKnowAbout: 42,
+      };
+      let sentBody: unknown;
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PUT") sentBody = JSON.parse(String(init.body));
+        return jsonResponse(envelope({ success: true, result: { config: rawConfig } }));
+      });
+      const c = client({ fetch: fetchMock });
+
+      const config = await c.getTunnelConfig("tunnel-1");
+      const updated = [...config.ingress, { hostname: "new.example.com", service: "http://x:1" }];
+      await c.putTunnelConfig("tunnel-1", { ...config, ingress: updated });
+
+      expect(sentBody).toEqual({ config: { ...rawConfig, ingress: updated } });
     });
   });
 
@@ -705,16 +784,33 @@ describe("createCloudflareClient", () => {
   });
 
   describe("findDnsRecord", () => {
-    it("returns the id of the matching record", async () => {
+    const TUNNEL_CONTENT = "tunnel-1.cfargotunnel.com";
+
+    it("returns the id of a matching proxied CNAME to the tunnel", async () => {
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
         const url = new URL(String(input));
         expect(url.pathname).toBe("/client/v4/zones/zone-1/dns_records");
         expect(url.searchParams.get("name")).toBe("app.example.com");
         return jsonResponse(
-          envelope({ success: true, result: [{ id: "dns-1", name: "app.example.com" }] }),
+          envelope({
+            success: true,
+            result: [
+              {
+                id: "dns-1",
+                name: "app.example.com",
+                type: "CNAME",
+                content: TUNNEL_CONTENT,
+                proxied: true,
+              },
+            ],
+          }),
         );
       });
-      const record = await client({ fetch: fetchMock }).findDnsRecord("zone-1", "app.example.com");
+      const record = await client({ fetch: fetchMock }).findDnsRecord(
+        "zone-1",
+        "app.example.com",
+        TUNNEL_CONTENT,
+      );
       expect(record).toEqual({ id: "dns-1" });
     });
 
@@ -723,6 +819,60 @@ describe("createCloudflareClient", () => {
       const record = await client({ fetch: fetchMock }).findDnsRecord(
         "zone-1",
         "nowhere.example.com",
+        TUNNEL_CONTENT,
+      );
+      expect(record).toBeNull();
+    });
+
+    it("does not adopt an unproxied A record at the same hostname (F4)", async () => {
+      // Measured defect: `?name=` alone matched this record, and the old code adopted it
+      // outright — no CNAME to the tunnel was ever created, and the hostname kept
+      // resolving to a LAN address no external client could reach.
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: [
+              {
+                id: "dns-a-record",
+                name: "app.example.com",
+                type: "A",
+                content: "192.168.1.50",
+                proxied: false,
+              },
+            ],
+          }),
+        ),
+      );
+      const record = await client({ fetch: fetchMock }).findDnsRecord(
+        "zone-1",
+        "app.example.com",
+        TUNNEL_CONTENT,
+      );
+      expect(record).toBeNull();
+    });
+
+    it("does not adopt a proxied CNAME pointing at a different target", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({
+            success: true,
+            result: [
+              {
+                id: "dns-other",
+                name: "app.example.com",
+                type: "CNAME",
+                content: "someone-elses-tunnel.cfargotunnel.com",
+                proxied: true,
+              },
+            ],
+          }),
+        ),
+      );
+      const record = await client({ fetch: fetchMock }).findDnsRecord(
+        "zone-1",
+        "app.example.com",
+        TUNNEL_CONTENT,
       );
       expect(record).toBeNull();
     });

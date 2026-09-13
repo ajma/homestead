@@ -1,4 +1,4 @@
-import type { CloudflareFault, CloudflareTunnel, IngressRule } from "@shared/cloudflare.js";
+import type { CloudflareFault, CloudflareTunnel, TunnelConfig } from "@shared/cloudflare.js";
 import { z } from "zod";
 import { CloudflareError } from "./errors.js";
 
@@ -116,24 +116,48 @@ function toTunnel(raw: z.infer<typeof tunnelSchema>): CloudflareTunnel {
   return { id: raw.id, name: raw.name, deletedAt: parseIsoOrNull(raw.deleted_at, "deleted_at") };
 }
 
-const ingressRuleSchema = z.object({ hostname: z.string().optional(), service: z.string() });
+/**
+ * `z.looseObject`, not `z.object` — a real ingress rule can carry `path` and
+ * `originRequest` alongside `hostname`/`service` (2D's whole-branch review, F2), and this
+ * client only ever reads the two fields it declares. `z.object` would silently DROP
+ * anything else on parse, which is fine for a read-only caller but fatal on the
+ * read-modify-write round trip `getTunnelConfig`/`putTunnelConfig` do: a field stripped
+ * here is a field this client's own PUT can no longer send back. `looseObject` keeps
+ * whatever else was on the wire so a caller that changes only `hostname`/`service` and
+ * writes the same object back cannot lose it.
+ */
+const ingressRuleSchema = z.looseObject({ hostname: z.string().optional(), service: z.string() });
 
 /**
- * Only `config.ingress` is read from this — `result` also carries `tunnel_id` and
- * `version`, neither on the plan's "relied on" list and neither used here (the same
- * "require only what's confirmed" posture `envelopeSchema`'s `result_info` takes; zod
- * drops undeclared fields without complaint, so leaving them out is enough to tolerate
- * them, not merely to make them optional).
+ * `config` is `z.looseObject` for the same reason `ingressRuleSchema` is: Cloudflare's
+ * response can carry `warp-routing` and a tunnel-level `originRequest` alongside
+ * `ingress` (measured — 2D's whole-branch review, F2), and this client has no reason to
+ * ever touch either. The outer envelope (`result.tunnel_id`, `result.version`) is still
+ * left un-required — this client never reads or writes those two, and unlike `config`,
+ * they are never round-tripped through `putTunnelConfig`, which sends `{ config }` alone
+ * — so there is nothing here for dropping them to silently delete.
  */
 const tunnelConfigResultSchema = z.object({
-  config: z.object({ ingress: z.array(ingressRuleSchema) }),
+  config: z.looseObject({ ingress: z.array(ingressRuleSchema) }),
 });
 
 const dnsRecordSchema = z.object({ id: z.string() });
 /** `name` is carried through so `findDnsRecord` can report "found nothing" without a
- * separate schema — the array can be empty, or contain records this client never reads
- * anything else off. */
-const dnsRecordsResultSchema = z.array(dnsRecordSchema.extend({ name: z.string().optional() }));
+ * separate schema. `type`/`content`/`proxied` are carried through too, and are load
+ * -bearing: `findDnsRecord` matches on all three (2D's whole-branch review, F4), not just
+ * on `name` — the query parameter Cloudflare's list endpoint filters by. An unproxied `A`
+ * record at the same hostname answers that query too, and adopting it (rather than the
+ * proxied CNAME to this tunnel `createDnsRecord` would have made) leaves the hostname
+ * resolving to whatever that record points at — the tunnel is never involved, and nothing
+ * downstream would notice until an external client tried to reach it. */
+const dnsRecordsResultSchema = z.array(
+  dnsRecordSchema.extend({
+    name: z.string().optional(),
+    type: z.string().optional(),
+    content: z.string().optional(),
+    proxied: z.boolean().optional(),
+  }),
+);
 
 const accessAppSchema = z.object({
   id: z.string(),
@@ -214,15 +238,23 @@ export type CloudflareClient = {
    * safe to run twice. */
   deleteTunnel(tunnelId: string): Promise<void>;
 
-  /** The tunnel's full ingress array — spec §6: "read tunnel config, splice `{ hostname,
-   * service }` before the trailing catch-all, PUT it back." Always the whole array; there
-   * is no add-one-rule endpoint (see `putTunnelConfig`). */
-  getTunnelConfig(tunnelId: string): Promise<{ ingress: IngressRule[] }>;
-  /** Replaces the tunnel's entire ingress array — there is no partial-update endpoint.
-   * Callers (Task 3) are responsible for the mutex and the re-read-inside-the-lock
-   * discipline §6 requires; this method has no opinion on concurrency, only on the wire
-   * format of one PUT. */
-  putTunnelConfig(tunnelId: string, config: { ingress: IngressRule[] }): Promise<void>;
+  /** The tunnel's full config, exactly as Cloudflare returned it — spec §6: "read tunnel
+   * config, splice `{ hostname, service }` before the trailing catch-all, PUT it back."
+   * Not just `ingress`: `warp-routing`, a tunnel-level `originRequest`, and anything else
+   * this client does not model all come back too (see `TunnelConfig`'s own doc comment),
+   * because a caller that mutates `ingress` and passes the same object to
+   * `putTunnelConfig` is the only thing standing between "everything else on this tunnel"
+   * and getting silently overwritten. There is no add-one-rule endpoint — this is always
+   * the whole array (see `putTunnelConfig`). */
+  getTunnelConfig(tunnelId: string): Promise<TunnelConfig>;
+  /** Replaces the tunnel's entire config — there is no partial-update endpoint. Sends
+   * `config` back verbatim, so a caller that only needed to change `ingress` must pass
+   * `{ ...config, ingress: updated }`, never a fresh `{ ingress: updated }` — the latter
+   * silently deletes every other field Cloudflare was holding for this tunnel (2D's
+   * whole-branch review, F2). Callers (Task 3) are responsible for the mutex and the
+   * re-read-inside-the-lock discipline §6 requires; this method has no opinion on
+   * concurrency, only on the wire format of one PUT. */
+  putTunnelConfig(tunnelId: string, config: TunnelConfig): Promise<void>;
 
   /** Always sends `type: "CNAME"` and `proxied: true` — see the method's own comment for
    * why an unproxied record is a silent failure nothing else would notice. */
@@ -231,8 +263,18 @@ export type CloudflareClient = {
    * — rollback and deprovisioning both depend on that. */
   deleteDnsRecord(zoneId: string, recordId: string): Promise<void>;
   /** `null` for no match, never a throw — the idempotency checks in Task 3/4 call this to
-   * decide whether a record already exists before creating one. */
-  findDnsRecord(zoneId: string, name: string): Promise<{ id: string } | null>;
+   * decide whether a record already exists before creating one. Matches on `type ===
+   * "CNAME" && proxied === true && content === expectedContent`, not on `name` alone
+   * (2D's whole-branch review, F4): `createDnsRecord` only ever makes a proxied CNAME to
+   * the tunnel, and adopting anything else — an unproxied `A` record at the same
+   * hostname, say — silently bypasses the very guarantee that method asserts on the
+   * request body. A record at this name that does not match all three is treated as no
+   * record at all, so the caller falls through to actually creating the right one. */
+  findDnsRecord(
+    zoneId: string,
+    name: string,
+    expectedContent: string,
+  ): Promise<{ id: string } | null>;
 
   /** Always sends `type: "self_hosted"` and `policies` built from `policyIds`. See the
    * method's own comment on the one explicitly-unverified fact this touches: how a
@@ -634,14 +676,22 @@ export function createCloudflareClient(opts: {
           { status: null, codes: [] },
         );
       }
-      return { ingress: parsed.data.config.ingress };
+      // The whole parsed `config`, not `{ ingress: ... }` reconstructed from it — anything
+      // `looseObject` preserved (an unmodelled field on `config` itself, or on any one
+      // rule) has to survive this return for `putTunnelConfig` to have a chance of
+      // sending it back.
+      return parsed.data.config;
     },
 
     async putTunnelConfig(tunnelId, config) {
+      // `config` sent verbatim — never rebuilt as `{ ingress: config.ingress }`, which is
+      // exactly the shape that silently dropped everything else Cloudflare had stored for
+      // this tunnel (2D's whole-branch review, F2). The caller decides what changed;
+      // this method's only job is to put the object it was handed on the wire unaltered.
       await requestEnvelope({
         method: "PUT",
         url: accountUrl(`/cfd_tunnel/${tunnelId}/configurations`),
-        body: { config: { ingress: config.ingress } },
+        body: { config },
       });
     },
 
@@ -676,7 +726,7 @@ export function createCloudflareClient(opts: {
       });
     },
 
-    async findDnsRecord(zoneId, name) {
+    async findDnsRecord(zoneId, name, expectedContent) {
       const { result } = await requestEnvelope({
         method: "GET",
         url: `${zoneUrl(zoneId, "/dns_records")}?name=${encodeURIComponent(name)}`,
@@ -689,8 +739,14 @@ export function createCloudflareClient(opts: {
           { status: null, codes: [] },
         );
       }
-      const [first] = parsed.data;
-      return first ? { id: first.id } : null;
+      // `?name=` alone is not enough to call a record "the one we'd have made" — see this
+      // method's own doc comment (F4). A record that fails this match is not adopted; the
+      // caller creates the real thing instead.
+      const match = parsed.data.find(
+        (record) =>
+          record.type === "CNAME" && record.proxied === true && record.content === expectedContent,
+      );
+      return match ? { id: match.id } : null;
     },
 
     /**
