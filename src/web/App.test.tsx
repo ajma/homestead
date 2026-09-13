@@ -391,6 +391,33 @@ describe("the setup route guard", () => {
     await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
   });
 
+  it("a completed install is not reopened by a step it never saw", async () => {
+    // The migration hazard 2F Task 5 exists to close: `SETUP_STEPS` gained a fifth entry
+    // ("cloudflare") between `import` and `users`, and the test VM's real `setup_state`
+    // row was written before that step existed — `completedAt` is set, but
+    // `completedSteps` is exactly the four-entry array from before this phase shipped,
+    // with no `"cloudflare"` in it. An install that finished must not be dragged back
+    // into onboarding just because a new incomplete step appeared in the allow-list.
+    // `App.tsx` gates on `completedAt` alone (see `Routed`'s own comment), never on
+    // whether `completedSteps` contains every currently-known step — this proves that
+    // holds rather than assuming it, per Phase 1G's carry-forward.
+    stubSetupGuard(
+      {
+        id: "u1",
+        email: "admin@example.com",
+        name: "Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: ["admin", "host", "import", "users"], completedAt: 1_800_000_000 },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: /Cloudflare/ })).toBeNull();
+  });
+
   it("never sends a viewer into the wizard, even mid-setup", async () => {
     stubSetupGuard(
       {

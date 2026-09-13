@@ -5,6 +5,7 @@ import { hostCheckKey, useCompleteStep, useFinishSetup, useSetupState } from "@w
 import { useUsers } from "@web/api/users";
 import { useRef, useState } from "react";
 import { Navigate } from "react-router-dom";
+import { StepCloudflare } from "./StepCloudflare";
 import { StepCreateAdmin } from "./StepCreateAdmin";
 import { StepImport } from "./StepImport";
 import { StepInviteUsers } from "./StepInviteUsers";
@@ -14,13 +15,17 @@ const STEP_LABELS: Record<SetupStep, string> = {
   admin: "Create admin",
   host: "Verify host",
   import: "Import",
+  cloudflare: "Cloudflare",
   users: "Invite users",
 };
 
-/** Spec §9: the only two steps a person is allowed to skip outright. Computed here
- * rather than hard-coded in each step, so `import`/`users` (and anything added later)
- * don't each need their own copy of this list — see `SetupStepProps.skippable`. */
-const SKIPPABLE_STEPS: readonly SetupStep[] = ["import", "users"];
+/** Spec §9: the steps a person is allowed to skip outright. Computed here rather than
+ * hard-coded in each step, so `import`/`cloudflare`/`users` (and anything added later)
+ * don't each need their own copy of this list — see `SetupStepProps.skippable`.
+ * `cloudflare` (2F Task 5) belongs here for the same reason `StepCloudflare`'s own doc
+ * comment gives: a wizard that could not finish without a Cloudflare account would block
+ * every household that doesn't have one, and §6/§10 both promise it can be done later. */
+const SKIPPABLE_STEPS: readonly SetupStep[] = ["import", "cloudflare", "users"];
 
 /**
  * The shape every real step substitutes into this slot (Tasks 4, 5, 6 and 8 each add
@@ -294,6 +299,14 @@ export function SetupWizard() {
         />
       ) : displayed === "import" ? (
         <StepImport
+          state={state}
+          pending={pending}
+          onComplete={() => markComplete(displayed)}
+          onFail={setStepError}
+          skippable={skippable}
+        />
+      ) : displayed === "cloudflare" ? (
+        <StepCloudflare
           state={state}
           pending={pending}
           onComplete={() => markComplete(displayed)}

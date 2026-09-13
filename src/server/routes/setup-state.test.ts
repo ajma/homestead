@@ -110,8 +110,9 @@ describe("POST /api/setup/state/:step/complete", () => {
     // — `readState` re-filters through `SETUP_STEPS` regardless — so the only place its
     // own filtering is observable at all is here: a corrupt or hand-edited value already
     // sitting in the column, surviving into what the NEXT completion writes back. Without
-    // the filter, "cloudflare" (never a real `SetupStep`) would ride along forever once
-    // it's in the column; with it, `readStoredSteps` drops it before `next` is computed.
+    // the filter, "bogus" (not a real `SetupStep` — same placeholder the "rejects an
+    // unknown step name" test above uses) would ride along forever once it's in the
+    // column; with it, `readStoredSteps` drops it before `next` is computed.
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
     await app.inject({
@@ -123,7 +124,7 @@ describe("POST /api/setup/state/:step/complete", () => {
     // Simulates a hand-edited or otherwise corrupted column, bypassing the app entirely
     // — the same technique the "degrades a corrupt completed_steps value" test above uses.
     await app.deps.db.run(
-      sql`update setup_state set completed_steps = '["host","cloudflare"]' where id = 1`,
+      sql`update setup_state set completed_steps = '["host","bogus"]' where id = 1`,
     );
 
     await app.inject({
