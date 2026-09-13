@@ -81,3 +81,27 @@ export const FORM_LABEL =
  * rather than opt into this.
  */
 export const TWO_UP_GRID = "grid grid-cols-1 gap-6 lg:grid-cols-2";
+
+/**
+ * Cap (and centre) for `EditApp`'s content row — `main` plus the persistent right rail,
+ * travelling together as one group — once `lg:` gives them room to spread past it.
+ * `EditApp` used to leave this row unbounded, which cost it nothing back when
+ * `PAGE_MAX_WIDTH` topped out at 1024px alongside it; now that other screens grow to
+ * 1680px, an unbounded row stretches `main`'s `flex-1` box to match while its actual
+ * content (`OverviewTab`'s form, capped at `FORM_CONTROL_MAX_WIDTH`) does not, stranding
+ * the rail hundreds of pixels to the right with dead space in between.
+ *
+ * The value is derived, not arbitrary: the old page cap (1024px, `max-w-5xl`) for the
+ * content column, plus the rail's own fixed `lg:w-72` (288px) and the `gap-4` (16px)
+ * `EditApp`'s row places between the two — 1024 + 288 + 16 = 1328px.
+ *
+ * Bakes in its own `lg:` prefix (like `FORM_ROW`/`TWO_UP_GRID` above) rather than being a
+ * bare `max-w-*` value, since it is inert — and must stay inert — below `lg:`, where the
+ * rail is a fixed bottom bar and the columns already stack full-width.
+ *
+ * Not every tab wants this: `ConfigTab` fills its `main` with two side-by-side code
+ * editors that genuinely want the full row, so it opts out via `useWideEditLayout` in
+ * `EditApp.tsx` rather than this constant changing per tab, or `EditApp` hardcoding which
+ * tab is "the wide one".
+ */
+export const EDIT_CONTENT_MAX_WIDTH = "lg:mx-auto lg:max-w-[1328px]";

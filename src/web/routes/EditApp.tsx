@@ -6,9 +6,11 @@ import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
 import { ImageUpdates } from "@web/components/ImageUpdates";
 import { StatusChip } from "@web/components/StatusChip";
+import { EDIT_CONTENT_MAX_WIDTH } from "@web/lib/density";
 import { relativeTime } from "@web/lib/relative-time";
 import { useNow } from "@web/lib/use-now";
-import { Link, NavLink, Outlet, useParams } from "react-router-dom";
+import { useLayoutEffect, useState } from "react";
+import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router-dom";
 
 /**
  * Same fallback wording as `AdminApps.tsx`'s `STATUS_FALLBACK`, kept as its own small
@@ -44,8 +46,35 @@ const TABS: ReadonlyArray<{ to: string; label: string }> = [
  * What `<Outlet context>` hands each tab. Tasks 7-9 read this with `useOutletContext`
  * instead of each re-resolving `:slug` against `useAdminApps()` themselves — the point
  * of resolving it once here.
+ *
+ * `setWideTab` is optional rather than required: it exists purely so `useWideEditLayout`
+ * (below) can reach back up to the row it sits inside, and several tab tests build their
+ * own `{ app } satisfies EditAppContext` outlet context directly (bypassing `EditApp`
+ * itself) without ever needing that wiring — see `OverviewTab.test.tsx` and
+ * `ConfigTab.test.tsx`. Only the real `EditApp` below actually supplies it.
  */
-export type EditAppContext = { app: AdminApp };
+export type EditAppContext = { app: AdminApp; setWideTab?: (wide: boolean) => void };
+
+/**
+ * The opt-out `ConfigTab` uses to keep the full content row width instead of the capped,
+ * centred column every other tab gets (`EDIT_CONTENT_MAX_WIDTH`, in `density.ts`). A tab
+ * calls this once, unconditionally, at its own top level — the "wide" case is explicit at
+ * the tab that wants it, rather than `EditApp` hardcoding "config is the wide one" (which
+ * would silently stay wrong the day a second wide tab shows up).
+ *
+ * `useLayoutEffect`, not `useEffect`: this flips a class that changes layout geometry, so
+ * committing the change before the browser paints avoids a visible flash of the capped
+ * width for one frame when a wide tab mounts. The cleanup un-sets it on unmount, so
+ * navigating away from a wide tab back to a normal one restores the cap rather than
+ * leaving the row stuck wide.
+ */
+export function useWideEditLayout(): void {
+  const { setWideTab } = useOutletContext<EditAppContext>();
+  useLayoutEffect(() => {
+    setWideTab?.(true);
+    return () => setWideTab?.(false);
+  }, [setWideTab]);
+}
 
 function MetaRow({ label, value }: { label: string; value: string }) {
   return (
@@ -136,6 +165,11 @@ function tabLinkClass({ isActive }: { isActive: boolean }): string {
 export function EditApp() {
   const { slug = "" } = useParams<{ slug: string }>();
   const now = useNow();
+  // Defaults to capped/centred (`EDIT_CONTENT_MAX_WIDTH`) — every tab except `ConfigTab`
+  // wants that, and a new tab added later gets it for free without `EditApp` having to
+  // know it exists. Only `useWideEditLayout` (called from inside a tab, via the outlet
+  // context below) ever flips this.
+  const [wideTab, setWideTab] = useState(false);
   // Resolves through the cheap single-app endpoint (`GET /api/apps/:id`, which accepts a
   // slug too — see `loadAppByIdOrSlug`), not `useAdminApps()`'s whole-inventory rollup.
   // The list query used to be made *active* on every edit page merely by being read here,
@@ -198,9 +232,12 @@ export function EditApp() {
        * the bottom of the viewport; at `lg` and up they make it a static column
        * alongside `main` instead.
        */}
-      <div className="flex flex-col gap-4 p-4 lg:flex-row">
+      <div
+        data-testid="edit-content-row"
+        className={`flex flex-col gap-4 p-4 lg:flex-row ${wideTab ? "" : EDIT_CONTENT_MAX_WIDTH}`}
+      >
         <main className="min-w-0 flex-1">
-          <Outlet context={{ app } satisfies EditAppContext} />
+          <Outlet context={{ app, setWideTab } satisfies EditAppContext} />
         </main>
         <aside className="fixed inset-x-0 bottom-0 z-10 flex flex-col gap-4 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
           <ActionBar app={app} />

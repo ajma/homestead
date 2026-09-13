@@ -49,11 +49,14 @@ const ORIGINAL = "services:\n  web:\n    image: nginx\n";
  * `overview` sibling exists only so the navigation-blocking tests below have somewhere to
  * navigate to that isn't `config` itself.
  */
-function mount() {
+function mount(setWideTab?: (wide: boolean) => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const router = createMemoryRouter(
     createRoutesFromElements(
-      <Route path="/apps/:slug/*" element={<Outlet context={{ app } satisfies EditAppContext} />}>
+      <Route
+        path="/apps/:slug/*"
+        element={<Outlet context={{ app, setWideTab } satisfies EditAppContext} />}
+      >
         <Route path="config" element={<ConfigTab />} />
         <Route path="overview" element={<p>Overview tab</p>} />
       </Route>,
@@ -150,6 +153,27 @@ afterEach(() => {
 });
 
 describe("ConfigTab", () => {
+  it("opts out of EditApp's capped content column on mount, and opts back in on unmount", async () => {
+    // `EditApp.tsx`'s `useWideEditLayout` is the mechanism `ConfigTab` uses to keep the
+    // full row width instead of the capped, centred column every other tab gets — see
+    // `density.ts`'s `EDIT_CONTENT_MAX_WIDTH` doc comment. This is the unit-level half of
+    // that binding; `EditApp.test.tsx`'s "content row width" tests are the integration
+    // half, proving `EditApp` itself actually reacts to the call this test proves happens.
+    stubMatchMedia();
+    mockApi();
+    const setWideTab = vi.fn();
+    const { container, router } = mount(setWideTab);
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+
+    expect(setWideTab).toHaveBeenCalledWith(true);
+
+    await act(async () => {
+      await router.navigate("/apps/jellyfin/overview");
+    });
+
+    expect(setWideTab).toHaveBeenLastCalledWith(false);
+  });
+
   it("renders Compose and .env side by side, both live at once", async () => {
     stubMatchMedia();
     mockApi();

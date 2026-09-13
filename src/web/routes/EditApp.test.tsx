@@ -3,7 +3,8 @@ import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { adminAppKey } from "@web/api/admin";
-import { EditApp } from "@web/routes/EditApp";
+import { EDIT_CONTENT_MAX_WIDTH } from "@web/lib/density";
+import { EditApp, useWideEditLayout } from "@web/routes/EditApp";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -49,6 +50,19 @@ function LocationDisplay() {
   return <div data-testid="location">{location.pathname}</div>;
 }
 
+/**
+ * Stand-in for the real `ConfigTab` at the `config` route — same reasoning as the plain
+ * `<p>CONFIG</p>` stands in for the rest of it (this file is about `EditApp`'s own
+ * routing and layout, not what a real tab renders), but this one also calls the real
+ * `useWideEditLayout` so the row-width tests below exercise the actual opt-out wiring
+ * `ConfigTab` uses, without pulling in CodeMirror or the vendored schema for a question
+ * this file isn't asking.
+ */
+function WideConfigStandIn() {
+  useWideEditLayout();
+  return <p>CONFIG</p>;
+}
+
 function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const slug = path.split("/")[2] ?? "";
@@ -79,7 +93,7 @@ function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app)
              * real here would pull in CodeMirror and the vendored schema for a question
              * this file isn't asking.
              */}
-            <Route path="config" element={<p>CONFIG</p>} />
+            <Route path="config" element={<WideConfigStandIn />} />
             <Route path="exposure" element={<p>EXPOSURE</p>} />
           </Route>
         </Routes>
@@ -230,6 +244,34 @@ describe("EditApp", () => {
     stubFetch({ error: "not_found" }, 404);
     mount("/apps/nope/overview", null);
     await waitFor(() => expect(screen.getByText(/No app called/)).toBeTruthy());
+  });
+
+  describe("content row width", () => {
+    // The regression: on a wide viewport `main` (flex-1, unbounded) stretched to match
+    // the page's own width cap while its actual content stayed capped far narrower,
+    // stranding the rail hundreds of pixels away with dead space in between. The fix
+    // caps and centres `main` + the rail together as one group — every tab gets that
+    // by default; `ConfigTab` (via `useWideEditLayout`, exercised here through
+    // `WideConfigStandIn` rather than the real, CodeMirror-heavy tab) is the one that
+    // opts out. jsdom has no layout engine, so this reads the class list that encodes
+    // the decision, not a measured width.
+    it("caps and centres the row for the default tab", () => {
+      stubFetch(app);
+      mount();
+      const row = screen.getByTestId("edit-content-row");
+      for (const cls of EDIT_CONTENT_MAX_WIDTH.split(" ")) {
+        expect(row.className).toContain(cls);
+      }
+    });
+
+    it("lets the Config tab opt out and keep the full row width", () => {
+      stubFetch(app);
+      mount("/apps/jellyfin/config");
+      const row = screen.getByTestId("edit-content-row");
+      for (const cls of EDIT_CONTENT_MAX_WIDTH.split(" ")) {
+        expect(row.className).not.toContain(cls);
+      }
+    });
   });
 
   describe("right-rail metadata", () => {
