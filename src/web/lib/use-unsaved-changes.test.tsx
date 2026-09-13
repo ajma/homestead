@@ -188,4 +188,94 @@ describe("useUnsavedChanges", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(returnValueCalls).toEqual([""]);
   });
+
+  describe("parented (an `onDirtyChange` given, as `ConfigTab` does)", () => {
+    // `ConfigTab` renders `ComposeTab` and `EnvTab` side by side, each still calling this
+    // hook so each still works standalone (their own test files render them that way) —
+    // but only `ConfigTab` itself may actually call `useBlocker` with a truthy
+    // `shouldBlock`. Measured directly against react-router 7.18.3 before writing this:
+    // two components each calling `useBlocker(true)` under the same router does not queue
+    // or merge — the second registration logs "A router only supports one blocker at a
+    // time" and silently takes over the block, leaving the FIRST caller's own
+    // `blocker.state` stuck reporting "unblocked" even though it is still genuinely
+    // dirty. So a parented caller must never be the one contending for that single slot.
+    function ParentedHarness({
+      initialDirty,
+      onDirtyChange,
+    }: {
+      initialDirty: boolean;
+      onDirtyChange: (dirty: boolean) => void;
+    }) {
+      const [dirty, setDirty] = useState(initialDirty);
+      const { blocked } = useUnsavedChanges(dirty, { onDirtyChange });
+      return (
+        <div>
+          <p data-testid="blocked">{String(blocked)}</p>
+          <button type="button" onClick={() => setDirty(true)}>
+            make dirty
+          </button>
+        </div>
+      );
+    }
+
+    function setupParented(initialDirty: boolean) {
+      const reported: boolean[] = [];
+      const router = createMemoryRouter(
+        [
+          {
+            path: "/a",
+            element: (
+              <ParentedHarness
+                initialDirty={initialDirty}
+                onDirtyChange={(dirty) => reported.push(dirty)}
+              />
+            ),
+          },
+          { path: "/b", element: <p>elsewhere</p> },
+        ],
+        { initialEntries: ["/a"] },
+      );
+      render(<RouterProvider router={router} />);
+      return { router, reported, navigateAway: () => act(() => router.navigate("/b")) };
+    }
+
+    it("never blocks navigation itself, even while dirty", async () => {
+      const { navigateAway, router } = setupParented(true);
+      // Confirmed unblocked before the navigation too — the point isn't just that the
+      // navigation eventually gets through, but that this hook never reports "blocked"
+      // at all while parented.
+      expect(screen.getByTestId("blocked").textContent).toBe("false");
+
+      await navigateAway();
+
+      // The navigation actually completed, unmounting the harness — proof this hook did
+      // not intercept it, not merely that no dialog happened to be visible.
+      expect(router.state.location.pathname).toBe("/b");
+      expect(screen.queryByTestId("blocked")).toBeNull();
+    });
+
+    it("reports the initial dirty value upward on mount", () => {
+      const { reported } = setupParented(true);
+      expect(reported).toEqual([true]);
+    });
+
+    it("reports a later dirty change upward too", () => {
+      const { reported } = setupParented(false);
+      expect(reported).toEqual([false]);
+
+      act(() => fireEvent.click(screen.getByText("make dirty")));
+
+      expect(reported).toEqual([false, true]);
+    });
+
+    it("does not warn on beforeunload while dirty, since the parent's own hook call covers that", () => {
+      setupParented(true);
+
+      const { event, returnValueCalls } = createSpiedBeforeUnloadEvent();
+      window.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(returnValueCalls).toEqual([]);
+    });
+  });
 });

@@ -87,7 +87,7 @@ function RowActions({ app }: { app: AdminApp }) {
         >
           Restart
         </button>
-        <Link to={`/apps/${app.slug}/compose`} className={ROW_BUTTON_CLASS}>
+        <Link to={`/apps/${app.slug}/config`} className={ROW_BUTTON_CLASS}>
           Open in editor
         </Link>
       </div>

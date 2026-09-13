@@ -250,13 +250,13 @@ describe("AdminApps", () => {
   });
 
   describe("row actions", () => {
-    it("offers deploy, restart and a shortcut to the compose editor", () => {
+    it("offers deploy, restart and a shortcut to the config editor", () => {
       stubRowFetch([app()]);
       mount([app()]);
       expect(screen.getByRole("button", { name: "Deploy" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Restart" })).toBeTruthy();
       const editorLink = screen.getByRole("link", { name: /Open in editor/ });
-      expect(editorLink.getAttribute("href")).toBe("/apps/jellyfin/compose");
+      expect(editorLink.getAttribute("href")).toBe("/apps/jellyfin/config");
     });
 
     it("posts to the deploy action's own kind", async () => {

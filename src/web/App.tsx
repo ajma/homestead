@@ -29,13 +29,13 @@ import {
 // in this app's bundle by far (measured: ~580 kB raw, ~183 kB gzip of the ~930 kB total)
 // — and an admin-only feature a viewer can never even navigate to. The launcher every
 // visitor opens first, and the page the spec requires to render during an outage, has no
-// business paying for it. `React.lazy` defers both editor tabs into their own chunk,
-// fetched only once an admin actually opens `compose` or `env`.
-function loadComposeTab() {
-  return import("@web/routes/edit/ComposeTab").then((m) => ({ default: m.ComposeTab }));
-}
-function loadEnvTab() {
-  return import("@web/routes/edit/EnvTab").then((m) => ({ default: m.EnvTab }));
+// business paying for it. `React.lazy` defers the combined Config tab into its own chunk,
+// fetched only once an admin actually opens it — `ConfigTab` statically imports both
+// `ComposeTab` and `EnvTab` (deliberately: see that file's own doc comment), so this one
+// dynamic `import()` is what keeps CodeMirror out of every other route's chunk, the same
+// job the two separate loaders this replaces used to split between them.
+function loadConfigTab() {
+  return import("@web/routes/edit/ConfigTab").then((m) => ({ default: m.ConfigTab }));
 }
 
 /** Shown for the brief window the editor chunk takes to download — a route-level
@@ -90,6 +90,24 @@ export const queryClient = new QueryClient({
 function RedirectToOverview() {
   const { slug = "" } = useParams<{ slug: string }>();
   return <Navigate to={`/apps/${slug}/overview`} replace />;
+}
+
+/**
+ * `/apps/:slug/compose` and `/apps/:slug/env`'s element, now that both tabs live at
+ * `/apps/:slug/config` instead — kept so an existing bookmark or external link to either
+ * old URL still lands somewhere real rather than 404ing via `RedirectToOverview`'s
+ * catch-all. Absolute `to`, deliberately, exactly like `RedirectToOverview` above: unlike
+ * that one, `compose` and `env` are ordinary (non-splat) child routes, so a *relative*
+ * `<Navigate to="config" replace />` here would probably resolve correctly too — but
+ * "probably" is the word that burned this exact file once already (see the doc comment on
+ * the dropped `/*` a few lines down), and there is no reason to re-litigate relative
+ * resolution per redirect when one absolute-path component covers both. Navigation tests
+ * click through both old URLs rather than rendering this component directly, for the same
+ * reason `RedirectToOverview`'s own tests do.
+ */
+function RedirectToConfig() {
+  const { slug = "" } = useParams<{ slug: string }>();
+  return <Navigate to={`/apps/${slug}/config`} replace />;
 }
 
 function Routed() {
@@ -161,8 +179,12 @@ function Routed() {
               <Route path="containers" element={<ContainersTab />} />
               <Route path="logs" element={<LogsTab />} />
               <Route path="probes" element={<ProbesTab />} />
-              <Route path="compose" element={<LazyTab loader={loadComposeTab} />} />
-              <Route path="env" element={<LazyTab loader={loadEnvTab} />} />
+              <Route path="config" element={<LazyTab loader={loadConfigTab} />} />
+              {/* Old tab URLs, from before Compose and `.env` merged into one Config tab
+                  — see `RedirectToConfig`'s own doc comment for why these use an absolute
+                  `<Navigate>` rather than a relative one. */}
+              <Route path="compose" element={<RedirectToConfig />} />
+              <Route path="env" element={<RedirectToConfig />} />
               <Route path="exposure" element={<ExposureTab />} />
               {/* Was the `/*` on the parent path above, which existed so that an unknown
                   trailing segment (a stale bookmark, a typo) still matched this route
