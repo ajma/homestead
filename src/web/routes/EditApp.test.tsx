@@ -296,6 +296,20 @@ describe("EditApp", () => {
       expect(inner.className).toContain("mx-auto");
       expect(inner.className).toContain(PAGE_MAX_WIDTH);
     });
+
+    it("gives the tab strip between the header and the content row the same inner container", () => {
+      // The tab strip reads as part of the same header block the user pointed at ("the
+      // global header and the app header also needs the same width restriction too") —
+      // full-bleed here would still misalign the tabs against the app name above and the
+      // content below, even with both of those fixed.
+      stubFetch(app);
+      mount();
+      const nav = screen.getByRole("navigation", { name: "App sections" });
+      expect(nav.className).not.toContain("max-w-");
+      const inner = nav.firstElementChild as HTMLElement;
+      expect(inner.className).toContain("mx-auto");
+      expect(inner.className).toContain(PAGE_MAX_WIDTH);
+    });
   });
 
   describe("right-rail metadata", () => {

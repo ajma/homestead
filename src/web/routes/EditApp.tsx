@@ -221,15 +221,20 @@ export function EditApp() {
         </div>
       </header>
 
-      <nav
-        className="flex gap-1 border-b border-slate-200 px-4 dark:border-slate-800"
-        aria-label="App sections"
-      >
-        {TABS.map((tab) => (
-          <NavLink key={tab.to} to={tab.to} className={tabLinkClass}>
-            {tab.label}
-          </NavLink>
-        ))}
+      {/*
+       * Same treatment as the header above: the bar's own `border-b` stays full-bleed so
+       * the rule still spans the window, but the tabs themselves sit in an inner
+       * container capped at `PAGE_MAX_WIDTH` so they line up with the app name above and
+       * the content row below rather than reading as a third, disagreeing width.
+       */}
+      <nav className="border-b border-slate-200 dark:border-slate-800" aria-label="App sections">
+        <div className={`mx-auto flex gap-1 px-4 ${PAGE_MAX_WIDTH}`}>
+          {TABS.map((tab) => (
+            <NavLink key={tab.to} to={tab.to} className={tabLinkClass}>
+              {tab.label}
+            </NavLink>
+          ))}
+        </div>
       </nav>
 
       {/*
