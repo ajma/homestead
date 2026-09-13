@@ -1,10 +1,48 @@
 // @vitest-environment jsdom
-import type { CloudflareStatus, CloudflareZone } from "@shared/cloudflare.js";
+import type { CloudflareStatus, CloudflareZone, TunnelStatus } from "@shared/cloudflare.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { cloudflareStatusKey } from "@web/api/cloudflare";
 import { CloudflarePanel } from "@web/routes/settings/CloudflarePanel";
-import { describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// jsdom has no EventSource. Same double as `JobOutput.test.tsx` and `ActionBar.test.tsx`
+// — `CloudflarePanel` opens one of these, via the `JobOutput` it renders, the moment a
+// provision job is being watched.
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+
+  listeners = new Map<string, Array<(e: MessageEvent) => void>>();
+  closed = false;
+
+  constructor(readonly url: string) {
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  removeEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((l) => l !== fn),
+    );
+  }
+  close() {
+    this.closed = true;
+  }
+  emit(type: string, data?: unknown) {
+    const init = data === undefined ? {} : { data: JSON.stringify(data) };
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn(new MessageEvent(type, init));
+    }
+  }
+}
+
+beforeEach(() => {
+  FakeEventSource.instances = [];
+  vi.stubGlobal("EventSource", FakeEventSource);
+});
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -22,12 +60,15 @@ const CONFIGURED: CloudflareStatus = {
 };
 const ZONES: CloudflareZone[] = [{ id: "z1", name: "example.com" }];
 const TOKEN = "cfat_totally-a-real-token-value";
+const NOT_PROVISIONED: TunnelStatus = { provisioned: false, runningJobId: null };
 
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <CloudflarePanel />
+      <MemoryRouter>
+        <CloudflarePanel />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -38,21 +79,30 @@ function mountWithClient() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const result = render(
     <QueryClientProvider client={client}>
-      <CloudflarePanel />
+      <MemoryRouter>
+        <CloudflarePanel />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
   return { ...result, client };
 }
 
-/** A fetch stub whose credentials/zones answers can change mid-test — `configured` and
- * `deleted` are mutable so a PUT/DELETE in one call changes what the next GET answers,
- * the same way the real server would after a save or a removal. */
+/** A fetch stub whose credentials/zones/tunnel answers can change mid-test — `configured`
+ * is mutable so a PUT/DELETE in one call changes what the next GET answers, the same way
+ * the real server would after a save or a removal. `tunnel` is a fixed answer for
+ * `GET /api/cloudflare/tunnel` for the life of one stub: none of this file's scenarios
+ * need it to change mid-test (the provision tests drive their outcome entirely through
+ * the SSE stream, not through a second GET), so a static value keeps every test's fetch
+ * stub reading as a flat table of routes. */
 function stubFetch(opts: {
   initiallyConfigured?: boolean;
   put?: () => Response;
   zones?: CloudflareZone[];
+  tunnel?: TunnelStatus;
+  provisionPost?: () => Response | Promise<Response>;
 }) {
   let configured = opts.initiallyConfigured ?? false;
+  const tunnel = opts.tunnel ?? NOT_PROVISIONED;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -71,6 +121,13 @@ function stubFetch(opts: {
     }
     if (url === "/api/cloudflare/zones" && method === "GET") {
       return json(200, opts.zones ?? ZONES);
+    }
+    if (url === "/api/cloudflare/tunnel" && method === "GET") {
+      return json(200, tunnel);
+    }
+    if (url === "/api/cloudflare/tunnel" && method === "POST") {
+      if (opts.provisionPost) return opts.provisionPost();
+      return json(202, { jobId: "job-1" });
     }
     throw new Error(`unhandled request: ${method} ${url}`);
   });
@@ -224,6 +281,9 @@ describe("CloudflarePanel", () => {
       if (url === "/api/cloudflare/zones" && method === "GET") {
         return json(200, ZONES);
       }
+      if (url === "/api/cloudflare/tunnel" && method === "GET") {
+        return json(200, NOT_PROVISIONED);
+      }
       throw new Error(`unhandled request: ${method} ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -239,5 +299,173 @@ describe("CloudflarePanel", () => {
 
     await waitFor(() => expect(view.getByLabelText(/API token/)).toBeTruthy());
     expect((view.getByLabelText(/API token/) as HTMLInputElement).value).toBe("");
+  });
+
+  describe("the Tunnel section", () => {
+    it("says so and does not offer Provision when there are no credentials", async () => {
+      // Provisioning without a token cannot succeed — it can only fail with a confusing
+      // Cloudflare auth error. Offering the button at all is the trap this proves closed.
+      stubFetch({ initiallyConfigured: false, tunnel: NOT_PROVISIONED });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/Add Cloudflare credentials/)).toBeTruthy());
+      expect(screen.queryByRole("button", { name: /Provision/ })).toBeNull();
+    });
+
+    it("offers Provision once credentials exist and no tunnel does", async () => {
+      stubFetch({ initiallyConfigured: true, tunnel: NOT_PROVISIONED });
+      mount();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Provision tunnel" })).toBeTruthy(),
+      );
+      expect(
+        (screen.getByRole("button", { name: "Provision tunnel" }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+    });
+
+    it("disables the button immediately, then streams the job's output once the POST resolves — the initiating tab has no live view while the sequence is actually running (Minor 1)", async () => {
+      // Renamed, not the wiring: `watchedJobId` is set only from the POST's resolved body
+      // (`handleProvision` in `CloudflarePanel.tsx`), and the POST does not resolve until
+      // `StepJobRunner.start` finishes the WHOLE sequence — see the whole-branch review's
+      // ruling on why that blocking design stays for this phase (`cloudflare-tunnel.ts`'s
+      // comment on the audit-ordering fix explains the same thing). So `JobOutput` here
+      // only ever mounts against an ALREADY-TERMINAL job for the tab that clicked the
+      // button; this test's own `resolvePost?.()` below happens before any assertion
+      // about the stream, which is exactly why the old name ("...streams the job's output
+      // while a provision job runs") did not describe what the wiring can produce. A
+      // reloaded page or a second admin's tab genuinely does get live output, via
+      // `runningJobId` — see "adopts a provision job already running when the panel
+      // mounts" below. Fixing the behaviour itself is 2D's job, once `stepJobs.start` is
+      // detached from awaiting the full sequence.
+      let resolvePost: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        resolvePost = resolve;
+      });
+      stubFetch({
+        initiallyConfigured: true,
+        tunnel: NOT_PROVISIONED,
+        provisionPost: async () => {
+          await gate;
+          return json(202, { jobId: "job-1" });
+        },
+      });
+      mount();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Provision tunnel" })).toBeTruthy(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Provision tunnel" }));
+
+      // Disabled the instant the click handler runs, before the POST has even resolved —
+      // `starting` is plain synchronous state, the same guarantee every other form in
+      // this panel already gives.
+      await waitFor(() =>
+        expect(
+          (screen.getByRole("button", { name: /Provisioning/ }) as HTMLButtonElement).disabled,
+        ).toBe(true),
+      );
+
+      resolvePost?.();
+
+      // `JobOutput` — reused, not reimplemented — opens its own stream once the jobId
+      // comes back.
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+      expect(FakeEventSource.instances[0]?.url).toBe("/api/jobs/job-1/stream");
+
+      act(() => {
+        FakeEventSource.instances[0]?.emit("output", {
+          text: "creating tunnel…",
+          stream: "stdout",
+        });
+      });
+      await waitFor(() => expect(screen.getByText(/creating tunnel…/)).toBeTruthy());
+      // Still disabled — the job is not done yet.
+      expect(
+        (screen.getByRole("button", { name: /Provisioning/ }) as HTMLButtonElement).disabled,
+      ).toBe(true);
+    });
+
+    it("shows the tunnel's name and a link to the cloudflared app once provisioned", async () => {
+      stubFetch({
+        initiallyConfigured: true,
+        tunnel: { provisioned: true, name: "homestead", appId: "app-cf-1", runningJobId: null },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("homestead")).toBeTruthy());
+      const link = screen.getByRole("link", { name: /cloudflared app/i }) as HTMLAnchorElement;
+      expect(link.getAttribute("href")).toBe("/apps/app-cf-1");
+      // Nothing left to provision.
+      expect(screen.queryByRole("button", { name: /Provision/ })).toBeNull();
+    });
+
+    it("shows what was rolled back and, prominently, what was not, after a failed provision", async () => {
+      stubFetch({
+        initiallyConfigured: true,
+        tunnel: NOT_PROVISIONED,
+        provisionPost: () => json(202, { jobId: "job-1" }),
+      });
+      mount();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Provision tunnel" })).toBeTruthy(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Provision tunnel" }));
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+      // The persisted job output `StepJobRunner.buildOutput` produces for a failed
+      // sequence with an undo failure — `!!! MANUAL CLEANUP REQUIRED !!!` first, per its
+      // own doc comment on why that ordering matters.
+      const output = [
+        "!!! MANUAL CLEANUP REQUIRED !!!",
+        "These steps could NOT be rolled back — check these resources by hand:",
+        "  - create-tunnel: delete failed",
+        "",
+        'FAILED at step "compose-up": exit 1',
+      ].join("\n");
+
+      act(() => {
+        FakeEventSource.instances[0]?.emit("output", { text: output, stream: "stdout" });
+        FakeEventSource.instances[0]?.emit("done", { status: "failed", exitCode: null });
+      });
+
+      // The prominent banner — a distinct, styled alert, not text appended after a
+      // generic failure line — names the exact risk: something may still exist in the
+      // user's Cloudflare account.
+      await waitFor(() => expect(screen.getByText(/Provisioning failed/)).toBeTruthy());
+      const banner = screen.getByText(/Provisioning failed/).closest('[role="alert"]');
+      expect(banner?.textContent).toContain("MANUAL CLEANUP REQUIRED");
+      // The reused `JobOutput` still shows the full transcript underneath, including the
+      // undo-failure detail the banner points at.
+      const transcript = screen.getByTestId("job-output");
+      expect(transcript.textContent).toContain("MANUAL CLEANUP REQUIRED");
+      expect(transcript.textContent).toContain("create-tunnel: delete failed");
+      // Provision is offered again — the tunnel was not left in a provisioned state.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Provision tunnel" })).toBeTruthy(),
+      );
+    });
+
+    it("adopts a provision job already running when the panel mounts", async () => {
+      // The reviewer's scenario: an admin clicked Provision, then reloaded the page (or a
+      // second admin's tab is open) while the sequence — which does not return from its
+      // own POST until it finishes — is still running server-side. `GET
+      // /api/cloudflare/tunnel`'s `runningJobId` is the only way this tab can learn that.
+      stubFetch({
+        initiallyConfigured: true,
+        tunnel: { provisioned: false, runningJobId: "job-99" },
+      });
+      mount();
+
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+      expect(FakeEventSource.instances[0]?.url).toBe("/api/jobs/job-99/stream");
+      expect(
+        (screen.getByRole("button", { name: /Provisioning/ }) as HTMLButtonElement).disabled,
+      ).toBe(true);
+      // Not offered a second time — clicking it now would only race the one already
+      // running.
+      expect(screen.queryByRole("button", { name: "Provision tunnel" })).toBeNull();
+    });
   });
 });

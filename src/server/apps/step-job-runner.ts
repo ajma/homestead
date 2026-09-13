@@ -3,11 +3,21 @@ import { ulid } from "ulid";
 import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
 import { AppBusyError, type AppLock } from "./app-lock.js";
-import type { AppRow } from "./job-runner.js";
 import { runSteps, type Step, type StepEvent, type StepOutcome } from "./step-sequence.js";
 
 /** Persisted output cap, the same bound `JobRunner` applies to compose output. */
 const OUTPUT_CAP = 256 * 1024;
+
+/**
+ * The `AppLock` key for a sequence that has no app yet to key its mutex on — a sequence
+ * that CREATES an app (2C's tunnel provision is the first: the `apps` row does not exist
+ * until one of its own steps inserts it) starts before any row, and therefore any real
+ * `appId`, exists. A sentinel outside the ulid alphabet, so it can never collide with a
+ * real id. Only one such no-app sequence may run at a time system-wide, which is the
+ * correct granularity until a second kind of app-creating step sequence exists — there is
+ * nothing narrower to key it to yet.
+ */
+const NO_APP_LOCK_KEY = " no-app-yet";
 
 /**
  * Records a `runSteps` sequence as a `jobs` row, under the same per-app `AppLock` a
@@ -73,26 +83,34 @@ export class StepJobRunner {
     }
   }
 
+  /**
+   * `appId` is `null` for a sequence that has no app to associate the job with YET — see
+   * `NO_APP_LOCK_KEY` above. `jobs.appId` is nullable in the schema for exactly this case
+   * (there is no FK to satisfy when nothing has been created), and `runningJobs`/`sweep`
+   * already tolerate a null `appId` on a step-kind job. When `appId` is a real id, this
+   * behaves exactly as it always has: locked, and recorded, by that id.
+   */
   async start<C>(
-    app: AppRow,
+    appId: string | null,
     kind: string,
     steps: Array<Step<C>>,
     ctx: C,
     userId: string,
   ): Promise<{ id: string }> {
+    const lockKey = appId ?? NO_APP_LOCK_KEY;
     // Same synchronous-window requirement `JobRunner.start` documents: acquire, decide,
     // and (if granted) record the holder before any `await`, so two calls issued in the
     // same tick cannot both pass the check. `AppLock.tryAcquire` is synchronous for
     // exactly this reason.
-    if (!this.deps.appLock.tryAcquire(app.id, `${kind} job`)) {
-      throw new AppBusyError(app.id, this.deps.appLock.heldBy(app.id) ?? "another job");
+    if (!this.deps.appLock.tryAcquire(lockKey, `${kind} job`)) {
+      throw new AppBusyError(lockKey, this.deps.appLock.heldBy(lockKey) ?? "another job");
     }
 
     const id = ulid();
     try {
       await this.deps.db.insert(jobs).values({
         id,
-        appId: app.id,
+        appId,
         kind,
         status: "running",
         startedAt: Math.floor(Date.now() / 1000),
@@ -101,7 +119,7 @@ export class StepJobRunner {
     } catch (error) {
       // No row exists to record the hold against — free the slot rather than wedging the
       // app behind a job nothing can ever see, cancel, or sweep.
-      this.deps.appLock.release(app.id);
+      this.deps.appLock.release(lockKey);
       throw error;
     }
 
@@ -127,7 +145,7 @@ export class StepJobRunner {
         // Always — released whether the sequence succeeded, failed, or the write above
         // threw, or a failed step job wedges the app until restart. Matches
         // `JobRunner.finish`'s `finally`.
-        this.deps.appLock.release(app.id);
+        this.deps.appLock.release(lockKey);
       }
     })();
     this.inFlight.add(sequence);

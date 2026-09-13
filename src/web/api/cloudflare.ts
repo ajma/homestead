@@ -1,4 +1,10 @@
-import type { CloudflareFault, CloudflareStatus, CloudflareZone } from "@shared/cloudflare.js";
+import {
+  type CloudflareFault,
+  type CloudflareStatus,
+  type CloudflareZone,
+  TUNNEL_PROVISION_TIMEOUT_MS,
+  type TunnelStatus,
+} from "@shared/cloudflare.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 
@@ -137,4 +143,94 @@ export function useDeleteCloudflareCredentials() {
       queryClient.removeQueries({ queryKey: cloudflareZonesKey });
     },
   });
+}
+
+/** Own leaf under `["cloudflare", ...]`, not folded into `cloudflareStatusKey` — same
+ * prefix-matching reasoning as that key's own doc comment: a tunnel's status and the
+ * credentials' status are refetched on different triggers (this one also polls — see
+ * `useCloudflareTunnel` below — the credentials status never does) and must not share an
+ * `invalidateQueries` blast radius. */
+export const cloudflareTunnelKey = ["cloudflare", "tunnel", "status"] as const;
+
+/**
+ * `GET /api/cloudflare/tunnel`. Unconditional, unlike `useCloudflareZones` (no `enabled`
+ * flag gated on credentials being configured): a tunnel record can outlive the
+ * credentials that created it (an admin could remove credentials after provisioning), and
+ * the "no credentials, don't offer Provision" case still needs to know whether a tunnel
+ * already exists, not just that credentials are missing.
+ *
+ * Polls every 5s **only** while `runningJobId` is non-null in the last-known data — the
+ * one fact this tab has no other way to learn (the job's `appId` is `null`, so it is
+ * invisible to every app-scoped job listing `useAppActions` could otherwise poll). This is
+ * what lets a page reloaded mid-provision, or a second admin's tab, notice a sequence
+ * someone else started without a manual refresh; a tab that started the job itself learns
+ * the same fact immediately from its own `provisionTunnel()` response and does not need
+ * the poll to catch up. Stops polling the instant the row goes terminal, rather than
+ * running forever at a fixed interval the way a naive "always poll" would.
+ */
+export function useCloudflareTunnel() {
+  return useQuery({
+    queryKey: cloudflareTunnelKey,
+    queryFn: () => apiFetch<TunnelStatus>("/api/cloudflare/tunnel"),
+    refetchInterval: (query) => (query.state.data?.runningJobId ? 5_000 : false),
+  });
+}
+
+/** `POST /api/cloudflare/tunnel`'s error bodies are `{ error: <code> }` with no `fault` —
+ * a different shape from the credentials routes' `CloudflareFault` (this route never talks
+ * to Cloudflare before the job starts, so there is no fault to classify yet), hence a
+ * separate reader rather than reusing `cloudflareFaultOf`. */
+function tunnelErrorCode(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  if (error.body === null || typeof error.body !== "object" || !("error" in error.body)) {
+    return null;
+  }
+  const code = (error.body as { error: unknown }).error;
+  return typeof code === "string" ? code : null;
+}
+
+/** One sentence per code the route can send. `tunnel_provision_running` reads as "try
+ * again shortly" rather than as a failure — see `routes/cloudflare-tunnel.ts`'s own
+ * comment on why that race maps to 409 rather than the generic 500 it used to. */
+const TUNNEL_ERROR_MESSAGES: Record<string, string> = {
+  tunnel_exists: "A tunnel is already provisioned.",
+  not_configured: "Add Cloudflare credentials before provisioning a tunnel.",
+  tunnel_provision_running: "A tunnel provision is already running. Try again shortly.",
+};
+
+/** Mirrors `describeCloudflareError` above, over the provision route's own error shape. */
+export function describeTunnelError(error: unknown, fallback: string): string {
+  const code = tunnelErrorCode(error);
+  const message = code === null ? undefined : TUNNEL_ERROR_MESSAGES[code];
+  if (message !== undefined) return message;
+  if (error instanceof ApiTimeoutError) return TIMEOUT_MESSAGE;
+  if (!(error instanceof ApiError)) {
+    return "Could not reach the server. Check the network and try again.";
+  }
+  return fallback;
+}
+
+/**
+ * `POST /api/cloudflare/tunnel`. A plain function, not `useMutation`, for a different
+ * reason than `useSaveCloudflareCredentials`'s (there is no secret in this call's
+ * variables — it takes none): this call needs a `timeoutMs` far longer than `apiFetch`'s
+ * 30s default, and `useMutation`'s `mutationFn` has no per-call override for that, only a
+ * fixed one baked in at the hook's definition. `TUNNEL_PROVISION_TIMEOUT_MS` is shared
+ * with the server (`@shared/cloudflare.js`) precisely because both ends of this one call
+ * need to agree: the route does not answer until its whole five-step sequence has
+ * finished, so a client timeout shorter than that abandons a request that is still
+ * succeeding (or failing and rolling back) on the server, with no jobId ever reaching the
+ * browser to check on it.
+ */
+export function useProvisionTunnel() {
+  const queryClient = useQueryClient();
+  return async function provisionTunnel(): Promise<{ jobId: string }> {
+    const result = await apiFetch<{ jobId: string }>(
+      "/api/cloudflare/tunnel",
+      { method: "POST" },
+      { timeoutMs: TUNNEL_PROVISION_TIMEOUT_MS },
+    );
+    queryClient.invalidateQueries({ queryKey: cloudflareTunnelKey });
+    return result;
+  };
 }

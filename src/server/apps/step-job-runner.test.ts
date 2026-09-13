@@ -101,7 +101,7 @@ describe("StepJobRunner", () => {
 
   it("writes a succeeded job row naming every step, on success", async () => {
     const { id } = await runner.start(
-      row,
+      row.id,
       "cloudflare_expose",
       [step("a"), step("b"), step("c")],
       { log: [] },
@@ -118,7 +118,7 @@ describe("StepJobRunner", () => {
 
   it("writes a failed job row naming the failing step and what was rolled back", async () => {
     const { id } = await runner.start(
-      row,
+      row.id,
       "cloudflare_expose",
       [step("create-tunnel", { undo: true }), step("create-dns-record", { fail: true })],
       { log: [] },
@@ -135,7 +135,7 @@ describe("StepJobRunner", () => {
 
   it("puts undoFailures first in the output, not appended at the end", async () => {
     const { id } = await runner.start(
-      row,
+      row.id,
       "cloudflare_expose",
       [step("create-tunnel", { undoFails: true }), step("create-dns-record", { fail: true })],
       { log: [] },
@@ -155,7 +155,7 @@ describe("StepJobRunner", () => {
 
   it("holds the app lock for the sequence's duration and releases it after success", async () => {
     const gated = gatedStep("wait");
-    const promise = runner.start(row, "cloudflare_expose", [gated.step], { log: [] }, userId);
+    const promise = runner.start(row.id, "cloudflare_expose", [gated.step], { log: [] }, userId);
 
     expect(appLock.heldBy(row.id)).toBe("cloudflare_expose job");
     gated.release();
@@ -175,7 +175,7 @@ describe("StepJobRunner", () => {
     // by asserting the lock is held while the (synchronous-looking) sequence resolves and
     // gone once it has.
     const promise = runner.start(
-      row,
+      row.id,
       "cloudflare_expose",
       [gated.step, failing],
       { log: [] },
@@ -205,7 +205,7 @@ describe("StepJobRunner", () => {
     const composeJob = await composeRunner.start(row, "up", userId);
 
     await expect(
-      runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId),
+      runner.start(row.id, "cloudflare_expose", [step("a")], { log: [] }, userId),
     ).rejects.toBeInstanceOf(AppBusyError);
 
     host.releaseCompose();
@@ -225,7 +225,13 @@ describe("StepJobRunner", () => {
     });
 
     const gated = gatedStep("wait");
-    const stepPromise = runner.start(row, "cloudflare_expose", [gated.step], { log: [] }, userId);
+    const stepPromise = runner.start(
+      row.id,
+      "cloudflare_expose",
+      [gated.step],
+      { log: [] },
+      userId,
+    );
 
     expect(appLock.heldBy(row.id)).toBe("cloudflare_expose job");
     let busyError: unknown;
@@ -262,14 +268,20 @@ describe("StepJobRunner", () => {
       return original(table as never);
     };
     await expect(
-      runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId),
+      runner.start(row.id, "cloudflare_expose", [step("a")], { log: [] }, userId),
     ).rejects.toThrow("disk I/O error");
     // biome-ignore lint/suspicious/noExplicitAny: restore
     (db as any).insert = original;
 
     expect(appLock.heldBy(row.id)).toBeUndefined();
     // The app is usable again immediately.
-    const { id } = await runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId);
+    const { id } = await runner.start(
+      row.id,
+      "cloudflare_expose",
+      [step("a")],
+      { log: [] },
+      userId,
+    );
     const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
     expect(saved?.status).toBe("succeeded");
   });
@@ -280,8 +292,8 @@ describe("StepJobRunner", () => {
     // whole-branch review, Minor 8) — this pins it the same way.
     const gated = gatedStep("wait");
     const settled = Promise.allSettled([
-      runner.start(row, "cloudflare_expose", [gated.step], { log: [] }, userId),
-      runner.start(row, "cloudflare_expose", [step("a")], { log: [] }, userId),
+      runner.start(row.id, "cloudflare_expose", [gated.step], { log: [] }, userId),
+      runner.start(row.id, "cloudflare_expose", [step("a")], { log: [] }, userId),
     ]);
     gated.release();
     const results = await settled;
