@@ -264,6 +264,121 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     expect(row).toBeUndefined();
   });
 
+  it("does not delete an adopted tunnel during rollback — only one this run actually created (Important 1)", async () => {
+    // The whole-branch review's most serious finding: `create-tunnel` adopts a live
+    // tunnel of the same name instead of creating a second one (the happy-path test
+    // above), but its `undo` used to delete whatever `ctx.tunnelId` held regardless of
+    // how it got there. Seed a tunnel the user made by hand, under Homestead's own
+    // managed name, bypassing `createTunnel` so `calls.created` stays empty for it — the
+    // same way the adoption happy-path test above seeds one, but this time forcing a
+    // LATER step to fail so rollback actually runs.
+    const { db, tunnelStore } = await seedDb();
+    const host = new FakeHost();
+    host.composeResults.set("up -d", { exitCode: 1, stdout: "", stderr: "pull access denied" });
+    const { client, calls, tunnels } = fakeClient();
+    tunnels.push({ id: "users-own-tunnel", name: CLOUDFLARED_TUNNEL_NAME, deletedAt: null });
+
+    const steps = tunnelProvisionSteps({
+      db,
+      host,
+      client,
+      tunnelStore,
+      tunnelName: CLOUDFLARED_TUNNEL_NAME,
+    });
+    const outcome = await runSteps(steps, {});
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("unreachable");
+    expect(outcome.failed).toBe("compose-up");
+    // Adopted, never created — and, with the fix, never deleted either.
+    expect(calls.created).toEqual([]);
+    expect(calls.deleted).toEqual([]);
+    const stillLive = (await client.listTunnels()).find((t) => t.id === "users-own-tunnel");
+    expect(stillLive?.deletedAt).toBeNull();
+  });
+
+  it("write-files compensates a partial write when the .env write fails after compose.yaml lands (Important 3)", async () => {
+    // `register-app`'s twin compensation has a dedicated test just above; this is
+    // `write-files`'s. Measured in the whole-branch review: replacing the inline
+    // `deleteFile(composePath)` compensation with a no-op left all 132 targeted tests
+    // green, because nothing else ever asserted this step's failure path left no stray
+    // compose file behind for the adoption scanner to find.
+    const { db, tunnelStore } = await seedDb();
+    const host = new FakeHost();
+    const originalWrite = host.writeTextFile.bind(host);
+    let writeCalls = 0;
+    host.writeTextFile = async (rel: string, content: string, expectedHash: string | null) => {
+      writeCalls++;
+      if (writeCalls === 2) throw new Error("disk full");
+      return originalWrite(rel, content, expectedHash);
+    };
+    const { client, calls } = fakeClient();
+
+    const steps = tunnelProvisionSteps({
+      db,
+      host,
+      client,
+      tunnelStore,
+      tunnelName: CLOUDFLARED_TUNNEL_NAME,
+    });
+    const outcome = await runSteps(steps, {});
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("unreachable");
+    expect(outcome.failed).toBe("write-files");
+    // The compose file must not survive on its own — that is exactly what the adoption
+    // scanner would offer back to the user as a phantom `cloudflared` app.
+    expect(host.files.has(`${CLOUDFLARED_DIRECTORY}/compose.yaml`)).toBe(false);
+    expect(host.files.has(`${CLOUDFLARED_DIRECTORY}/.env`)).toBe(false);
+    expect(calls.deleted).toEqual(calls.created);
+  });
+
+  it("write-files' undo attempts both deletes independently — one failing does not strand the other (Important 4)", async () => {
+    // Sequential awaits used to mean a throw removing compose.yaml skipped the attempt
+    // on .env entirely — stranding the live tunnel token, the credential that matters
+    // most, on disk. Force compose.yaml's delete to fail during rollback (triggered by
+    // register-app failing) and prove .env is still attempted and actually removed.
+    const { db, tunnelStore } = await seedDb();
+    const host = new FakeHost();
+    host.deleteFileErrors.set(
+      `${CLOUDFLARED_DIRECTORY}/compose.yaml`,
+      new Error("permission denied"),
+    );
+    await db.insert(apps).values({
+      id: ulid(),
+      hostId: LOCAL_HOST_ID,
+      slug: "cloudflared",
+      displayName: "pre-existing",
+      directory: CLOUDFLARED_DIRECTORY,
+      composeFile: "compose.yaml",
+      projectName: "cloudflared",
+    });
+    const { client } = fakeClient();
+
+    const steps = tunnelProvisionSteps({
+      db,
+      host,
+      client,
+      tunnelStore,
+      tunnelName: CLOUDFLARED_TUNNEL_NAME,
+    });
+    const outcome = await runSteps(steps, {});
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("unreachable");
+    expect(outcome.failed).toBe("register-app");
+    // The credential file was still attempted and actually removed, despite the sibling
+    // delete throwing.
+    expect(host.files.has(`${CLOUDFLARED_DIRECTORY}/.env`)).toBe(false);
+    // write-files' own undo failure is surfaced, naming the file that needs attention.
+    expect(outcome.undoFailures).toHaveLength(1);
+    const failure = outcome.undoFailures[0];
+    expect(failure?.step).toBe("write-files");
+    expect(String((failure?.error as Error)?.message)).toContain(
+      `${CLOUDFLARED_DIRECTORY}/compose.yaml`,
+    );
+  });
+
   it("register-app compensates its own partial effect when persisting the tunnel record fails after the insert succeeds", async () => {
     // A seam this task introduced: `register-app` does two separate writes (the DB insert,
     // then `tunnelStore.set()`). If the second fails, `register-app` itself is the
@@ -296,6 +411,53 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     const row = await appRowFor(db, CLOUDFLARED_DIRECTORY);
     expect(row).toBeUndefined();
     expect(calls.deleted).toEqual(calls.created);
+  });
+});
+
+describe("compose-up's undo, tested directly against the step object (Minor 2)", () => {
+  // Unreachable through `runSteps` today — see the comment on `compose-up` in
+  // `provision-tunnel.ts`: it is the last step, so a successful run never rolls back and
+  // a failing run's OWN undo is skipped by rule 1. Replacing this `undo` with a no-op
+  // left all 132 targeted tests green in the whole-branch review (a surviving mutation).
+  // Calling it directly is what 2D needs once a sixth step makes it reachable for real.
+  it("shells out to docker compose down for the cloudflared directory", async () => {
+    const { db, tunnelStore } = await seedDb();
+    const host = new FakeHost();
+    const { client } = fakeClient();
+    const steps = tunnelProvisionSteps({
+      db,
+      host,
+      client,
+      tunnelStore,
+      tunnelName: CLOUDFLARED_TUNNEL_NAME,
+    });
+    const composeUp = steps.find((step) => step.name === "compose-up");
+    if (!composeUp?.undo) throw new Error("compose-up has no undo");
+
+    await composeUp.undo({});
+
+    expect(host.composeCalls.at(-1)).toMatchObject({
+      target: { directory: CLOUDFLARED_DIRECTORY, composeFile: "compose.yaml" },
+      args: ["down"],
+    });
+  });
+
+  it("throws when docker compose down fails, so it surfaces as a MANUAL CLEANUP entry", async () => {
+    const { db, tunnelStore } = await seedDb();
+    const host = new FakeHost();
+    host.composeResults.set("down", { exitCode: 1, stdout: "", stderr: "no such project" });
+    const { client } = fakeClient();
+    const steps = tunnelProvisionSteps({
+      db,
+      host,
+      client,
+      tunnelStore,
+      tunnelName: CLOUDFLARED_TUNNEL_NAME,
+    });
+    const composeUp = steps.find((step) => step.name === "compose-up");
+    if (!composeUp?.undo) throw new Error("compose-up has no undo");
+
+    await expect(composeUp.undo({})).rejects.toThrow(/docker compose down failed/);
   });
 });
 

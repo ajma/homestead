@@ -44,6 +44,17 @@ const COMPOSE_TIMEOUT_MS = 5 * 60_000;
 export type ProvisionCtx = {
   tunnelId?: string;
   tunnelName?: string;
+  /** Set only when THIS run's `create-tunnel` actually called `client.createTunnel` —
+   * never set on the adoption branch, which finds a live tunnel of the same name already
+   * in the account. `undo` below gates the delete on this: adopting is right (it closes
+   * the orphan window a failed `deleteTunnel` opens — see `create-tunnel`'s own comment),
+   * but deleting whatever `tunnelId` holds regardless of how it got there deletes a
+   * tunnel this run never made. That was Important 1 of the whole-branch review: seed a
+   * tunnel the user made by hand under the same name, fail a later step, and rollback
+   * reported it deleted while claiming a clean unwind. Spec §6: deprovisioning "only
+   * deletes resources Homestead recorded creating."
+   */
+  created?: boolean;
   /** Never logged, never put in a thrown error's message, and never written to `ctx` by
    * anything that would let it reach `StepJobRunner`'s transcript — see `create-tunnel`'s
    * and `fetch-token`'s comments below for how each step that touches it keeps that true. */
@@ -107,6 +118,7 @@ export function tunnelProvisionSteps(deps: ProvisionTunnelDeps): Array<Step<Prov
         const created = await deps.client.createTunnel(deps.tunnelName);
         ctx.tunnelId = created.id;
         ctx.tunnelName = created.name;
+        ctx.created = true;
       },
       async undo(ctx) {
         // Unset only if `run` never completed — which never happens for a step actually
@@ -114,6 +126,10 @@ export function tunnelProvisionSteps(deps: ProvisionTunnelDeps): Array<Step<Prov
         // load-bearing rather than assumed: without it, a refactor that ever DID undo the
         // failing step would call `deleteTunnel(undefined)` instead of silently skipping.
         if (ctx.tunnelId === undefined) return;
+        // Only delete a tunnel THIS run created — see `ctx.created`'s doc comment above.
+        // An adopted tunnel is left in place; the delete would take down whatever the
+        // owner is already running through it and misreport rollback as clean.
+        if (!ctx.created) return;
         await deps.client.deleteTunnel(ctx.tunnelId);
       },
     },
@@ -179,8 +195,29 @@ export function tunnelProvisionSteps(deps: ProvisionTunnelDeps): Array<Step<Prov
         // cleaned up. The directory itself is left behind, empty — `Host` has no
         // directory-removal primitive, and an empty stray directory is a far smaller
         // problem than a stray compose file with a real token in its `.env`.
-        await deps.host.deleteFile(composePath);
-        await deps.host.deleteFile(envPath);
+        //
+        // Both deletes are attempted independently via `allSettled`, not one after the
+        // other: sequential awaits meant a throw removing `compose.yaml` skipped the
+        // attempt on `.env` entirely, stranding the live tunnel token — the credential
+        // that matters most here — on disk with the cleanup banner never even naming it
+        // (Important 4 of the whole-branch review). Whichever attempt(s) fail are named in
+        // the thrown message, so `undoFailures` in the job output actually says which
+        // file needs attention by hand.
+        const targets = [composePath, envPath];
+        const results = await Promise.allSettled(targets.map((path) => deps.host.deleteFile(path)));
+        const failures = results.flatMap((result, i) =>
+          result.status === "rejected" ? [{ path: targets[i], error: result.reason }] : [],
+        );
+        if (failures.length > 0) {
+          throw new Error(
+            `write-files undo could not remove: ${failures
+              .map(
+                (f) =>
+                  `${f.path} (${f.error instanceof Error ? f.error.message : String(f.error)})`,
+              )
+              .join(", ")}`,
+          );
+        }
       },
     },
     {
@@ -240,6 +277,14 @@ export function tunnelProvisionSteps(deps: ProvisionTunnelDeps): Array<Step<Prov
       },
     },
     {
+      // `undo` below is structurally unreachable through `runSteps` today: this is the
+      // last step, so a successful `run` means the whole sequence succeeded and rollback
+      // never happens, while a failing `run` means `undo` is skipped for the failing step
+      // itself (rule 1 in `step-sequence.ts`). It is kept, and tested directly against
+      // the step object rather than through the full sequence (`provision-tunnel.test.ts`,
+      // "compose-up's undo"), because that stops being true the moment a sixth step is
+      // appended after this one (2D) — at which point a `compose-up` success followed by
+      // a later failure needs exactly this `docker compose down` to run for real.
       name: "compose-up",
       async run() {
         const handle = deps.host.runCompose(
