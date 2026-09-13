@@ -577,3 +577,34 @@ describe("GET /api/jobs/:jobId/stream against a job with no app", () => {
     await app.close();
   });
 });
+
+describe("GET /api/jobs/:jobId against a job with no app (Minor 3)", () => {
+  // The `/stream` route above already handles a null `appId` — this is `GET
+  // /api/jobs/:jobId` itself, which still 404'd on one before this fix. Latent in
+  // production today (`JobOutput` only ever calls `/stream`), but a fourth shape of the
+  // "job id the client cannot resolve" family the 2B carry-forward found three of.
+  it("returns the job instead of 404ing, once it has finished", async () => {
+    const app = await buildTestApp();
+    const { cookie, id: userId } = await signUpAdmin(app);
+    const steps: Array<Step<Record<string, never>>> = [
+      { name: "noop", async run() {}, async undo() {} },
+    ];
+    const { id: jobId } = await app.deps.stepJobs.start(
+      null,
+      "test_no_app_kind",
+      steps,
+      {},
+      userId,
+    );
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ id: jobId, appId: null, status: "succeeded" });
+    await app.close();
+  });
+});

@@ -119,9 +119,16 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     const ctx = requireCapability(request, "app:config");
     const { jobId } = z.object({ jobId: z.string() }).parse(request.params);
     const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-    if (!job?.appId) return reply.code(404).send({ error: "not_found" });
-    // Scope is a property of the app, so it is checked against the app, not the job row.
-    if (!(await loadApp(db, ctx, job.appId))) return reply.code(404).send({ error: "not_found" });
+    if (!job) return reply.code(404).send({ error: "not_found" });
+    // A `null` `appId` (a step sequence with no app to scope to yet — `StepJobRunner.
+    // start`'s own doc, e.g. the Cloudflare tunnel provision job) has nothing left to
+    // check here — same reasoning, and the same fix, as `/stream` below. This route
+    // still gates on `requireCapability` above, admin-only either way. Latent today
+    // (`JobOutput` only ever calls `/stream`), but a fourth shape of the "job id the
+    // client cannot resolve" family the 2B carry-forward found three of.
+    if (job.appId !== null && !(await loadApp(db, ctx, job.appId))) {
+      return reply.code(404).send({ error: "not_found" });
+    }
     // `satisfies`, not a type annotation on the handler: a schema drift in `jobs` should
     // fail here, against the shape `@web/api/admin`'s hooks actually consume.
     return job satisfies JobRow;
