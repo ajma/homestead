@@ -8,7 +8,10 @@ import type { ComposeConfigCache } from "./apps/compose-config.js";
 import type { ImageUpdateChecker } from "./apps/image-updates.js";
 import type { JobRunner } from "./apps/job-runner.js";
 import type { StepJobRunner } from "./apps/step-job-runner.js";
+import { ACCESS_JWT_HEADER, type JwksFetcher, verifyAccessJwt } from "./auth/access-plugin.js";
+import { resolveAccessSettings } from "./auth/access-settings.js";
 import type { Auth } from "./auth/auth.js";
+import type { AuthContext } from "./auth/context.js";
 import type { TunnelConfigLock } from "./cloudflare/expose.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
@@ -68,6 +71,47 @@ function buildForwardedHeaders(
   }
   headers.set("x-forwarded-for", authoritativeIp);
   return headers;
+}
+
+/**
+ * Builds an `AuthContext` from a `users` row — shared by both preHandler hooks below
+ * (the password session hook and the Access assertion hook), since resolving scope is
+ * identical for either sign-in path; only `authPath` and how the row was found differ.
+ */
+async function authContextFrom(
+  db: Db,
+  row: typeof users.$inferSelect,
+  authPath: AuthContext["authPath"],
+): Promise<AuthContext> {
+  const scopeRows = row.scopeAllApps
+    ? []
+    : await db
+        .select({ appId: userAppScope.appId })
+        .from(userAppScope)
+        .where(eq(userAppScope.userId, row.id));
+
+  return {
+    userId: row.id,
+    email: row.email,
+    role: row.role,
+    scopeAllApps: row.scopeAllApps,
+    appIds: scopeRows.map((s) => s.appId),
+    authPath,
+  };
+}
+
+/**
+ * A `JwksFetcher` for `verifyAccessJwt` built from `deps.fetch` rather than the
+ * global `fetch` its own `defaultFetcher` would use — the same injection every other
+ * outbound call in this file and `index.ts` goes through, so a test's fake `fetch`
+ * covers this path too and no test needs a real network call to exercise it.
+ */
+function accessJwksFetcher(fetchImpl: typeof fetch, teamDomain: string): JwksFetcher {
+  return async () => {
+    const res = await fetchImpl(`https://${teamDomain}.cloudflareaccess.com/cdn-cgi/access/certs`);
+    if (!res.ok) throw new Error(`Failed to fetch Access JWKS: ${res.status}`);
+    return (await res.json()) as { keys: import("jose").JWK[] };
+  };
 }
 
 export type AppDeps = {
@@ -166,21 +210,63 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const [row] = await deps.db.select().from(users).where(eq(users.id, session.user.id));
     if (!row || row.disabledAt !== null) return;
 
-    const scopeRows = row.scopeAllApps
-      ? []
-      : await deps.db
-          .select({ appId: userAppScope.appId })
-          .from(userAppScope)
-          .where(eq(userAppScope.userId, row.id));
+    request.auth = await authContextFrom(deps.db, row, "password");
+  });
 
-    request.auth = {
-      userId: row.id,
-      email: row.email,
-      role: row.role,
-      scopeAllApps: row.scopeAllApps,
-      appIds: scopeRows.map((s) => s.appId),
-      authPath: "password",
-    };
+  /**
+   * §7's Access sign-in path: on a request carrying `Cf-Access-Jwt-Assertion` with no
+   * active session, verify the assertion and resolve it to a user. Registered as a
+   * SECOND `preHandler` — after, not instead of, the password hook above — so it never
+   * runs at all once a password session has already set `request.auth`. That ordering
+   * is what makes a garbage or forged `Cf-Access-Jwt-Assertion` header harmless against
+   * an existing password session: this hook returns on its very first line before ever
+   * looking at the header.
+   *
+   * Every other guard here fails CLOSED, silently, rather than throwing or partially
+   * authenticating:
+   *
+   * - `resolveAccessSettings` unresolved (2E Task 2 — nothing marks an app
+   *   `systemKind: "self"` yet, and no environment override either) means Access is not
+   *   configured for this deployment. The header is ignored ENTIRELY, not partially
+   *   honoured — and this returns exactly the way "no header at all" does, so a probing
+   *   caller cannot distinguish "not configured" from "bad token" from the response.
+   * - `verifyAccessJwt` throwing (bad signature, wrong issuer, expired, OR — the check
+   *   that matters most, see that function's own doc comment — an `aud` naming a
+   *   DIFFERENT Access application in the same Cloudflare account) rejects the same way.
+   * - No Homestead user with the asserted email: NOT auto-provisioned. Cloudflare
+   *   Access admits whoever its own policy admits; deciding who becomes a Homestead
+   *   user is the admin's call, made through user management, not implied by a JWT
+   *   claim this code did not choose to trust with that decision.
+   * - A disabled user's row: rejected, the same as the password hook just above (Phase
+   *   1C's carry-forward: a stale `AuthContext` must not keep a disabled user's streams
+   *   open, and that applies identically to a freshly-verified Access assertion).
+   */
+  app.addHook("preHandler", async (request) => {
+    if (request.auth) return;
+
+    const header = request.headers[ACCESS_JWT_HEADER];
+    const token = Array.isArray(header) ? header[0] : header;
+    if (!token) return;
+
+    const settings = await resolveAccessSettings({ db: deps.db, config: deps.config });
+    if (!settings) return;
+
+    let email: string;
+    try {
+      ({ email } = await verifyAccessJwt({
+        token,
+        teamDomain: settings.teamDomain,
+        aud: settings.aud,
+        fetchJwks: accessJwksFetcher(deps.fetch, settings.teamDomain),
+      }));
+    } catch {
+      return;
+    }
+
+    const [row] = await deps.db.select().from(users).where(eq(users.email, email));
+    if (!row || row.disabledAt !== null) return;
+
+    request.auth = await authContextFrom(deps.db, row, "access");
   });
 
   // Custom error handler MUST be registered BEFORE route plugins. Fastify child contexts
