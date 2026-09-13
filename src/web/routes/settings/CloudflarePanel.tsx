@@ -7,6 +7,7 @@ import {
   useCloudflareTunnel,
   useCloudflareZones,
   useDeleteCloudflareCredentials,
+  useEnsureAccessPolicies,
   useMonitorAccess,
   useProvisionTunnel,
   useRotateMonitorSecret,
@@ -93,6 +94,19 @@ export function isMonitorExpiringSoon(expiresAt: number | null, nowMs: number): 
  * unaffected and stays manual: replacing a working secret every probe currently uses is a
  * deliberate action, not something to fire automatically the way first-time creation now
  * is.
+ *
+ * **Task 5's own ruling**: removing that button left a real gap the carried-forward doc
+ * comment above used to just note and move past — if the best-effort call after saving
+ * credentials fails (a transient error, a token that verifies but turns out to lack the
+ * Access-policy permission), there was no way back on this panel short of removing and
+ * re-adding credentials just to run the same sequence again. That is acceptable as a
+ * *description* (removing credentials is not destructive to anything but this panel's own
+ * form state) but not as the *only* option, so a "Retry setup" button is added below —
+ * `useEnsureAccessPolicies`, calling the exact same idempotent `POST
+ * /api/cloudflare/monitor` route. It is deliberately NOT the button that was removed:
+ * that one was a required step to CREATE something the admin had to know to click; this
+ * one only ever appears once credentials already exist and the policies do not, to REPAIR
+ * a setup that should already have happened on its own.
  */
 export function CloudflarePanel() {
   const status = useCloudflareStatus();
@@ -106,6 +120,7 @@ export function CloudflarePanel() {
 
   const monitorStatus = useMonitorAccess();
   const rotateMonitor = useRotateMonitorSecret();
+  const ensureAccessPolicies = useEnsureAccessPolicies();
 
   const accessStatus = useAccessConfig();
 
@@ -120,6 +135,12 @@ export function CloudflarePanel() {
   const [confirmingRemove, setConfirmingRemove] = useState(false);
 
   const [confirmingRotate, setConfirmingRotate] = useState(false);
+  // Own error state, separate from `rotateMonitor`'s own — this is a DIFFERENT mutation
+  // (`ensureAccessPolicies`, not `rotateMonitor`) hitting the SAME route
+  // `useSaveCloudflareCredentials` already calls best-effort; see this panel's own doc
+  // comment on why a retry affordance exists here at all.
+  const [retryingSetup, setRetryingSetup] = useState(false);
+  const [retrySetupError, setRetrySetupError] = useState<string | null>(null);
 
   // The job whose output this panel is showing (or last showed) for the provision
   // sequence — set either by `handleProvision` the moment this tab's own POST resolves,
@@ -226,6 +247,22 @@ export function CloudflarePanel() {
     const result = await tunnelStatus.refetch();
     setLastProvisionFailed(result.data?.provisioned !== true);
     setJobRunning(false);
+  }
+
+  /** Repairs a setup that should already have completed — see this panel's own doc
+   * comment on why this is a distinct action from the removed "Set up monitor token"
+   * button. Plain synchronous `retryingSetup`, not `mutation.isPending`, for the same
+   * `notifyManager`-deferral reason `handleProvision`/`handleExposeSubmit` avoid it. */
+  function handleRetrySetup() {
+    setRetrySetupError(null);
+    setRetryingSetup(true);
+    ensureAccessPolicies.mutateAsync().then(
+      () => setRetryingSetup(false),
+      (retryError: unknown) => {
+        setRetryingSetup(false);
+        setRetrySetupError(describeMonitorError(retryError, "Could not finish setting this up."));
+      },
+    );
   }
 
   if (status.isPending) {
@@ -475,6 +512,18 @@ export function CloudflarePanel() {
                       : EXPIRES_AT_FORMATTER.format(new Date(monitorStatus.data.expiresAt))}
                   </dd>
                 </div>
+                {/* Both policies' state, not just the monitor half (Task 5) — an admin
+                    staring at this panel can now see that the sign-in policy every
+                    exposed app shares actually exists, not only the token/policy pair
+                    behind the external probe. */}
+                <div className="flex gap-2">
+                  <dt className="font-medium">Monitor policy</dt>
+                  <dd>{monitorStatus.data.policyId}</dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="font-medium">Sign-in policy</dt>
+                  <dd>{monitorStatus.data.humanPolicyId}</dd>
+                </div>
               </dl>
 
               {/* §6's own scenario, stated plainly, and appearing `MONITOR_EXPIRY_WARNING_MS`
@@ -501,16 +550,30 @@ export function CloudflarePanel() {
               </button>
             </div>
           ) : configured ? (
-            // No button here (Phase 3A): saving credentials above already triggered
-            // `ensureAccessPolicies` — see `useSaveCloudflareCredentials`'s own doc
-            // comment. This state is normally momentary (a refetch away from showing the
-            // configured branch above); it only persists if that best-effort call failed,
-            // in which case there is no retry action left on this panel — removing and
-            // re-adding the credentials above is what triggers the next attempt.
-            <p className="text-sm text-slate-500">
-              Setting up automatically. If this does not complete shortly, remove and re-add your
-              Cloudflare credentials above to retry.
-            </p>
+            // Saving credentials above already triggered `ensureAccessPolicies` — see
+            // `useSaveCloudflareCredentials`'s own doc comment. This state is normally
+            // momentary (a refetch away from showing the configured branch above); it
+            // only persists if that best-effort call failed. Task 5 adds "Retry setup"
+            // for exactly that case — see this panel's own doc comment for why that is a
+            // repair action, not the "Set up monitor token" button Phase 3A removed.
+            <div className="space-y-2">
+              <p className="text-sm text-slate-500">
+                Setting up automatically. If this does not complete shortly, retry below.
+              </p>
+              <button
+                type="button"
+                onClick={handleRetrySetup}
+                disabled={retryingSetup}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-800"
+              >
+                {retryingSetup ? "Retrying…" : "Retry setup"}
+              </button>
+              {retrySetupError && (
+                <p role="alert" className="text-sm text-red-600">
+                  {retrySetupError}
+                </p>
+              )}
+            </div>
           ) : (
             // Same "hidden, not disabled" call as the Tunnel section's own Provision
             // button: setting this up without credentials cannot succeed.

@@ -1,5 +1,6 @@
 import type {
   AccessConfigStatus,
+  AppComposeServicesStatus,
   AppExposureStatus,
   CloudflareFault,
   CloudflareStatus,
@@ -126,8 +127,10 @@ export function describeCloudflareError(error: unknown, fallback: string): strin
  * does not turn "save credentials" into a failure the wizard's onboarding flow — which
  * must stay completable without a Cloudflare account at all — would otherwise block on.
  * `CloudflarePanel`'s Monitor section is what surfaces an incomplete setup after the
- * fact, once `cloudflareMonitorKey` refetches; there is no retry surface today beyond
- * removing and re-adding credentials, which runs this same sequence again.
+ * fact, once `cloudflareMonitorKey` refetches — and (Task 5) offers a "Retry setup"
+ * button wired to `useEnsureAccessPolicies` below, which calls this exact same idempotent
+ * route directly, so a failed best-effort attempt no longer requires removing and
+ * re-adding credentials just to run it again.
  */
 export function useSaveCloudflareCredentials() {
   const queryClient = useQueryClient();
@@ -281,6 +284,29 @@ export function useAppExposure(appId: string) {
   });
 }
 
+/** Own leaf under `["cloudflare", ...]`, per app — same prefix-matching reasoning as
+ * `appExposureKey`: a compose file's resolved services are refetched on their own trigger
+ * (this app's compose file changing) and must not share an `invalidateQueries` blast
+ * radius with this app's exposure status. */
+export const appComposeServicesKey = (appId: string) =>
+  ["cloudflare", "compose-services", appId] as const;
+
+/**
+ * `GET /api/apps/:id/expose/services` (Task 5) — the resolved compose services and their
+ * published ports, for the service/port picker `ExposureTab` offers in place of Task 4's
+ * plain text/number inputs. `enabled` mirrors `useCloudflareZones`'s own parameter: the
+ * caller already knows whether the form needing this is even being shown (a tunnel must
+ * be provisioned and the app not already exposed), so this hook does not re-derive that
+ * from a second read of state it does not own.
+ */
+export function useComposeServices(appId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: appComposeServicesKey(appId),
+    queryFn: () => apiFetch<AppComposeServicesStatus>(`/api/apps/${appId}/expose/services`),
+    enabled,
+  });
+}
+
 export type ExposeAppBody = {
   hostname: string;
   zoneId: string;
@@ -290,7 +316,6 @@ export type ExposeAppBody = {
    * expose.ts`'s own comment on `exposeBody`). */
   serviceName: string;
   port: number;
-  policyId: string;
   /** Only sent for the app marked `systemKind: "self"` — see `exposeBody`'s own comment
    * in `routes/cloudflare-expose.ts` for why the server requires it only there. */
   teamDomain?: string;
@@ -427,6 +452,26 @@ export function useMonitorAccess() {
   return useQuery({
     queryKey: cloudflareMonitorKey,
     queryFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor"),
+  });
+}
+
+/**
+ * `POST /api/cloudflare/monitor` — the SAME idempotent route `useSaveCloudflareCredentials`
+ * already fires best-effort right after a credentials save (see that hook's own doc
+ * comment). This is the repair affordance Task 2's implementer flagged was missing: if
+ * that best-effort call failed (a transient Cloudflare error, a token that verified but
+ * turned out to lack the Access-policy permission at that exact moment), Settings used to
+ * offer no way back short of removing and re-adding credentials. `ensureAccessPolicies`
+ * (`access-policies.ts`) is a no-op once both policies already exist, so retrying here is
+ * safe to click more than once and safe to click after the fact — unlike the removed
+ * "Set up monitor token" button, this is not a required step an admin has to know to take;
+ * it only ever appears to REPAIR a setup that should already have completed on its own.
+ */
+export function useEnsureAccessPolicies() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor", { method: "POST" }),
+    onSuccess: (status) => queryClient.setQueryData(cloudflareMonitorKey, status),
   });
 }
 

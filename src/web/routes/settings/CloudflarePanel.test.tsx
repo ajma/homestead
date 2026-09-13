@@ -156,6 +156,7 @@ function stubFetch(opts: {
         configured: true,
         clientId: "monitor-client-1",
         policyId: "monitor-policy-1",
+        humanPolicyId: "human-policy-1",
         expiresAt: null,
       };
       return json(200, monitor);
@@ -584,6 +585,7 @@ describe("CloudflarePanel", () => {
           configured: true,
           clientId: "monitor-client-1",
           policyId: "monitor-policy-1",
+          humanPolicyId: "human-policy-1",
           expiresAt: farFuture,
         },
       });
@@ -601,6 +603,7 @@ describe("CloudflarePanel", () => {
           configured: true,
           clientId: "monitor-client-1",
           policyId: "monitor-policy-1",
+          humanPolicyId: "human-policy-1",
           expiresAt: soon,
         },
       });
@@ -618,6 +621,7 @@ describe("CloudflarePanel", () => {
           configured: true,
           clientId: "monitor-client-1",
           policyId: "monitor-policy-1",
+          humanPolicyId: "human-policy-1",
           expiresAt: originalExpiry,
         },
         monitorRotatePost: () =>
@@ -625,6 +629,7 @@ describe("CloudflarePanel", () => {
             configured: true,
             clientId: "monitor-client-2",
             policyId: "monitor-policy-1",
+            humanPolicyId: "human-policy-1",
             expiresAt: rotatedExpiry,
           }),
       });
@@ -648,6 +653,7 @@ describe("CloudflarePanel", () => {
           configured: true,
           clientId: "monitor-client-1",
           policyId: "monitor-policy-1",
+          humanPolicyId: "human-policy-1",
           expiresAt: Date.now() + MONITOR_EXPIRY_WARNING_MS * 10,
         },
         tunnel: { provisioned: true, name: "homestead", appId: "app-cf-1", runningJobId: null },
@@ -662,6 +668,72 @@ describe("CloudflarePanel", () => {
       // hint (`wxyz`, from `CONFIGURED` above) may appear; the full token must not.
       expect(document.body.textContent).not.toContain(TOKEN);
       expect(document.body.textContent).not.toContain("tunnel-token");
+    });
+
+    it("shows both policies' state, not just the monitor half (Task 5)", async () => {
+      stubFetch({
+        initiallyConfigured: true,
+        monitor: {
+          configured: true,
+          clientId: "monitor-client-1",
+          policyId: "monitor-policy-1",
+          humanPolicyId: "human-sign-in-policy-1",
+          expiresAt: null,
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("monitor-policy-1")).toBeTruthy());
+      expect(screen.getByText("human-sign-in-policy-1")).toBeTruthy();
+    });
+
+    describe("the incomplete setup state (monitor half missing after credentials save)", () => {
+      it("offers a Retry setup button, distinct from the removed 'Set up monitor token' one", async () => {
+        stubFetch({ initiallyConfigured: true, monitor: MONITOR_NOT_CONFIGURED });
+        mount();
+
+        await waitFor(() => expect(screen.getByText(/Setting up automatically/)).toBeTruthy());
+        expect(screen.queryByRole("button", { name: /Set up monitor token/ })).toBeNull();
+        expect(screen.getByRole("button", { name: "Retry setup" })).toBeTruthy();
+      });
+
+      it("retrying calls the same idempotent ensure route and shows the completed state", async () => {
+        const fetchMock = stubFetch({ initiallyConfigured: true, monitor: MONITOR_NOT_CONFIGURED });
+        mount();
+
+        await waitFor(() =>
+          expect(screen.getByRole("button", { name: "Retry setup" })).toBeTruthy(),
+        );
+        fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
+
+        await waitFor(() => expect(screen.getByText("monitor-client-1")).toBeTruthy());
+        const monitorPostCall = fetchMock.mock.calls.find(
+          (call) =>
+            call[0] === "/api/cloudflare/monitor" && (call[1] as RequestInit)?.method === "POST",
+        );
+        expect(monitorPostCall).toBeTruthy();
+      });
+
+      it("shows the actual failure and stays retryable when the retry itself fails", async () => {
+        stubFetch({
+          initiallyConfigured: true,
+          monitor: MONITOR_NOT_CONFIGURED,
+          monitorPost: () => json(502, { error: "cloudflare_error", fault: "network" }),
+        });
+        mount();
+
+        await waitFor(() =>
+          expect(screen.getByRole("button", { name: "Retry setup" })).toBeTruthy(),
+        );
+        fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
+
+        await waitFor(() =>
+          expect(screen.getByRole("alert").textContent).toMatch(/Could not reach/),
+        );
+        expect(
+          (screen.getByRole("button", { name: "Retry setup" }) as HTMLButtonElement).disabled,
+        ).toBe(false);
+      });
     });
   });
 

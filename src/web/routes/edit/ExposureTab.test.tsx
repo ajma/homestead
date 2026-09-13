@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import type { AppExposureStatus, CloudflareZone, TunnelStatus } from "@shared/cloudflare.js";
+import type {
+  AppComposeServicesStatus,
+  AppExposureStatus,
+  CloudflareZone,
+  TunnelStatus,
+} from "@shared/cloudflare.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ExposurePanel } from "@web/routes/edit/ExposureTab";
@@ -59,6 +64,13 @@ const PROVISIONED: TunnelStatus = {
   runningJobId: null,
 };
 const NOT_EXPOSED: AppExposureStatus = { exposed: false, runningJobId: null };
+/** The common case: exactly one service publishing exactly one port, so both should be
+ * preselected the instant this resolves — see `ExposureTab.tsx`'s own doc comment on the
+ * preselect effect. */
+const ONE_SERVICE_ONE_PORT: AppComposeServicesStatus = {
+  valid: true,
+  services: [{ name: "app", publishedPorts: [8096] }],
+};
 
 function mount(app: typeof APP = APP) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -75,6 +87,7 @@ function stubFetch(opts: {
   tunnel?: TunnelStatus;
   exposure?: AppExposureStatus;
   zones?: CloudflareZone[];
+  composeServices?: AppComposeServicesStatus;
   exposePost?: () => Response | Promise<Response>;
   deprovisionDelete?: () => Response | Promise<Response>;
   reconcilePost?: () => Response | Promise<Response>;
@@ -94,6 +107,9 @@ function stubFetch(opts: {
     }
     if (url === "/api/cloudflare/zones" && method === "GET") {
       return json(200, opts.zones ?? ZONES);
+    }
+    if (url === `/api/apps/${APP.id}/expose/services` && method === "GET") {
+      return json(200, opts.composeServices ?? ONE_SERVICE_ONE_PORT);
     }
     if (url === `/api/apps/${APP.id}/expose` && method === "GET") {
       return json(200, exposure);
@@ -118,20 +134,21 @@ function stubFetch(opts: {
   return fetchMock;
 }
 
-function fillExposeForm() {
+/** Fills the hostname and zone, then waits for the compose service/port pickers to
+ * preselect — the default stub (`ONE_SERVICE_ONE_PORT`) is exactly the "one click" case
+ * `ExposureTab.tsx`'s own doc comment describes, so nothing here has to drive those two
+ * fields by hand. */
+async function fillExposeForm() {
   fireEvent.change(screen.getByLabelText(/Hostname/), {
     target: { value: "jellyfin.example.com" },
   });
   fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
-  fireEvent.change(screen.getByLabelText(/Compose service name/), {
-    target: { value: "app" },
-  });
-  fireEvent.change(screen.getByLabelText(/Published port/), {
-    target: { value: "8096" },
-  });
-  fireEvent.change(screen.getByLabelText(/Access policy id/), {
-    target: { value: "human-policy-1" },
-  });
+  await waitFor(() =>
+    expect((screen.getByLabelText(/Compose service/) as HTMLSelectElement).value).toBe("app"),
+  );
+  await waitFor(() =>
+    expect((screen.getByLabelText(/Published port/) as HTMLSelectElement).value).toBe("8096"),
+  );
 }
 
 describe("ExposurePanel", () => {
@@ -172,6 +189,114 @@ describe("ExposurePanel", () => {
     expect(screen.queryByLabelText(/team domain/i)).toBeNull();
   });
 
+  it("states the shared-policy scope where the admin is making the decision, not only in a doc", async () => {
+    // §6's own property, restated in the form itself: exposing an app admits every
+    // Homestead user, including a viewer scoped to entirely different apps.
+    stubFetch({ tunnel: PROVISIONED });
+    mount();
+
+    await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
+    expect(screen.getByText(/every enabled Homestead user/)).toBeTruthy();
+    expect(screen.getByText(/scoped to entirely different apps/)).toBeTruthy();
+  });
+
+  it("no longer offers an Access policy id field — both policies exist from setup", async () => {
+    stubFetch({ tunnel: PROVISIONED });
+    mount();
+
+    await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
+    expect(screen.queryByLabelText(/Access policy/i)).toBeNull();
+  });
+
+  describe("compose service and port picker", () => {
+    it("preselects the service and port when the compose file has exactly one of each", async () => {
+      stubFetch({ tunnel: PROVISIONED, composeServices: ONE_SERVICE_ONE_PORT });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
+      await waitFor(() =>
+        expect((screen.getByLabelText(/Compose service/) as HTMLSelectElement).value).toBe("app"),
+      );
+      expect((screen.getByLabelText(/Published port/) as HTMLSelectElement).value).toBe("8096");
+    });
+
+    it("offers every service but leaves the choice to the admin when there is more than one", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: {
+          valid: true,
+          services: [
+            { name: "app", publishedPorts: [8096] },
+            { name: "sonarr", publishedPorts: [8989] },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Compose service/)).toBeTruthy());
+      const select = screen.getByLabelText(/Compose service/) as HTMLSelectElement;
+      expect(select.value).toBe("");
+      const options = Array.from(select.options).map((o) => o.value);
+      expect(options).toEqual(["", "app", "sonarr"]);
+    });
+
+    it("shows a service with no published ports as not exposable, with the reason, rather than offering it", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: {
+          valid: true,
+          services: [
+            { name: "app", publishedPorts: [8096] },
+            { name: "worker", publishedPorts: [] },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Compose service/)).toBeTruthy());
+      const select = screen.getByLabelText(/Compose service/) as HTMLSelectElement;
+      const workerOption = Array.from(select.options).find((o) => o.value === "worker");
+      expect(workerOption).toBeTruthy();
+      expect(workerOption?.disabled).toBe(true);
+      expect(workerOption?.textContent).toMatch(/not exposable/);
+      expect(workerOption?.textContent).toMatch(/no ports/);
+    });
+
+    it("picks the port automatically when the admin's chosen service publishes only one", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: {
+          valid: true,
+          services: [
+            { name: "app", publishedPorts: [8096] },
+            { name: "sonarr", publishedPorts: [8989] },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Compose service/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Compose service/), {
+        target: { value: "sonarr" },
+      });
+
+      await waitFor(() =>
+        expect((screen.getByLabelText(/Published port/) as HTMLSelectElement).value).toBe("8989"),
+      );
+    });
+
+    it("shows the invalid-compose message instead of a picker when the compose file cannot be resolved", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: { valid: false, message: "compose file is invalid" },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/compose file is invalid/)).toBeTruthy());
+      expect(screen.queryByLabelText(/Compose service/)).toBeNull();
+    });
+  });
+
   it("disables Expose immediately, then streams the job's output while it runs", async () => {
     let resolvePost: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {
@@ -187,7 +312,7 @@ describe("ExposurePanel", () => {
     mount();
 
     await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
-    fillExposeForm();
+    await fillExposeForm();
     fireEvent.click(screen.getByRole("button", { name: "Expose" }));
 
     await waitFor(() =>
@@ -218,7 +343,7 @@ describe("ExposurePanel", () => {
     mount();
 
     await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
-    fillExposeForm();
+    await fillExposeForm();
     fireEvent.click(screen.getByRole("button", { name: "Expose" }));
     await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
 

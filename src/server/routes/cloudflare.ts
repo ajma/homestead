@@ -49,10 +49,9 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
    * `CloudflareCredentialStore.status()` gives credentials, for the same reason: a
    * caller cannot accidentally read `clientId` off a status that has none.
    *
-   * Still named `policyId` on the wire, and still only the monitor policy's id — this
-   * status route predates Phase 3A's human policy and nothing downstream reads a human
-   * policy id from it today, so the DTO is left alone rather than grown a field nothing
-   * consumes yet. */
+   * Still named `policyId` on the wire — kept for the monitor policy id, same as before
+   * Phase 3A. `humanPolicyId` is new: Task 5 (Settings) is the first caller that needs to
+   * show BOTH policies exist, not only the monitor half. */
   function toMonitorStatus(
     access: Awaited<ReturnType<typeof monitorStore.get>>,
   ): MonitorAccessStatus {
@@ -61,6 +60,7 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
       configured: true,
       clientId: access.clientId,
       policyId: access.monitorPolicyId,
+      humanPolicyId: access.humanPolicyId,
       expiresAt: access.expiresAt,
     };
   }

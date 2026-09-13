@@ -178,10 +178,13 @@ export type ExposeDeps = {
    * about an app rather than three." Still written into the `exposures.ingress_service`
    * column unchanged (that column's own name and meaning predate this rename). */
   internalUrl: string;
-  /** The admin-chosen policy demanding a human identity — §6: "policy list containing the
-   * chosen human policy plus the shared monitor policy by ID." Homestead does not create
-   * or manage this policy; it is referenced by id, the same way the shared monitor policy
-   * (below) is. */
+  /** `AccessPolicies.humanPolicyId` (`access-policies.ts`, Task 2/3) — the one reusable
+   * `allow` policy every enabled Homestead user's email is kept in, resolved by the
+   * caller (`routes/cloudflare-expose.ts`) from `AccessPoliciesStore`, not supplied by the
+   * admin. §6's "policy list containing the chosen human policy plus the shared monitor
+   * policy by ID" predates Phase 3A, which made Homestead create and keep this policy
+   * current itself (`ensureAccessPolicies`, `sync-access-users.ts`) rather than treating it
+   * as something an admin pastes in per exposure, the way §6 originally described. */
   humanPolicyId: string;
   /** `AccessPolicies.monitorPolicyId` (`access-policies.ts`, Task 2) — the one reusable
    * `non_identity` policy shared by every exposed app. */

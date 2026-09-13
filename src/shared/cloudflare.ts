@@ -87,10 +87,22 @@ export type CloudflareFault =
  * pattern `CloudflareStatus` uses and for the same reason: a caller cannot accidentally
  * read `clientId`/`expiresAt` off a status that has none. Never carries the secret itself
  * (see `MonitorAccessStore` — the secret is written, never read back through this shape).
+ *
+ * `policyId` is `AccessPolicies.monitorPolicyId` — kept under its original, pre-3A name
+ * (see `routes/cloudflare.ts`'s `toMonitorStatus`). `humanPolicyId` is Phase 3A's addition,
+ * the id of the reusable `allow` policy every enabled Homestead user's email is kept in
+ * (Task 3's `syncAccessUsers`) — Settings (Task 5) is its first reader, so an admin can see
+ * that BOTH policies exist, not just the one this type used to name.
  */
 export type MonitorAccessStatus =
   | { configured: false }
-  | { configured: true; clientId: string; policyId: string; expiresAt: number | null };
+  | {
+      configured: true;
+      clientId: string;
+      policyId: string;
+      humanPolicyId: string;
+      expiresAt: number | null;
+    };
 
 /**
  * `GET /api/cloudflare/access`'s shape — a discriminated union on `configured`, the same
@@ -147,6 +159,32 @@ export type AppExposureStatus =
        * enough to repeat here. */
       driftFindings: DriftFinding[];
     };
+
+/**
+ * One compose service the exposure form can offer, over `ResolvedService`
+ * (`server/apps/compose-config.ts`) — trimmed to exactly what a service/port picker
+ * needs. `image`/`restart` are not carried across the wire: nothing on this side reads
+ * them, and every field added here is one more thing `GET /api/apps/:id/expose/services`
+ * has to keep in sync with the resolver it wraps.
+ *
+ * `publishedPorts: []` is a normal value, not an error — it is exactly how the form knows
+ * to show a service as not exposable, with the reason, rather than the server refusing a
+ * chosen port with a 422 the form never had a chance to prevent (Task 4's own check,
+ * `cloudflare-expose.ts`'s `service_publishes_no_ports`).
+ */
+export type ComposeService = { name: string; publishedPorts: number[] };
+
+/**
+ * `GET /api/apps/:id/expose/services`'s shape — Task 5's read model over the SAME
+ * `ComposeConfigCache.resolve` the POST route already validates a chosen service/port
+ * against (`cloudflare-expose.ts`), not a second call to `docker compose config`. Mirrors
+ * `ComposeValidation` (`compose-config.ts`) rather than inventing a new shape: `valid:
+ * false` carries the same message a failed resolve already produces, so the form can show
+ * it verbatim instead of a generic "could not load services" line.
+ */
+export type AppComposeServicesStatus =
+  | { valid: true; services: ComposeService[] }
+  | { valid: false; message: string };
 
 /**
  * One thing a periodic reconcile (§6, `cloudflare/reconcile.ts`) found does not match

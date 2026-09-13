@@ -65,10 +65,15 @@ function exposeFetch(): {
   ingress: () => unknown[];
   dnsRecords: Map<string, { id: string }>;
   accessApps: Map<string, { id: string; aud: string }>;
+  /** The `policies[].id` list the LAST `POST .../access/apps` call carried — Task 5's own
+   * binding check: the route must source the human policy id from `AccessPoliciesStore`,
+   * never from the request body (the field the UI no longer sends at all). */
+  lastAccessAppPolicyIds: () => string[] | undefined;
 } {
   let ingress: Array<{ hostname?: string; service: string }> = [{ service: "http_status:404" }];
   const dnsRecords = new Map<string, { id: string }>();
   const accessApps = new Map<string, { id: string; aud: string }>();
+  let lastAccessAppPolicyIds: string[] | undefined;
   let nextId = 1;
   const accountPrefix = `/client/v4/accounts/${ACCOUNT_ID}`;
   const zonePrefix = `/client/v4/zones/${ZONE_ID}`;
@@ -106,10 +111,14 @@ function exposeFetch(): {
       return envelope(null);
     }
     if (url.pathname === `${accountPrefix}/access/apps` && method === "POST") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { domain: string };
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        domain: string;
+        policies?: Array<{ id: string }>;
+      };
       const id = `access-${nextId++}`;
       const aud = `aud-${id}`;
       accessApps.set(body.domain, { id, aud });
+      lastAccessAppPolicyIds = (body.policies ?? []).map((p) => p.id);
       return envelope({ id, aud });
     }
     if (url.pathname === `${accountPrefix}/access/apps` && method === "GET") {
@@ -127,7 +136,13 @@ function exposeFetch(): {
     throw new Error(`cloudflare-expose.test.ts: unexpected fetch ${method} ${url.pathname}`);
   }) as unknown as typeof fetch;
 
-  return { fetch: fetchFn, ingress: () => ingress, dnsRecords, accessApps };
+  return {
+    fetch: fetchFn,
+    ingress: () => ingress,
+    dnsRecords,
+    accessApps,
+    lastAccessAppPolicyIds: () => lastAccessAppPolicyIds,
+  };
 }
 
 async function withFullSetup(opts: { systemKind?: "self" } = {}) {
@@ -196,7 +211,6 @@ const exposeBody = {
   zoneId: ZONE_ID,
   serviceName: "app",
   port: 8096,
-  policyId: "human-policy-1",
 };
 
 describe("POST /api/apps/:id/expose", () => {
@@ -460,7 +474,7 @@ describe("POST /api/apps/:id/expose", () => {
 
   it("exposes the app end to end: 202 with a jobId, ingress spliced, exposures row ready, probe created", async () => {
     const { app, cookie, appId } = await withFullSetup();
-    const { fetch: exposed, ingress } = exposeFetch();
+    const { fetch: exposed, ingress, lastAccessAppPolicyIds } = exposeFetch();
     app.deps.fetch = exposed;
 
     const res = await app.inject({
@@ -475,6 +489,11 @@ describe("POST /api/apps/:id/expose", () => {
     const jobRow = await waitForJobTerminal(app.deps.db, jobId);
     expect(jobRow?.status).toBe("succeeded");
     expect(jobRow?.appId).toBe(appId);
+
+    // Task 5: the human policy id comes from `AccessPoliciesStore` — `withFullSetup`'s
+    // `human-shared-policy` — never from the request body, which no longer even has a
+    // `policyId` field to send.
+    expect(lastAccessAppPolicyIds()).toEqual(["human-shared-policy", "monitor-policy"]);
 
     expect(ingress()).toEqual([
       { hostname: "jellyfin.example.com", service: "http://localhost:8096" },
@@ -591,6 +610,146 @@ describe("POST /api/apps/:id/expose", () => {
       resolveAccessSettings({ db: app.deps.db, config: app.deps.config }),
     ).resolves.toBeNull();
 
+    await app.close();
+  });
+});
+
+describe("GET /api/apps/:id/expose/services", () => {
+  it("requires the read capability — a viewer gets 403", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: viewerCookie } = await createViewer(app, adminCookie);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("gives a scoped admin 404 for an app outside their scope, not a compose result", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: scopedCookie } = await createScopedAdmin(app, adminCookie, { appIds: [] });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie: scopedCookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("404s for a nonexistent app", async () => {
+    const { app, cookie } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps/does-not-exist/expose/services",
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("returns the resolved services and their published ports", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      valid: true,
+      services: [{ name: "app", publishedPorts: [8096] }],
+    });
+    await app.close();
+  });
+
+  it("returns a service with no published ports as-is, rather than dropping it", async () => {
+    // The form is what turns `publishedPorts: []` into "not exposable, with the reason" —
+    // this route's job is only to report the resolved truth.
+    const { app, cookie, appId } = await withFullSetup();
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        name: "jellyfin",
+        services: {
+          app: { image: "jellyfin/jellyfin", ports: [{ published: 8096 }] },
+          worker: { image: "jellyfin/jellyfin" },
+        },
+      }),
+      stderr: "",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      valid: true,
+      services: [
+        { name: "app", publishedPorts: [8096] },
+        { name: "worker", publishedPorts: [] },
+      ],
+    });
+    await app.close();
+  });
+
+  it("reports an invalid compose file rather than guessing at its services", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 1,
+      stdout: "",
+      stderr: "compose file is invalid",
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ valid: false, message: "compose file is invalid" });
+    await app.close();
+  });
+
+  it("reuses the same resolved config the POST route validates against — no second docker compose config call", async () => {
+    // `ComposeConfigCache` exists specifically because `docker compose config` is the
+    // expensive command in this codebase (`compose-config.ts`'s own doc comment) — this is
+    // the binding proof that the new endpoint reads the warm cache rather than spawning a
+    // second subprocess for the same compose file.
+    const { app, cookie, appId } = await withFullSetup();
+    const before = app.deps.host.composeCalls.length;
+
+    const first = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie },
+    });
+    expect(first.statusCode).toBe(200);
+    const afterFirst = app.deps.host.composeCalls.length;
+    expect(afterFirst).toBe(before + 1);
+
+    const second = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose/services`,
+      headers: { cookie },
+    });
+    expect(second.statusCode).toBe(200);
+    // A second read of the SAME unchanged compose file must not spawn another process.
+    expect(app.deps.host.composeCalls.length).toBe(afterFirst);
     await app.close();
   });
 });

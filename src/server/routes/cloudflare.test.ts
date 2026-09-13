@@ -384,6 +384,7 @@ describe("cloudflare routes", () => {
         configured: true,
         clientId: "client-1",
         policyId: "policy-monitor",
+        humanPolicyId: expect.any(String),
         expiresAt: Date.parse("2027-09-12T00:00:00Z"),
       });
       expect(calls.tokens).toBe(1);
