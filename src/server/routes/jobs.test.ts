@@ -1,9 +1,25 @@
+import { readFile } from "node:fs/promises";
 import type { Step } from "@server/apps/step-sequence";
 import { apps, jobs } from "@server/db/schema";
 import type { TestApp } from "@server/test-helpers";
-import { buildTestApp, createScopedAdmin, createViewer, signUpAdmin } from "@server/test-helpers";
+import {
+  buildTestApp,
+  createScopedAdmin,
+  createViewer,
+  fakeSelfMountinfo,
+  signUpAdmin,
+} from "@server/test-helpers";
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// See `apps.test.ts`'s identical block for why this shape (a real `vi.fn()` wrapping the
+// real `readFile`) rather than `vi.spyOn`: only "marked self by REAL detection" below
+// ever overrides it, to feed `self-detect.ts`'s `/proc/self/mountinfo` read a chosen
+// container id without needing a real container.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 
 const CONFIG = JSON.stringify({ name: "jellyfin", services: { web: { image: "nginx" } } });
 
@@ -386,42 +402,37 @@ describe("system apps", () => {
     // specifically, since every guard test before this one could pass against a
     // `systemKind` no code path actually sets in production.
     const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
-    const originalHostname = process.env.HOSTNAME;
-    process.env.HOSTNAME = "abc123";
-    try {
-      const app = await buildTestApp();
-      const { cookie } = await signUpAdmin(app);
-      app.deps.host.containers = [
-        {
-          id: `abc123${"0".repeat(58)}`,
-          names: ["homestead"],
-          image: "homestead:latest",
-          state: "running",
-          status: "Up",
-          project: "homestead",
-          service: "homestead",
-          labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
-        },
-      ];
-      const id = await createApp(app, cookie, { name: "homestead" });
+    const selfContainerId = `abc123${"0".repeat(58)}`;
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.containers = [
+      {
+        id: selfContainerId,
+        names: ["homestead"],
+        image: "homestead:latest",
+        state: "running",
+        status: "Up",
+        project: "homestead",
+        service: "homestead",
+        labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
+      },
+    ];
+    vi.mocked(readFile).mockImplementationOnce(async () => fakeSelfMountinfo(selfContainerId));
+    const id = await createApp(app, cookie, { name: "homestead" });
 
-      const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
-      expect(row?.systemKind).toBe("self");
+    const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
+    expect(row?.systemKind).toBe("self");
 
-      for (const kind of ["up", "down", "restart", "pull"]) {
-        const res = await app.inject({
-          method: "POST",
-          url: `/api/apps/${id}/actions/${kind}`,
-          headers: { cookie },
-        });
-        expect(res.statusCode, `${kind} should be refused`).toBe(409);
-        expect(res.json().error, `${kind} should say why`).toBe("system_app");
-      }
-      await app.close();
-    } finally {
-      if (originalHostname === undefined) delete process.env.HOSTNAME;
-      else process.env.HOSTNAME = originalHostname;
+    for (const kind of ["up", "down", "restart", "pull"]) {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/apps/${id}/actions/${kind}`,
+        headers: { cookie },
+      });
+      expect(res.statusCode, `${kind} should be refused`).toBe(409);
+      expect(res.json().error, `${kind} should say why`).toBe("system_app");
     }
+    await app.close();
   });
 
   it("refuses every lifecycle action on a self-adopted Homestead", async () => {

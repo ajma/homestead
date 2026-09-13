@@ -1,7 +1,7 @@
 import type { AdminApp } from "@shared/dto";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppKey, adminAppsKey } from "@web/api/admin";
-import { ApiTimeoutError, apiFetch } from "@web/api/client";
+import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { IconPicker } from "@web/components/IconPicker";
 import type { EditAppContext } from "@web/routes/EditApp";
@@ -14,6 +14,7 @@ type FormState = {
   category: string;
   iconRef: string | null;
   showOnLauncher: boolean;
+  self: boolean;
 };
 
 function toForm(app: AdminApp): FormState {
@@ -23,6 +24,7 @@ function toForm(app: AdminApp): FormState {
     category: app.category ?? "",
     iconRef: app.iconRef,
     showOnLauncher: app.showOnLauncher,
+    self: app.systemKind === "self",
   };
 }
 
@@ -46,7 +48,29 @@ function buildPatch(app: AdminApp, form: FormState): Record<string, unknown> {
   if (form.iconRef !== app.iconRef) patch.iconRef = form.iconRef;
   if (form.showOnLauncher !== app.showOnLauncher) patch.showOnLauncher = form.showOnLauncher;
 
+  const currentlySelf = app.systemKind === "self";
+  if (form.self !== currentlySelf) patch.systemKind = form.self ? "self" : null;
+
   return patch;
+}
+
+/**
+ * `PATCH /api/apps/:id`'s two `systemKind`-specific 409s, worded for an admin rather than
+ * echoing the wire code — see that route's own comment for why both exist: `self` is
+ * detected automatically (`self-detect.ts`) but, per the Phase 2F whole-branch review
+ * (F1), detection can go silently wrong, and until this checkbox existed there was no way
+ * to correct it by hand at all.
+ */
+function systemKindErrorMessage(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null || !("error" in body)) return undefined;
+  const { error } = body as { error: unknown };
+  if (error === "self_already_assigned") {
+    return "Another app is already marked as Homestead itself. Clear that one first.";
+  }
+  if (error === "system_app") {
+    return "This app is managed by Homestead's own Cloudflare tunnel and cannot be reassigned.";
+  }
+  return undefined;
 }
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -125,10 +149,14 @@ export function OverviewTab() {
       },
       onError: (saveError) => {
         setSaving(false);
+        if (saveError instanceof ApiTimeoutError) {
+          setError("The server did not respond. It may still be working; check again in a moment.");
+          return;
+        }
+        const systemKindMessage =
+          saveError instanceof ApiError ? systemKindErrorMessage(saveError.body) : undefined;
         setError(
-          saveError instanceof ApiTimeoutError
-            ? "The server did not respond. It may still be working; check again in a moment."
-            : "Could not save changes. Your edits are still here — try again.",
+          systemKindMessage ?? "Could not save changes. Your edits are still here — try again.",
         );
       },
     });
@@ -210,6 +238,26 @@ export function OverviewTab() {
           />
           <span className="font-medium text-slate-900 dark:text-slate-100">Show on launcher</span>
         </label>
+
+        {app.systemKind !== "cloudflared" && (
+          <div className="flex flex-col gap-1">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={form.self}
+                onChange={(event) => setForm((prev) => ({ ...prev, self: event.target.checked }))}
+              />
+              <span className="font-medium text-slate-900 dark:text-slate-100">
+                This is Homestead itself
+              </span>
+            </label>
+            <p className="text-xs text-slate-500">
+              Homestead tries to detect this on its own when it adopts the directory it runs from.
+              Set it by hand if detection missed it, or clear it if it marked the wrong app — only
+              one app can be marked this way at a time.
+            </p>
+          </div>
+        )}
 
         {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
 

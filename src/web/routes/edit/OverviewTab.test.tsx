@@ -146,6 +146,60 @@ describe("OverviewTab", () => {
     expect((screen.getByLabelText(/Show on launcher/) as HTMLInputElement).checked).toBe(false);
   });
 
+  it("PATCHes systemKind: self when the checkbox is checked", async () => {
+    ok(app);
+    mount();
+
+    fireEvent.click(screen.getByLabelText(/This is Homestead itself/));
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ systemKind: "self" });
+  });
+
+  it("PATCHes systemKind: null when an already-self app's checkbox is unchecked", async () => {
+    const selfApp: AdminApp = { ...app, systemKind: "self" };
+    ok(selfApp);
+    mount(selfApp);
+
+    expect((screen.getByLabelText(/This is Homestead itself/) as HTMLInputElement).checked).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByLabelText(/This is Homestead itself/));
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ systemKind: null });
+  });
+
+  it("hides the self-override checkbox for the Cloudflare system app", () => {
+    mount({ ...app, systemKind: "cloudflared" });
+    expect(screen.queryByLabelText(/This is Homestead itself/)).toBeNull();
+  });
+
+  it("shows a specific message when another app is already marked self", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "self_already_assigned" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    mount();
+
+    fireEvent.click(screen.getByLabelText(/This is Homestead itself/));
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Another app is already marked as Homestead itself/)).toBeTruthy(),
+    );
+  });
+
   it("names the app in the delete confirmation and does not delete when cancelled", () => {
     ok(app);
     mount();

@@ -489,3 +489,20 @@ export async function createScopedAdmin(
     cookie: String(signIn.headers["set-cookie"] ?? "").split(";")[0] ?? "",
   };
 }
+
+/**
+ * A `/proc/self/mountinfo` shaped exactly the way Docker stamps it for the running
+ * container's `/etc/hostname`/`/etc/hosts`/`/etc/resolv.conf` bind mounts — see
+ * `self-detect.ts`'s `extractSelfContainerId` and its own test file for the full fixture
+ * captured verbatim from a real daemon. This one is deliberately minimal: it exists only
+ * to wire a chosen container id through `detectSelfDirectory` in a routes-level test
+ * (`apps.test.ts`, `jobs.test.ts`) via a mocked `readFile("/proc/self/mountinfo")`, not to
+ * re-prove the parser itself works against real daemon noise — that proof lives in
+ * `self-detect.test.ts` alone.
+ */
+export function fakeSelfMountinfo(containerId: string): string {
+  return (
+    `334 325 8:1 /var/lib/docker/containers/${containerId}/hostname /etc/hostname ` +
+    "rw,relatime - ext4 /dev/root rw,discard,errors=remount-ro,commit=30\n"
+  );
+}
