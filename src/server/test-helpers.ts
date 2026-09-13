@@ -292,6 +292,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     fetch: async () => {
       throw new Error("scheduler fetch should not be called in tests");
     },
+    accessCredentials: async () => null,
   });
   const events = new EventBus({ maxStreamMs: overrides.maxStreamMs });
   const scheduler = new Scheduler({

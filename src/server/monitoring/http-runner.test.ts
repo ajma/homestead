@@ -25,17 +25,30 @@ function fakeFetch(handler: (url: string, init?: RequestInit) => Response | Prom
   return { impl: impl as unknown as typeof fetch, calls };
 }
 
+// The internal runner never calls `accessCredentials` — only the external one does — so
+// every `http_internal` test below just needs a value that type-checks now that the
+// parameter is required.
+const noCreds = async () => null;
+
 describe("http_internal", () => {
   it("is up for an accepted status", async () => {
     const { impl } = fakeFetch(() => new Response(null, { status: 204 }));
-    const result = await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx);
+    const result = await createHttpRunners({
+      fetch: impl,
+      accessCredentials: noCreds,
+    }).internal.run(probe(), ctx);
     expect(result.status).toBe("up");
     expect(result.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
   it("is down with an app fault for a rejected status", async () => {
     const { impl } = fakeFetch(() => new Response(null, { status: 500 }));
-    expect(await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx)).toMatchObject({
+    expect(
+      await createHttpRunners({ fetch: impl, accessCredentials: noCreds }).internal.run(
+        probe(),
+        ctx,
+      ),
+    ).toMatchObject({
       status: "down",
       faultClass: "app",
     });
@@ -44,7 +57,7 @@ describe("http_internal", () => {
   it("never follows redirects", async () => {
     // The whole reason this phase exists. A 302 must be judged, not chased.
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 302 }));
-    await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx);
+    await createHttpRunners({ fetch: impl, accessCredentials: noCreds }).internal.run(probe(), ctx);
     expect(calls[0]?.init?.redirect).toBe("manual");
   });
 
@@ -52,7 +65,12 @@ describe("http_internal", () => {
     const impl = (async () => {
       throw new Error("connect ECONNREFUSED 192.168.1.10:8096");
     }) as unknown as typeof fetch;
-    expect(await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx)).toMatchObject({
+    expect(
+      await createHttpRunners({ fetch: impl, accessCredentials: noCreds }).internal.run(
+        probe(),
+        ctx,
+      ),
+    ).toMatchObject({
       status: "down",
       faultClass: "network",
     });
@@ -62,7 +80,12 @@ describe("http_internal", () => {
     const impl = (async () => {
       throw new Error("getaddrinfo ENOTFOUND nas.local");
     }) as unknown as typeof fetch;
-    expect(await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx)).toMatchObject({
+    expect(
+      await createHttpRunners({ fetch: impl, accessCredentials: noCreds }).internal.run(
+        probe(),
+        ctx,
+      ),
+    ).toMatchObject({
       status: "down",
       faultClass: "config",
     });
@@ -70,7 +93,7 @@ describe("http_internal", () => {
 
   it("is down with a config fault when the target is missing or unparseable", async () => {
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
-    const runners = createHttpRunners({ fetch: impl });
+    const runners = createHttpRunners({ fetch: impl, accessCredentials: noCreds });
     expect(await runners.internal.run(probe({ target: null }), ctx)).toMatchObject({
       status: "down",
       faultClass: "config",
@@ -88,7 +111,7 @@ describe("http_internal", () => {
     // the fetch, and a row can reach it by other routes. Measured before this check:
     // `file:///etc/passwd` was passed to fetch.
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
-    const runners = createHttpRunners({ fetch: impl });
+    const runners = createHttpRunners({ fetch: impl, accessCredentials: noCreds });
     for (const target of ["file:///etc/passwd", "ftp://x/y", "data:text/plain,hi"]) {
       const result = await runners.internal.run(probe({ target }), ctx);
       expect(result, target).toMatchObject({ status: "down", faultClass: "config" });
@@ -98,7 +121,10 @@ describe("http_internal", () => {
 
   it("passes an abort signal derived from the probe timeout", async () => {
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
-    await createHttpRunners({ fetch: impl }).internal.run(probe({ timeoutMs: 1234 }), ctx);
+    await createHttpRunners({ fetch: impl, accessCredentials: noCreds }).internal.run(
+      probe({ timeoutMs: 1234 }),
+      ctx,
+    );
     expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -113,7 +139,10 @@ describe("http_internal", () => {
       },
     });
     const { impl } = fakeFetch(() => new Response(body, { status: 200 }));
-    const result = await createHttpRunners({ fetch: impl }).internal.run(probe(), ctx);
+    const result = await createHttpRunners({
+      fetch: impl,
+      accessCredentials: noCreds,
+    }).internal.run(probe(), ctx);
     expect(result.status).toBe("up");
     expect(JSON.stringify(result.detail)).not.toContain("xxx");
   });
