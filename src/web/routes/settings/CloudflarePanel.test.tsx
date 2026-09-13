@@ -554,23 +554,25 @@ describe("CloudflarePanel", () => {
       mount();
 
       await waitFor(() =>
-        expect(screen.getByText(/Add Cloudflare credentials above before setting up/)).toBeTruthy(),
+        expect(
+          screen.getByText(/Add Cloudflare credentials above.*created automatically/),
+        ).toBeTruthy(),
       );
       expect(screen.queryByRole("button", { name: /Set up monitor token/ })).toBeNull();
     });
 
-    it("offers to set it up once credentials exist and it is not configured yet", async () => {
-      stubFetch({ initiallyConfigured: true });
+    it("sets up automatically when credentials are saved, with no separate button", async () => {
+      // Phase 3A: there is no "Set up monitor token" button any more — saving credentials
+      // above (`useSaveCloudflareCredentials`) triggers `ensureAccessPolicies` itself.
+      stubFetch({ initiallyConfigured: false });
       mount();
 
-      await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Set up monitor token" })).toBeTruthy(),
-      );
-
-      fireEvent.click(screen.getByRole("button", { name: "Set up monitor token" }));
+      await waitFor(() => expect(screen.getByLabelText(/Account ID/)).toBeTruthy());
+      fillForm();
+      fireEvent.click(screen.getByRole("button", { name: /Save/ }));
 
       await waitFor(() => expect(screen.getByText("monitor-client-1")).toBeTruthy());
-      expect(screen.queryByRole("button", { name: "Set up monitor token" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /Set up monitor token/ })).toBeNull();
       expect(screen.getByRole("button", { name: "Rotate secret" })).toBeTruthy();
     });
 

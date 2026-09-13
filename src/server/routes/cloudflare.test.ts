@@ -1,6 +1,6 @@
 import { ACCESS_TEAM_DOMAIN_SETTING_KEY } from "@server/auth/access-settings";
 import { LOCAL_HOST_ID } from "@server/bootstrap";
-import { apps, auditLog, exposures, settings } from "@server/db/schema";
+import { apps, auditLog, exposures, settings, users } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
@@ -52,18 +52,31 @@ async function withAdmin() {
 }
 
 /**
- * A `fetch` that answers `GET /zones` (for credential verification) plus the three
- * monitor-access endpoints `ensureMonitorAccess`/`rotateMonitorSecret` call. Not a real
- * Cloudflare double — a router by URL shape, since these route tests exercise the HTTP
- * layer end to end rather than substituting a fake `CloudflareClient` the way
- * `provision-tunnel.test.ts` and `monitor-access.test.ts` do.
+ * A `fetch` that answers `GET /zones` (for credential verification) plus every endpoint
+ * `ensureAccessPolicies`/`rotateMonitorSecret` call — the service token, the rotate
+ * endpoint, and now (Phase 3A) BOTH `/access/policies` POSTs, distinguished by
+ * `decision` on the request body the same way `createMonitorPolicy`/`createEmailPolicy`
+ * are distinguished at the client level. Not a real Cloudflare double — a router by URL
+ * shape (and, here, request body), since these route tests exercise the HTTP layer end
+ * to end rather than substituting a fake `CloudflareClient` the way
+ * `provision-tunnel.test.ts` and `access-policies.test.ts` do.
  */
 function monitorFetch(): {
   fetch: typeof fetch;
-  calls: { tokens: number; policies: number; rotations: number };
+  calls: {
+    tokens: number;
+    monitorPolicies: number;
+    humanPolicies: Array<{ email: string }[]>;
+    rotations: number;
+  };
 } {
-  const calls = { tokens: 0, policies: 0, rotations: 0 };
-  const fetchFn = (async (input: RequestInfo | URL) => {
+  const calls = {
+    tokens: 0,
+    monitorPolicies: 0,
+    humanPolicies: [] as Array<{ email: string }[]>,
+    rotations: 0,
+  };
+  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/zones")) {
       return jsonResponse(successEnvelope([{ id: "z1", name: "example.com" }]));
@@ -94,8 +107,16 @@ function monitorFetch(): {
       });
     }
     if (url.endsWith("/access/policies")) {
-      calls.policies++;
-      return jsonResponse({ success: true, errors: [], result: { id: "policy-1" } });
+      const body = JSON.parse(String(init?.body)) as {
+        decision: string;
+        include: Array<{ email?: { email: string } }>;
+      };
+      if (body.decision === "non_identity") {
+        calls.monitorPolicies++;
+        return jsonResponse({ success: true, errors: [], result: { id: "policy-monitor" } });
+      }
+      calls.humanPolicies.push(body.include.map((i) => ({ email: i.email?.email ?? "" })));
+      return jsonResponse({ success: true, errors: [], result: { id: "policy-human" } });
     }
     throw new Error(`monitorFetch: unexpected URL ${url}`);
   }) as unknown as typeof fetch;
@@ -349,7 +370,7 @@ describe("cloudflare routes", () => {
       await app.close();
     });
 
-    it("POST creates the token and policy, and GET reflects it afterwards", async () => {
+    it("POST creates the token and both policies, and GET reflects it afterwards", async () => {
       const { fetch, calls } = monitorFetch();
       const { app, cookie } = await withConfiguredAdmin(fetch);
 
@@ -362,11 +383,14 @@ describe("cloudflare routes", () => {
       expect(postRes.json()).toMatchObject({
         configured: true,
         clientId: "client-1",
-        policyId: "policy-1",
+        policyId: "policy-monitor",
         expiresAt: Date.parse("2027-09-12T00:00:00Z"),
       });
       expect(calls.tokens).toBe(1);
-      expect(calls.policies).toBe(1);
+      expect(calls.monitorPolicies).toBe(1);
+      // The human policy is seeded with every enabled user's email at creation time —
+      // here, just the admin `withConfiguredAdmin` signed up.
+      expect(calls.humanPolicies).toEqual([[{ email: "admin@example.com" }]]);
 
       const getRes = await app.inject({
         method: "GET",
@@ -377,7 +401,7 @@ describe("cloudflare routes", () => {
       await app.close();
     });
 
-    it("POST is idempotent — a second call does not create a second token", async () => {
+    it("POST is idempotent — a second call does not create a second token or a second human policy", async () => {
       const { fetch, calls } = monitorFetch();
       const { app, cookie } = await withConfiguredAdmin(fetch);
 
@@ -394,7 +418,43 @@ describe("cloudflare routes", () => {
 
       expect(second.json()).toEqual(first.json());
       expect(calls.tokens).toBe(1);
-      expect(calls.policies).toBe(1);
+      expect(calls.monitorPolicies).toBe(1);
+      expect(calls.humanPolicies).toHaveLength(1);
+      await app.close();
+    });
+
+    it("seeds the human policy with every enabled user's email, excluding disabled ones", async () => {
+      // Phase 3A's own point: a disabled user who keeps internet access to every exposed
+      // app through this policy defeats the entire reason for disabling them.
+      const { fetch, calls } = monitorFetch();
+      const { app, cookie } = await withConfiguredAdmin(fetch);
+      const now = Date.now();
+      await app.deps.db.insert(users).values({
+        id: ulid(),
+        email: "viewer@example.com",
+        name: "Viewer",
+        role: "viewer",
+        emailVerified: true,
+        disabledAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await app.deps.db.insert(users).values({
+        id: ulid(),
+        email: "gone@example.com",
+        name: "Gone",
+        role: "viewer",
+        emailVerified: true,
+        disabledAt: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await app.inject({ method: "POST", url: "/api/cloudflare/monitor", headers: { cookie } });
+
+      expect(calls.humanPolicies).toHaveLength(1);
+      const emails = (calls.humanPolicies[0] ?? []).map((e) => e.email).sort();
+      expect(emails).toEqual(["admin@example.com", "viewer@example.com"].sort());
       await app.close();
     });
 

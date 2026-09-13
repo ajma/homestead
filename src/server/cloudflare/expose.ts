@@ -145,7 +145,7 @@ export type ExposeDeps = {
    * or manage this policy; it is referenced by id, the same way the shared monitor policy
    * (below) is. */
   humanPolicyId: string;
-  /** `MonitorAccess.policyId` (`monitor-access.ts`, Task 2) — the one reusable
+  /** `AccessPolicies.monitorPolicyId` (`access-policies.ts`, Task 2) — the one reusable
    * `non_identity` policy shared by every exposed app. */
   monitorPolicyId: string;
   /**

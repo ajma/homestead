@@ -13,11 +13,11 @@ export type AccessSettings = { teamDomain: string; aud: string } | null;
 /**
  * The account's Cloudflare Access team domain, account-wide rather than per-app (unlike
  * `aud`, which is one value per Access application) — the same reasoning
- * `MonitorAccessStore` and `TunnelStore` already apply to their own account-wide facts.
+ * `AccessPoliciesStore` and `TunnelStore` already apply to their own account-wide facts.
  * `settings` is a flat key-value table that already exists; no migration needed to add a
  * key to it.
  *
- * Exported for `access-settings.test.ts` alone, the same reason `monitor-access.ts`
+ * Exported for `access-settings.test.ts` alone, the same reason `access-policies.ts`
  * exports `MONITOR_CLIENT_SECRET_KEY` — so a test can seed this value directly, since
  * nothing in the codebase writes it yet (see this module's doc comment below).
  */

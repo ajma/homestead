@@ -5,11 +5,11 @@ import { z } from "zod";
 import { AppBusyError } from "../apps/app-lock.js";
 import { audit } from "../audit.js";
 import { requireCapability } from "../auth/context.js";
+import { AccessPoliciesStore } from "../cloudflare/access-policies.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { deprovision } from "../cloudflare/deprovision.js";
 import { exposeSteps } from "../cloudflare/expose.js";
-import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
 import { parseDriftFindings } from "../cloudflare/reconcile.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
 import type { Db } from "../db/client.js";
@@ -81,7 +81,7 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
   const { db, secrets, stepJobs, tunnelConfigLock } = app.deps;
   const credentialStore = new CloudflareCredentialStore(db, secrets);
   const tunnelStore = new TunnelStore(db, secrets);
-  const monitorStore = new MonitorAccessStore(db, secrets);
+  const monitorStore = new AccessPoliciesStore(db, secrets);
 
   /**
    * Read-only status of this one app's exposure — 2F Task 3's only consumer, and the one
@@ -191,7 +191,7 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       tunnelId: tunnel.tunnelId,
       ingressService: body.ingressService,
       humanPolicyId: body.policyId,
-      monitorPolicyId: monitorAccess.policyId,
+      monitorPolicyId: monitorAccess.monitorPolicyId,
       // `undefined` for every non-self app — see `ExposeDeps.selfAccessTeamDomain`'s own
       // doc comment for why that must be an absent field, not merely an unused one.
       selfAccessTeamDomain: isSelf ? body.teamDomain : undefined,

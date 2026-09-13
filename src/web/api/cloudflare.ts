@@ -114,6 +114,20 @@ export function describeCloudflareError(error: unknown, fallback: string): strin
  * never carries zones, only `CloudflarePanel`'s separate `useCloudflareZones` fetch does,
  * and a stale or absent zones list left over from before this save would be a lie the
  * moment the panel calls this "configured" for a different account.
+ *
+ * **Phase 3A**: once the credentials PUT succeeds, this ALSO fires `POST
+ * /api/cloudflare/monitor` — the endpoint that now creates both the monitor policy and
+ * the human sign-in policy (`ensureAccessPolicies`) — so that "setting up Cloudflare"
+ * (this hook, shared by the setup wizard's `StepCloudflare` and Settings'
+ * `CloudflarePanel`) is the one action that makes both policies exist, with no separate
+ * button either surface has to offer. Deliberately best-effort: its failure is swallowed
+ * here, not re-thrown, so a token that verifies and saves cleanly but happens to lack the
+ * Access-policy permission (or hits a transient Cloudflare error at that exact moment)
+ * does not turn "save credentials" into a failure the wizard's onboarding flow — which
+ * must stay completable without a Cloudflare account at all — would otherwise block on.
+ * `CloudflarePanel`'s Monitor section is what surfaces an incomplete setup after the
+ * fact, once `cloudflareMonitorKey` refetches; there is no retry surface today beyond
+ * removing and re-adding credentials, which runs this same sequence again.
  */
 export function useSaveCloudflareCredentials() {
   const queryClient = useQueryClient();
@@ -127,6 +141,18 @@ export function useSaveCloudflareCredentials() {
     });
     queryClient.setQueryData(cloudflareStatusKey, status);
     queryClient.invalidateQueries({ queryKey: cloudflareZonesKey });
+
+    try {
+      const monitorStatus = await apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor", {
+        method: "POST",
+      });
+      queryClient.setQueryData(cloudflareMonitorKey, monitorStatus);
+    } catch {
+      // Best-effort — see the doc comment above. `cloudflareMonitorKey` is left as-is
+      // (not written), so a subsequent refetch of `useMonitorAccess` is what tells the
+      // truth about whether this actually completed.
+    }
+
     return status;
   };
 }
@@ -396,19 +422,6 @@ export function useMonitorAccess() {
   return useQuery({
     queryKey: cloudflareMonitorKey,
     queryFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor"),
-  });
-}
-
-/** `POST /api/cloudflare/monitor` — creates the one shared token and policy, or returns
- * the existing ones unchanged (`ensureMonitorAccess`'s own idempotency). `useMutation`,
- * not a plain function: nothing in its request body or response is a secret (the
- * response is `MonitorAccessStatus`, which never carries one), so there is nothing here
- * for `useMutation`'s cache to leak the way `useSaveCloudflareCredentials` avoids. */
-export function useEnsureMonitorAccess() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor", { method: "POST" }),
-    onSuccess: (status) => queryClient.setQueryData(cloudflareMonitorKey, status),
   });
 }
 

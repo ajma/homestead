@@ -7,7 +7,6 @@ import {
   useCloudflareTunnel,
   useCloudflareZones,
   useDeleteCloudflareCredentials,
-  useEnsureMonitorAccess,
   useMonitorAccess,
   useProvisionTunnel,
   useRotateMonitorSecret,
@@ -85,6 +84,15 @@ export function isMonitorExpiringSoon(expiresAt: number | null, nowMs: number): 
  * follows: the monitor token and the resolved Access settings can each outlive (or
  * predate, for Access resolved from the environment) whatever this panel's credentials
  * form currently shows.
+ *
+ * **Phase 3A removes the Monitor section's own "Set up monitor token" button.** Both the
+ * monitor policy and the human sign-in policy are now a consequence of saving valid
+ * Cloudflare credentials (`useSaveCloudflareCredentials` triggers `ensureAccessPolicies`
+ * itself, best-effort, right after the credentials PUT succeeds — see that hook's own doc
+ * comment) rather than a second click an admin has to know to make. Rotation is
+ * unaffected and stays manual: replacing a working secret every probe currently uses is a
+ * deliberate action, not something to fire automatically the way first-time creation now
+ * is.
  */
 export function CloudflarePanel() {
   const status = useCloudflareStatus();
@@ -97,7 +105,6 @@ export function CloudflarePanel() {
   const provisionTunnel = useProvisionTunnel();
 
   const monitorStatus = useMonitorAccess();
-  const ensureMonitor = useEnsureMonitorAccess();
   const rotateMonitor = useRotateMonitorSecret();
 
   const accessStatus = useAccessConfig();
@@ -112,10 +119,6 @@ export function CloudflarePanel() {
   const [saving, setSaving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
 
-  // Same reasoning as `saving` above, applied to "create the monitor token": set
-  // synchronously in the click handler, not read off `ensureMonitor.isPending`.
-  const [settingUpMonitor, setSettingUpMonitor] = useState(false);
-  const [monitorSetupError, setMonitorSetupError] = useState<string | null>(null);
   const [confirmingRotate, setConfirmingRotate] = useState(false);
 
   // The job whose output this panel is showing (or last showed) for the provision
@@ -203,27 +206,6 @@ export function CloudflarePanel() {
       (provisionErr: unknown) => {
         setStarting(false);
         setProvisionError(describeTunnelError(provisionErr, "Could not start provisioning."));
-      },
-    );
-  }
-
-  /**
-   * `POST /api/cloudflare/monitor` — creates the one shared token and policy. Not gated
-   * behind `ConfirmDialog`: unlike Rotate (which replaces a working secret every probe
-   * currently uses), this either creates something that did not exist or is a no-op
-   * against what's already there (`ensureMonitorAccess`'s own idempotency) — there is
-   * nothing to confirm away from.
-   */
-  function handleSetUpMonitor() {
-    setMonitorSetupError(null);
-    setSettingUpMonitor(true);
-    ensureMonitor.mutateAsync().then(
-      () => setSettingUpMonitor(false),
-      (setupError: unknown) => {
-        setSettingUpMonitor(false);
-        setMonitorSetupError(
-          describeMonitorError(setupError, "Could not set up the monitor token."),
-        );
       },
     );
   }
@@ -519,26 +501,22 @@ export function CloudflarePanel() {
               </button>
             </div>
           ) : configured ? (
-            <>
-              <button
-                type="button"
-                onClick={handleSetUpMonitor}
-                disabled={settingUpMonitor}
-                className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
-              >
-                {settingUpMonitor ? "Setting up…" : "Set up monitor token"}
-              </button>
-              {monitorSetupError && (
-                <p role="alert" className="text-sm text-red-600">
-                  {monitorSetupError}
-                </p>
-              )}
-            </>
+            // No button here (Phase 3A): saving credentials above already triggered
+            // `ensureAccessPolicies` — see `useSaveCloudflareCredentials`'s own doc
+            // comment. This state is normally momentary (a refetch away from showing the
+            // configured branch above); it only persists if that best-effort call failed,
+            // in which case there is no retry action left on this panel — removing and
+            // re-adding the credentials above is what triggers the next attempt.
+            <p className="text-sm text-slate-500">
+              Setting up automatically. If this does not complete shortly, remove and re-add your
+              Cloudflare credentials above to retry.
+            </p>
           ) : (
             // Same "hidden, not disabled" call as the Tunnel section's own Provision
             // button: setting this up without credentials cannot succeed.
             <p className="text-sm text-slate-500">
-              Add Cloudflare credentials above before setting up the monitor token.
+              Add Cloudflare credentials above — the monitor token and Access policies are created
+              automatically once they are saved.
             </p>
           ))}
 

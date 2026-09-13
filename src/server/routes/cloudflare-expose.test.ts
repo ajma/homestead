@@ -1,6 +1,6 @@
 import { resolveAccessSettings } from "@server/auth/access-settings";
 import { LOCAL_HOST_ID } from "@server/bootstrap";
-import { MonitorAccessStore } from "@server/cloudflare/monitor-access";
+import { AccessPoliciesStore } from "@server/cloudflare/access-policies";
 import { TunnelStore } from "@server/cloudflare/tunnel-store";
 import type { Db } from "@server/db/client";
 import { apps, exposures, jobs, probes } from "@server/db/schema";
@@ -148,12 +148,13 @@ async function withFullSetup(opts: { systemKind?: "self" } = {}) {
     "tunnel-token",
   );
 
-  const monitorStore = new MonitorAccessStore(app.deps.db, app.deps.secrets);
+  const monitorStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
   await monitorStore.set(
     {
       tokenId: "monitor-token",
       clientId: "monitor-client",
-      policyId: "monitor-policy",
+      monitorPolicyId: "monitor-policy",
+      humanPolicyId: "human-shared-policy",
       expiresAt: null,
     },
     "monitor-secret",
@@ -319,9 +320,9 @@ describe("POST /api/apps/:id/expose", () => {
       headers: { cookie },
       payload: { token: TOKEN, accountId: ACCOUNT_ID },
     });
-    const monitorStore = new MonitorAccessStore(app.deps.db, app.deps.secrets);
+    const monitorStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
     await monitorStore.set(
-      { tokenId: "t", clientId: "c", policyId: "p", expiresAt: null },
+      { tokenId: "t", clientId: "c", monitorPolicyId: "p", humanPolicyId: "h", expiresAt: null },
       "secret",
     );
     const appId = ulid();
