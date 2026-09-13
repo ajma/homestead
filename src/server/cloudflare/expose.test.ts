@@ -686,11 +686,22 @@ describe("exposeSteps — a step's own inline compensation", () => {
   });
 });
 
-describe("exposeSteps — create-probe (structurally unreachable through a full rollback)", () => {
-  // `create-probe` is the last step: a successful `run` means the whole sequence
-  // succeeded (no rollback), and a failing `run` means `undo` is skipped for the failing
-  // step itself (step-sequence.ts, rule 1). Same situation `provision-tunnel.ts`'s
-  // `compose-up` is in, tested the same way: directly, against the step object.
+describe("exposeSteps — create-probe (tested directly, not through a full rollback)", () => {
+  // `create-probe` is the last step for every app EXCEPT the one marked `systemKind:
+  // "self"` — a successful `run` means the whole sequence succeeded (no rollback), and a
+  // failing `run` means `undo` is skipped for the failing step itself (step-sequence.ts,
+  // rule 1). Same situation `provision-tunnel.ts`'s `compose-up` is in, tested the same
+  // way: directly, against the step object.
+  //
+  // F7 (whole-branch review, Minor): this describe block used to claim create-probe's own
+  // `undo` was "structurally unreachable through a full rollback" for every app. Not quite
+  // — `exposeSteps` appends a fifth step, `record-self-access-settings`, whenever
+  // `deps.selfAccessTeamDomain` is set (only true for the app marked `systemKind: "self"`),
+  // so for THAT app create-probe's `undo` IS reachable through an ordinary rollback: if
+  // the fifth step's `run` throws, the sequence runner unwinds every step that already
+  // succeeded, create-probe included. The undo itself is correct either way (mutation-
+  // tested below), so this was a wrong comment, not a wrong behaviour — but a wrong one
+  // that invites deleting the undo as dead code.
   it("creates both probes, and its own undo removes both", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");

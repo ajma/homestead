@@ -129,6 +129,19 @@ a Cloudflare Access application it did not itself provision — Phase 2 writes t
 database when Homestead provisions its own exposure. With neither source supplying both
 values, the Access sign-in path stays dormant and password login is unaffected.
 
+**One shared Access policy protects every app exposed through Cloudflare — deliberately, not
+as an oversight.** Phase 3A creates a single reusable `Homestead Access` policy admitting every
+enabled Homestead user's email, and every app's Access application points at that same policy.
+Exposing one app therefore grants sign-in access to every enabled user, including a viewer
+whose Homestead permissions are scoped to a single, different app — Homestead's own per-app
+scope (`scopeAllApps`/`userAppScope`) has no effect on who Cloudflare's Access lets through,
+because Access has no notion of "which Homestead app" a request is for beyond the hostname.
+The setup wizard's exposure step states this at the point an admin makes the decision; this is
+the same property written down here for whoever is planning the deployment before any app is
+ever exposed. Closing this gap, if it is ever worth closing for a given household, means one
+reusable Access policy per exposed app (scoped to that app's own viewers) in place of the
+single shared one — not built in this phase.
+
 ## 6. Volumes
 
 | Mount | Purpose |
