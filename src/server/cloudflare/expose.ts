@@ -46,6 +46,43 @@ export class TunnelConfigLock {
 }
 
 /**
+ * Thrown by `create-probe` (below) when the app's pre-existing `http_external` probe
+ * targets something other than the hostname this run is exposing. Fix wave 2's Defect
+ * 2: the first version of probe adoption matched purely on `(appId, "http_external")`
+ * and adopted whatever it found unconditionally, so an app that already carried its own
+ * external check — pointed at some other URL, entirely unrelated to this exposure — ended
+ * up with NO probe watching the newly exposed hostname at all, while the UI kept showing
+ * a green external probe the whole time (it was still successfully checking its own,
+ * unrelated target). Silent, and worse than having no probe: nothing here ever told
+ * anyone.
+ *
+ * Chosen fix: REFUSE rather than retarget. Retargeting was the other option on the
+ * table — it is friendlier (the app comes up fully monitored with no extra step) — but it
+ * means this sequence overwrites a `target` value an admin set on a row they created
+ * through `routes/probes.ts`, with no exposure-specific column to remember what it was so
+ * a later deprovision could put it back (adding one is a bigger, more error-prone change
+ * than this wave's scope, and a half-restored target is its own silent-wrong-URL defect
+ * one layer down). Refusing costs the admin one extra step — delete or repoint the
+ * existing probe, then retry — but it never touches a row this sequence did not create,
+ * which is the same principle every OTHER adopted-resource case in this file already
+ * follows: adoption never means "assume it's fine to change".
+ */
+export class ProbeTargetConflictError extends Error {
+  constructor(
+    readonly existingTarget: string,
+    readonly expectedTarget: string,
+  ) {
+    super(
+      `this app already has an http_external probe targeting ${existingTarget}, not ` +
+        `${expectedTarget} — adopting it unchanged would leave the newly exposed hostname ` +
+        `unmonitored while its status tile keeps showing a green external probe watching ` +
+        `something else. Delete or repoint the existing probe, then retry exposing this app.`,
+    );
+    this.name = "ProbeTargetConflictError";
+  }
+}
+
+/**
  * Carries what each step hands to the ones after it — same shape and same reasoning as
  * `ProvisionCtx` (`provision-tunnel.ts`): every field optional because it is unset until
  * the step that produces it has run, and every `undo` below checks for `undefined` before
@@ -356,6 +393,15 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
         // gap between this check and the insert (Postgres-style TOCTOU is not this
         // project's storage engine, but `retryOnBusy` already exists for exactly this
         // kind of write contention — see its own doc comment).
+        //
+        // Fix wave 2's Defect 2: adoption alone is not enough — an adopted probe that
+        // targets something other than THIS hostname must not be adopted silently (see
+        // `ProbeTargetConflictError`'s own doc comment for why refusing, not retargeting,
+        // is the chosen fix). Checked and thrown from inside the same transaction as the
+        // read that found it, before anything is written, so a refusal here leaves
+        // nothing for this step's own `undo` to clean up — `runSteps` rolls back the
+        // three earlier steps exactly as it would for any other failing step.
+        const expectedTarget = `https://${deps.hostname}`;
         let probeId: string | undefined;
         let createdByUs: boolean | undefined;
         // Both writes below are local, with no network call between them — unlike the two
@@ -368,6 +414,9 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
               .select()
               .from(probes)
               .where(and(eq(probes.appId, deps.appId), eq(probes.kind, "http_external")));
+            if (existing && existing.target !== expectedTarget) {
+              throw new ProbeTargetConflictError(existing.target ?? "(no target)", expectedTarget);
+            }
             const thisProbeId = existing?.id ?? ulid();
             const thisCreatedByUs = existing === undefined;
             if (thisCreatedByUs) {
@@ -375,7 +424,7 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
                 id: thisProbeId,
                 appId: deps.appId,
                 kind: "http_external",
-                target: `https://${deps.hostname}`,
+                target: expectedTarget,
               });
             }
             await tx

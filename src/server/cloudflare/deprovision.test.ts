@@ -555,3 +555,91 @@ describe("deprovision — the ingress-rule step shares the tunnel's mutex with a
     expect(hostnames).toContain("other-app.example.com");
   });
 });
+
+describe("deprovision — a refusal is not a permanent dead end (defect 1)", () => {
+  it("refuses once, then fully succeeds once the admin removes both legs in Cloudflare by hand and clears the row", async () => {
+    // The measured defect: the previous fix set `dnsStillLive`/`ingressStillLive` to
+    // `true` for any leg this call did not itself delete and never looked at Cloudflare
+    // again. An admin who did exactly what the refusal told them — delete the DNS record
+    // and the ingress rule in Cloudflare by hand — retried and got the IDENTICAL
+    // refusal forever, because nothing here ever re-read live state for an adopted leg.
+    // The fix re-reads it, so hand cleanup now actually unblocks the retry.
+    const preExisting: IngressRule = { hostname: HOSTNAME, service: "http://someone-elses:80" };
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client, dnsRecords, accessApps, deletedAccessAppCalls } = fakeClient([
+      preExisting,
+      { service: "http_status:404" },
+    ]);
+    dnsRecords.set(HOSTNAME, { id: "dns-preexisting" });
+    accessApps.set(HOSTNAME, { id: "access-1", aud: "aud-access-1" });
+    const exposure = await seedExposure(db, appId, {
+      dnsRecordId: "dns-preexisting",
+      dnsRecordCreatedByUs: false,
+      ingressRuleCreatedByUs: false,
+    });
+
+    const first = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(first.ok).toBe(false);
+    if (!first.ok) {
+      expect(first.failures.map((f) => f.resource)).toEqual(["access-app"]);
+      // Both legs genuinely predate this exposure and are genuinely still present — the
+      // message says so, not "could not be removed" (that sentence is reserved for a
+      // delete THIS call attempted and failed, which never happened here).
+      const message = String((first.failures[0] as { error: unknown }).error);
+      expect(message).toContain("predates this exposure");
+      expect(message).not.toContain("could not be removed");
+    }
+
+    // The admin does exactly what the refusal told them to, in Cloudflare, by hand.
+    // Neither `*CreatedByUs` flag on the row changes — they were never Homestead's to
+    // flip — so the only way a retry can notice is by re-reading Cloudflare, which is
+    // exactly the fix.
+    dnsRecords.delete(HOSTNAME);
+    await client.putTunnelConfig(TUNNEL_ID, { ingress: [{ service: "http_status:404" }] });
+
+    const [updated] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
+    if (!updated) throw new Error("row missing after the first, refused call");
+
+    const second = await deprovision(baseDeps(db, client, new TunnelConfigLock()), updated);
+
+    expect(second.ok).toBe(true);
+    expect(deletedAccessAppCalls).toHaveLength(1);
+    expect(accessApps.has(HOSTNAME)).toBe(false);
+    const [row] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
+    expect(row).toBeUndefined();
+  });
+
+  it("blames Cloudflare's unreachability, not 'predates this exposure', when THIS call's own delete attempts fail", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client, accessApps } = fakeClient();
+    accessApps.set(HOSTNAME, { id: "access-1", aud: "aud-access-1" });
+    client.deleteDnsRecord = async () => {
+      throw new Error("network down");
+    };
+    client.putTunnelConfig = async () => {
+      throw new Error("network down");
+    };
+    // Both legs are Homestead's own (default `seedExposure` flags) — this run tries to
+    // remove both and fails both, which is a different situation from either leg having
+    // predated the exposure, and the refusal message must say so.
+    const exposure = await seedExposure(db, appId);
+
+    const outcome = await deprovision(baseDeps(db, client, new TunnelConfigLock()), exposure);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.failures.map((f) => f.resource).sort()).toEqual([
+        "access-app",
+        "dns-record",
+        "ingress-rule",
+      ]);
+      const accessFailure = outcome.failures.find((f) => f.resource === "access-app");
+      const message = String(accessFailure?.error);
+      expect(message).toContain("could not be removed by this call");
+      expect(message).not.toContain("predates this exposure");
+    }
+  });
+});

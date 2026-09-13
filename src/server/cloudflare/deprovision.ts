@@ -29,6 +29,48 @@ export type DeprovisionOutcome =
   | { ok: false; failures: Array<{ resource: DeprovisionResource; error: unknown }> };
 
 /**
+ * Whether a proxied CNAME to this exposure's tunnel is still present at its hostname,
+ * re-read from Cloudflare rather than assumed — see this module's doc comment on why an
+ * adopted leg can no longer be treated as "still live forever". `zoneId`/`tunnelId`
+ * missing (a row old enough to predate one of those columns) or the read itself failing
+ * both fail SAFE: `true`, the same as if nothing had changed, so a leg this function
+ * cannot verify never unlocks the Access application by accident.
+ */
+async function isDnsRecordLive(client: CloudflareClient, exposure: ExposureRow): Promise<boolean> {
+  if (!exposure.zoneId || !exposure.tunnelId) return true;
+  try {
+    const record = await client.findDnsRecord(
+      exposure.zoneId,
+      exposure.hostname,
+      `${exposure.tunnelId}.cfargotunnel.com`,
+    );
+    return record !== null;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether the tunnel still carries an ingress rule for this exposure's hostname,
+ * re-read from Cloudflare — same reasoning and same fail-safe-`true` defaults as
+ * `isDnsRecordLive` above. A plain read, not wrapped in `tunnelConfigLock`: nothing here
+ * writes, so there is no read-modify-write race to serialise against, only a snapshot to
+ * observe.
+ */
+async function isIngressRuleLive(
+  client: CloudflareClient,
+  exposure: ExposureRow,
+): Promise<boolean> {
+  if (!exposure.tunnelId) return true;
+  try {
+    const config = await client.getTunnelConfig(exposure.tunnelId);
+    return config.ingress.some((rule) => rule.hostname === exposure.hostname);
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Reverses a *successful* exposure — the four resources `exposeSteps` (expose.ts) can
  * create, reading `exposure` — the recorded `exposures` row — as the only source of truth
  * about what Homestead created. This is NOT a rollback: `expose.ts`'s own `undo` handlers
@@ -93,19 +135,28 @@ export type DeprovisionOutcome =
  * that.
  *
  * The fix: track whether the DNS record and the ingress rule are STILL LIVE after this
- * run's own attempts (adopted and therefore never touched counts as "still live"; a
- * delete this run attempted but failed also counts as "still live"; only an attempt that
- * actually succeeded makes a leg NOT live). The hostname is reachable through Cloudflare
- * only when BOTH legs are live — DNS resolving to the tunnel AND the tunnel routing that
- * hostname to this app. The Access application is deleted only when the route is NOT
- * live, i.e. when at least one leg is actually coming down as a result of this call. When
- * both legs remain live, deleting a created-by-us Access application is refused outright
- * — reported as a normal `access-app` failure (invariant 3 above applies: the row
- * survives, nothing else already removed is re-attempted on retry) — rather than silently
- * producing `ok: true` over a public, unauthenticated app. If the admin genuinely wants
- * the app fully off the internet, the DNS record or ingress rule blocking that has to be
- * dealt with by hand first (they were never Homestead's to remove); this function will
- * not trade "off the internet" for "on the internet with no login."
+ * run's own attempts. A delete this run attempted but failed counts as "still live". A
+ * leg this run never attempted (adopted, or the columns needed to attempt it are missing)
+ * is NOT assumed live — it is RE-READ from Cloudflare (`isDnsRecordLive`/
+ * `isIngressRuleLive` below), because the previous version of this fix assumed adoption
+ * meant "still live" forever, with no path back: an admin who deleted both legs by hand in
+ * Cloudflare, exactly as instructed, retried this call and got the identical refusal
+ * every time, because nothing here ever looked at Cloudflare again to notice they were
+ * gone. Only an attempt that actually succeeded, or a re-read that finds nothing there,
+ * makes a leg NOT live. The hostname is reachable through Cloudflare only when BOTH legs
+ * are live — DNS resolving to the tunnel AND the tunnel routing that hostname to this
+ * app. The Access application is deleted only when the route is NOT live, i.e. when at
+ * least one leg is actually gone, either because this call removed it or because it was
+ * already gone when re-read. When both legs remain live, deleting a created-by-us Access
+ * application is refused outright — reported as a normal `access-app` failure (invariant
+ * 3 above applies: the row survives, nothing else already removed is re-attempted on
+ * retry) — rather than silently producing `ok: true` over a public, unauthenticated app.
+ * The refusal message says which case actually happened (a leg genuinely still present in
+ * Cloudflare vs. this call failing to remove one it owns) rather than always blaming
+ * "predates this exposure", which is only true of the first case. If the admin genuinely
+ * wants the app fully off the internet, removing the DNS record or ingress rule blocking
+ * that by hand in Cloudflare and retrying THIS call now actually clears the refusal —
+ * the re-read means hand cleanup is no longer a dead end.
  *
  * A resource already gone on the Cloudflare side is not an error: `deleteDnsRecord` and
  * `deleteAccessApp` are both documented idempotent (client.ts), and `removeIngress` is a
@@ -140,10 +191,13 @@ export async function deprovision(
     }
   }
 
-  // 2. The DNS record. `dnsStillLive` starts `true` (the record is presumed to still be
-  // there — because it was never ours to touch, or because our attempt to remove it
-  // below fails) and only becomes `false` once a delete actually succeeds.
-  let dnsStillLive = true;
+  // 2. The DNS record. `dnsStillLive`/`dnsRemovalFailed` start out describing "this run
+  // never tried" — resolved below either by an attempted delete (this run owns the
+  // record) or by re-reading Cloudflare directly (adopted, or the columns needed to
+  // attempt a delete are missing) — never by assuming "adopted" means "still there
+  // forever". See this module's doc comment.
+  let dnsStillLive: boolean;
+  let dnsRemovalFailed = false;
   if (exposure.dnsRecordCreatedByUs && exposure.dnsRecordId && exposure.zoneId) {
     try {
       await deps.client.deleteDnsRecord(exposure.zoneId, exposure.dnsRecordId);
@@ -155,14 +209,20 @@ export async function deprovision(
           .where(eq(exposures.id, exposure.id)),
       );
     } catch (error) {
+      dnsStillLive = true;
+      dnsRemovalFailed = true;
       failures.push({ resource: "dns-record", error });
     }
+  } else {
+    dnsStillLive = await isDnsRecordLive(deps.client, exposure);
   }
 
   // 3. The ingress rule — see this function's own doc comment on why an adopted rule is
-  // never restored here, only ever left untouched. Same `stillLive` bookkeeping as the
-  // DNS record above.
-  let ingressStillLive = true;
+  // never restored here, only ever left untouched (when this run owns it and removes it,
+  // that is a delete, not a restore). Same live/failed bookkeeping as the DNS record
+  // above, including the re-read for a leg this run never attempted.
+  let ingressStillLive: boolean;
+  let ingressRemovalFailed = false;
   if (exposure.ingressRuleCreatedByUs && exposure.tunnelId) {
     try {
       await deps.tunnelConfigLock.run(async () => {
@@ -185,8 +245,12 @@ export async function deprovision(
           .where(eq(exposures.id, exposure.id)),
       );
     } catch (error) {
+      ingressStillLive = true;
+      ingressRemovalFailed = true;
       failures.push({ resource: "ingress-rule", error });
     }
+  } else {
+    ingressStillLive = await isIngressRuleLive(deps.client, exposure);
   }
 
   // 4. The Access application — LAST, and gated on the route it protects, not merely on
@@ -196,13 +260,38 @@ export async function deprovision(
   const routeStillLive = dnsStillLive && ingressStillLive;
   if (exposure.accessAppCreatedByUs && exposure.accessAppId) {
     if (routeStillLive) {
+      // The message names which case actually occurred per leg — "predates this
+      // exposure" is only true when this run never attempted the leg AND Cloudflare
+      // still shows it present. A leg this run tried and failed to remove (Cloudflare
+      // unreachable, say) is a different situation and gets a different sentence — see
+      // this module's doc comment on why conflating the two used to send an admin who
+      // had already deleted both legs by hand back to Cloudflare to delete something
+      // that was not there.
+      const reasons: string[] = [];
+      if (dnsStillLive) {
+        reasons.push(
+          dnsRemovalFailed
+            ? "its DNS record could not be removed by this call"
+            : "its DNS record predates this exposure and is still present in Cloudflare",
+        );
+      }
+      if (ingressStillLive) {
+        reasons.push(
+          ingressRemovalFailed
+            ? "its ingress rule could not be removed by this call"
+            : "its ingress rule predates this exposure and is still present in Cloudflare",
+        );
+      }
+      const nextStep =
+        dnsRemovalFailed || ingressRemovalFailed
+          ? "retry once Cloudflare is reachable"
+          : "remove it in Cloudflare by hand, then retry this call";
       failures.push({
         resource: "access-app",
         error: new Error(
-          "refusing to remove the Access application: the hostname is still fully routed " +
-            "(its DNS record and/or ingress rule predate this exposure and could not be " +
-            "removed here) — deleting the Access application would leave the app on the " +
-            "internet with no authentication in front of it",
+          `refusing to remove the Access application: the hostname is still fully routed ` +
+            `(${reasons.join(" and ")}) — ${nextStep} — deleting the Access application now ` +
+            `would leave the app on the internet with no authentication in front of it`,
         ),
       });
     } else {

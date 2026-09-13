@@ -5,6 +5,7 @@ import {
   type ExposeCtx,
   type ExposeDeps,
   exposeSteps,
+  ProbeTargetConflictError,
   TunnelConfigLock,
 } from "@server/cloudflare/expose";
 import type { Db } from "@server/db/client";
@@ -287,7 +288,9 @@ describe("exposeSteps — happy path", () => {
     // Measured defect, the other half of F1: `create-probe` used to insert unconditionally,
     // so an app that already carried its own external check (created through
     // `routes/probes.ts`, independent of exposure) ended up with TWO `http_external`
-    // probes after a successful expose.
+    // probes after a successful expose. Its target already matches what this exposure
+    // would use — the case that is safe to adopt outright — so it is a genuine no-op
+    // adoption, not the Defect 2 conflict covered below.
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const usersOwnProbeId = ulid();
@@ -295,7 +298,7 @@ describe("exposeSteps — happy path", () => {
       id: usersOwnProbeId,
       appId,
       kind: "http_external",
-      target: "https://my-own-monitoring-target.example.com",
+      target: "https://jellyfin.example.com",
     });
     const { client } = fakeClient();
     const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
@@ -308,6 +311,47 @@ describe("exposeSteps — happy path", () => {
     expect(probeRows[0]?.id).toBe(usersOwnProbeId);
     const row = await exposureFor(db, appId);
     expect(row).toMatchObject({ probeId: usersOwnProbeId, probeCreatedByUs: false });
+  });
+
+  it("refuses to adopt an existing http_external probe that targets a different URL (Defect 2)", async () => {
+    // Measured by the re-review: the wave-1 fix adopted by `(appId, "http_external")`
+    // alone, with no check on WHAT the existing probe targets. An app that already had
+    // its own external check pointed elsewhere ended up with no probe watching the
+    // newly exposed hostname at all — silent, and worse than no probe, since the UI kept
+    // showing a green external check the whole time (it was still correctly checking its
+    // own, unrelated target). This proves the chosen fix: refuse outright, and unwind
+    // everything else this run already did (2C's rollback discipline, one more time).
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const usersOwnProbeId = ulid();
+    await db.insert(probes).values({
+      id: usersOwnProbeId,
+      appId,
+      kind: "http_external",
+      target: "https://my-own-monitoring-target.example.com",
+      label: "my own check",
+    });
+    const { client, ingress, dnsRecords, accessApps } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error).toBeInstanceOf(ProbeTargetConflictError);
+      expect(String(outcome.error)).toContain("my-own-monitoring-target.example.com");
+    }
+    // Nothing this run created survives, and the user's own probe is untouched.
+    expect(ingress()).toEqual([{ service: "http_status:404" }]);
+    expect(dnsRecords.has("jellyfin.example.com")).toBe(false);
+    expect(accessApps.has("jellyfin.example.com")).toBe(false);
+    expect(await exposureFor(db, appId)).toBeUndefined();
+    const probeRows = await db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRows).toHaveLength(1);
+    expect(probeRows[0]).toMatchObject({
+      id: usersOwnProbeId,
+      target: "https://my-own-monitoring-target.example.com",
+    });
   });
 
   it("records ingressRuleCreatedByUs: false when a rule for the hostname already existed", async () => {
