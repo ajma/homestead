@@ -1,3 +1,4 @@
+import type { IngressRule } from "@shared/cloudflare.js";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import type { Step } from "../apps/step-sequence.js";
@@ -55,6 +56,19 @@ export type ExposeCtx = {
    * step's own `undo`) can find it. */
   exposureId?: string;
   ingressRuleCreatedByUs?: boolean;
+  /** The ingress entry that already existed for this hostname, if any, captured the
+   * instant BEFORE `splice-ingress` overwrote it — the 2C lesson (adoption and deletion
+   * must not share one match) applied one level down, per the carry-forward: tunnel
+   * ADOPTION (`provision-tunnel.ts`'s `create-tunnel`) means the tunnel Homestead
+   * manages may be one a human made by hand, carrying ingress rules they wrote
+   * themselves. `undefined` when nothing existed (this run created the entry, and
+   * `ingressRuleCreatedByUs` is then `true`). Used only by THIS run's own `undo`, below,
+   * to restore the adopted rule verbatim — it is never persisted to `exposures` (no
+   * migration this phase adds a column for it), so a deprovision running later, against
+   * a fresh process with only the database row to go on, cannot recover it this way. See
+   * `deprovision.ts`'s own doc comment for how it handles that gap.
+   */
+  originalIngressRule?: IngressRule;
   dnsRecordId?: string;
   dnsRecordCreatedByUs?: boolean;
   accessAppId?: string;
@@ -105,57 +119,81 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
       name: "splice-ingress",
       async run(ctx) {
         const id = ulid();
-        // The LOCAL write goes first, deliberately — not the Cloudflare write. If the
-        // Cloudflare write below throws, undoing a local insert is a plain, reliable
-        // delete; the reverse order would need a Cloudflare round trip in the failure
-        // path of a step that is ABOUT to report itself failed, and `runSteps` never
-        // calls a failing step's own `undo` (step-sequence.ts, rule 1) — nothing else
-        // would ever clean up a Cloudflare write left dangling here.
-        await retryOnBusy(() =>
-          deps.db.insert(exposures).values({
-            id,
-            appId: deps.appId,
+        let createdByUs = true;
+        let originalRule: IngressRule | undefined;
+        // Cloudflare write FIRST here, unlike a plain create-and-record step (and unlike
+        // this step's own previous shape) — this step must learn whether a rule for this
+        // hostname already exists, and that answer is only trustworthy read from the
+        // SAME snapshot `spliceIngress` computes against, taken under the lock. An
+        // earlier, unlocked peek to decide the flag would let a concurrent write land in
+        // the gap, making the flag lie about what was actually there the instant this
+        // run overwrote it. This brings `splice-ingress` in line with
+        // `create-dns-record`/`create-access-app` below, which already write to
+        // Cloudflare first and compensate a failing local write afterward — this step
+        // could not both order the read correctly AND still write locally first.
+        //
+        // Lock, read, determine, modify, write, unlock — never read-then-lock. A re-read
+        // outside the lock is the same read-modify-write race with extra steps: two
+        // concurrent exposes could still both read before either writes.
+        await deps.tunnelConfigLock.run(async () => {
+          const config = await deps.client.getTunnelConfig(deps.tunnelId);
+          // The 2C lesson, applied one level down: a rule for this hostname may already
+          // be here because a human wrote it by hand on an ADOPTED tunnel
+          // (`provision-tunnel.ts`'s `create-tunnel`), not because an earlier Homestead
+          // attempt got partway through. Recording which is true — never assuming
+          // "already exists" always means "our own leftover" — is what lets `undo`
+          // below (and `deprovision.ts`) leave a human's rule alone instead of deleting
+          // or overwriting it.
+          originalRule = config.ingress.find((rule) => rule.hostname === deps.hostname);
+          createdByUs = originalRule === undefined;
+          const updated = spliceIngress(config.ingress, {
             hostname: deps.hostname,
-            zoneId: deps.zoneId,
-            tunnelId: deps.tunnelId,
-            ingressService: deps.ingressService,
-            // Always true, unlike the DNS record and Access application below: the
-            // ingress array lives entirely inside the tunnel config that ONLY Homestead
-            // ever writes (`config_src: "cloudflare"`, provision-tunnel.ts). A
-            // pre-existing entry for this hostname here would mean an earlier partial
-            // expose attempt, not a resource a human made by hand outside Homestead —
-            // unlike a DNS record or an Access application, which live in the shared
-            // zone/account namespace a human plausibly configured directly. So there is
-            // no adoption case to gate this flag on.
-            ingressRuleCreatedByUs: true,
-            state: "provisioning",
-          }),
-        );
-        try {
-          // Lock, read, modify, write, unlock — never read-then-lock. A re-read outside
-          // the lock is the same read-modify-write race with extra steps: two concurrent
-          // exposes could still both read before either writes.
-          await deps.tunnelConfigLock.run(async () => {
-            const config = await deps.client.getTunnelConfig(deps.tunnelId);
-            const updated = spliceIngress(config.ingress, {
-              hostname: deps.hostname,
-              service: deps.ingressService,
-            });
-            await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
+            service: deps.ingressService,
           });
+          await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
+        });
+        try {
+          await retryOnBusy(() =>
+            deps.db.insert(exposures).values({
+              id,
+              appId: deps.appId,
+              hostname: deps.hostname,
+              zoneId: deps.zoneId,
+              tunnelId: deps.tunnelId,
+              ingressService: deps.ingressService,
+              ingressRuleCreatedByUs: createdByUs,
+              state: "provisioning",
+            }),
+          );
         } catch (error) {
-          await deps.db
-            .delete(exposures)
-            .where(eq(exposures.id, id))
+          // The local write is what's left after a successful Cloudflare write — the
+          // same window `create-dns-record` and `create-access-app` each compensate for
+          // inline (their own doc comments): this step is about to report FAILED, and a
+          // failing step's own `undo` never runs (step-sequence.ts, rule 1), so nothing
+          // else would ever put the ingress array back if this doesn't do it before
+          // rethrowing. Mirrors `undo` below exactly: delete what we added if nothing was
+          // there before, restore verbatim if something was.
+          await deps.tunnelConfigLock
+            .run(async () => {
+              const config = await deps.client.getTunnelConfig(deps.tunnelId);
+              const restored = createdByUs
+                ? removeIngress(config.ingress, deps.hostname)
+                : spliceIngress(config.ingress, {
+                    hostname: deps.hostname,
+                    service: (originalRule as IngressRule).service,
+                  });
+              await deps.client.putTunnelConfig(deps.tunnelId, { ingress: restored });
+            })
             .catch(() => {
               // Best effort — the same trade-off `write-files`'s undo makes: the
-              // ORIGINAL error is what the caller needs to see, not a secondary
-              // cleanup failure masking it.
+              // ORIGINAL error is what the caller needs to see, not a secondary cleanup
+              // failure masking it.
             });
           throw error;
         }
         ctx.exposureId = id;
-        ctx.ingressRuleCreatedByUs = true;
+        ctx.ingressRuleCreatedByUs = createdByUs;
+        ctx.originalIngressRule = originalRule;
       },
       async undo(ctx) {
         if (ctx.exposureId === undefined) return;
@@ -166,7 +204,22 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
         // evidence while the rule — a REAL, live resource — was still out there.
         await deps.tunnelConfigLock.run(async () => {
           const config = await deps.client.getTunnelConfig(deps.tunnelId);
-          const updated = removeIngress(config.ingress, deps.hostname);
+          // Gated on THIS run's own flag, never on the mere fact that a rule sits at
+          // this hostname right now — the 2C lesson. `true`: nothing was here before, so
+          // this run's own entry is deleted outright. `false`: a human's rule was here;
+          // it is restored VERBATIM (same hostname, its original `service`) rather than
+          // merely left un-deleted, because `spliceIngress` already overwrote it in
+          // place — "leave it alone" here has to mean "put back what was there", not
+          // "don't call delete", since there is no delete-free path that already
+          // achieves that. `ctx.originalIngressRule` is guaranteed set whenever
+          // `ingressRuleCreatedByUs` is `false` — `run` above always sets both from the
+          // same branch together.
+          const updated = ctx.ingressRuleCreatedByUs
+            ? removeIngress(config.ingress, deps.hostname)
+            : spliceIngress(config.ingress, {
+                hostname: deps.hostname,
+                service: (ctx.originalIngressRule as IngressRule).service,
+              });
           await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
         });
         await deps.db.delete(exposures).where(eq(exposures.id, ctx.exposureId));

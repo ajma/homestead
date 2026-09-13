@@ -40,7 +40,7 @@ function unusedMethod(name: string) {
  * around both the read and the write is unaffected either way: the second caller's whole
  * locked section, read included, does not even START until the first's has finished.
  */
-function fakeClient(): {
+function fakeClient(initialIngress: IngressRule[] = [{ service: "http_status:404" }]): {
   client: CloudflareClient;
   ingress: () => IngressRule[];
   dnsRecords: Map<string, { id: string }>;
@@ -48,7 +48,7 @@ function fakeClient(): {
   accessApps: Map<string, { id: string; aud: string }>;
   deletedAccessApps: string[];
 } {
-  let ingress: IngressRule[] = [{ service: "http_status:404" }];
+  let ingress: IngressRule[] = initialIngress;
   const dnsRecords = new Map<string, { id: string }>();
   const deletedDnsRecords: string[] = [];
   const accessApps = new Map<string, { id: string; aud: string }>();
@@ -204,6 +204,29 @@ function dbFailingNthUpdate(db: Db, n: number): Db {
   }) as Db;
 }
 
+/**
+ * Same idea as `dbFailingNthUpdate`, but for `.insert(...)` — `splice-ingress` now
+ * writes to Cloudflare BEFORE it writes locally (see `expose.ts`'s doc comment on why),
+ * so its own inline compensation window is a failing INSERT, not a failing UPDATE like
+ * `create-dns-record`/`create-access-app`.
+ */
+function dbFailingNthInsert(db: Db, n: number): Db {
+  let count = 0;
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === "insert") {
+        count++;
+        if (count === n) {
+          return () => {
+            throw new Error(`forced insert #${n} failure`);
+          };
+        }
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as Db;
+}
+
 describe("exposeSteps — happy path", () => {
   it("splices ingress, creates DNS and Access app, and creates the probe", async () => {
     const db = await seedDb();
@@ -236,6 +259,28 @@ describe("exposeSteps — happy path", () => {
 
     const [probe] = await db.select().from(probes).where(eq(probes.appId, appId));
     expect(probe).toMatchObject({ kind: "http_external", target: "https://jellyfin.example.com" });
+  });
+
+  it("records ingressRuleCreatedByUs: false when a rule for the hostname already existed", async () => {
+    // The carried fix: before this, `ingressRuleCreatedByUs` was unconditionally `true`
+    // on a successful splice (see the git history for `expose.ts`'s old comment) — sound
+    // only if the ingress array could never contain anything Homestead did not itself
+    // put there. 2C's tunnel adoption broke that assumption: an ADOPTED tunnel can carry
+    // a rule a human wrote by hand. This proves the flag now reflects what was actually
+    // there immediately before the splice, not merely "success".
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client } = fakeClient([
+      { hostname: "jellyfin.example.com", service: "http://someone-elses-service:80" },
+      { service: "http_status:404" },
+    ]);
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(true);
+    const row = await exposureFor(db, appId);
+    expect(row).toMatchObject({ ingressRuleCreatedByUs: false });
   });
 });
 
@@ -315,6 +360,31 @@ describe("exposeSteps — rollback removes what THIS run created", () => {
     expect(deletedAccessApps).toHaveLength(1);
   });
 
+  it("restores a pre-existing ingress rule VERBATIM when a later step fails, instead of deleting it", async () => {
+    // The carried fix's own binding test: seed a tunnel config that already contains a
+    // rule for the hostname (as an ADOPTED tunnel might, per the carry-forward), fail a
+    // later step, and assert the ORIGINAL rule — same hostname, same (different!)
+    // service — survives byte-for-byte, rather than being deleted (the old,
+    // unconditional-`true` behaviour) or left as Homestead's own overwritten version.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const preExisting: IngressRule = {
+      hostname: "jellyfin.example.com",
+      service: "http://someone-elses-service:80",
+    };
+    const { client, ingress } = fakeClient([preExisting, { service: "http_status:404" }]);
+    client.createDnsRecord = async () => {
+      throw new Error("dns boom");
+    };
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+
+    const outcome = await runSteps(exposeSteps(deps), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(false);
+    expect(ingress()).toEqual([preExisting, { service: "http_status:404" }]);
+    expect(await exposureFor(db, appId)).toBeUndefined();
+  });
+
   it("does NOT delete an adopted Access application when a later step fails", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
@@ -347,7 +417,10 @@ describe("exposeSteps — rollback removes what THIS run created", () => {
 });
 
 describe("exposeSteps — a step's own inline compensation", () => {
-  it("splice-ingress removes the exposures row it just inserted if the Cloudflare write fails", async () => {
+  it("splice-ingress never creates the exposures row if the Cloudflare write fails", async () => {
+    // Cloudflare write happens first now (see `expose.ts`'s doc comment on
+    // `splice-ingress`), so a failure here never reaches the local insert at all — there
+    // is nothing to compensate, unlike the insert-fails case below.
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const { client, ingress } = fakeClient();
@@ -362,6 +435,39 @@ describe("exposeSteps — a step's own inline compensation", () => {
     if (!outcome.ok) expect(outcome.failed).toBe("splice-ingress");
     expect(await exposureFor(db, appId)).toBeUndefined();
     expect(ingress()).toEqual([{ service: "http_status:404" }]);
+  });
+
+  it("splice-ingress removes the ingress rule it just wrote to Cloudflare if the local insert fails", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const { client, ingress } = fakeClient();
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+    const failingDb = dbFailingNthInsert(db, 1);
+
+    const outcome = await runSteps(exposeSteps({ ...deps, db: failingDb }), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.failed).toBe("splice-ingress");
+    expect(ingress()).toEqual([{ service: "http_status:404" }]);
+    expect(await exposureFor(db, appId)).toBeUndefined();
+  });
+
+  it("splice-ingress restores a pre-existing rule verbatim if the local insert fails", async () => {
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const preExisting: IngressRule = {
+      hostname: "jellyfin.example.com",
+      service: "http://someone-elses-service:80",
+    };
+    const { client, ingress } = fakeClient([preExisting, { service: "http_status:404" }]);
+    const deps = baseDeps(db, client, new TunnelConfigLock(), appId, "jellyfin.example.com");
+    const failingDb = dbFailingNthInsert(db, 1);
+
+    const outcome = await runSteps(exposeSteps({ ...deps, db: failingDb }), {} as ExposeCtx);
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.failed).toBe("splice-ingress");
+    expect(ingress()).toEqual([preExisting, { service: "http_status:404" }]);
   });
 
   it("create-dns-record deletes the record it just created if recording it locally fails", async () => {
