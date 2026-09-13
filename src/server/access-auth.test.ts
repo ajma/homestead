@@ -1,5 +1,5 @@
 import { ACCESS_JWT_HEADER, clearJwksCache } from "@server/auth/access-plugin";
-import { users } from "@server/db/schema";
+import { auditLog, users } from "@server/db/schema";
 import { buildTestApp, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
@@ -209,6 +209,45 @@ describe("the mounted Access sign-in path", () => {
     await app.close();
   });
 
+  it("an existing password session survives a VALID Access assertion naming a different user", async () => {
+    // The garbage-token test above is rejected by `verifyAccessJwt` whether or not the
+    // session-precedence guard (`if (request.auth) return;`) exists, so it cannot tell
+    // the two worlds apart. This is the binding version: a token that WOULD verify and
+    // WOULD resolve to a real, different user. Without the guard, the Access hook would
+    // run anyway, find `viewer@example.com`, and overwrite `request.auth` with the
+    // viewer's identity — silently replacing the admin's own session with whoever the
+    // header names.
+    const { app, privateKey, adminCookie, adminId } = await withAccessConfigured();
+    const email = "viewer@example.com";
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { cookie: adminCookie },
+      payload: {
+        email,
+        password: "correct-horse-battery",
+        name: "Viewer",
+        role: "viewer",
+        scopeAllApps: true,
+        appIds: [],
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const viewerId = created.json().id as string;
+
+    const token = await mintToken(privateKey, email);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { cookie: adminCookie, [ACCESS_JWT_HEADER]: token },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().id).toBe(adminId);
+    expect(res.json().id).not.toBe(viewerId);
+    await app.close();
+  });
+
   it("does not implicitly create a Homestead user for an assertion naming an unknown email", async () => {
     const { app, privateKey } = await withAccessConfigured();
     const token = await mintToken(privateKey, "nobody@example.com");
@@ -311,6 +350,85 @@ describe("the mounted Access sign-in path", () => {
       },
     });
     expect(createRes.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("records the audit trail's auth path as access, not password", async () => {
+    // §7, Hygiene: every audit row records which path authenticated the actor. This is
+    // the first phase Access is reachable at all, so nothing asserted this before —
+    // an admin signed in via Access whose actions logged as "password" would be
+    // indistinguishable, during an incident, from someone on the LAN with the password.
+    const { app, privateKey, adminId } = await withAccessConfigured();
+    const token = await mintToken(privateKey, "admin@example.com");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      payload: {
+        email: "audited-via-access@example.com",
+        password: "correct-horse-battery",
+        name: "Audited",
+        role: "viewer",
+        scopeAllApps: true,
+        appIds: [],
+      },
+    });
+    expect(res.statusCode).toBe(201);
+
+    const [row] = await app.deps.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, "user.created"));
+    expect(row?.authPath).toBe("access");
+    expect(row?.userId).toBe(adminId);
+    await app.close();
+  });
+
+  it("ignores a valid Access assertion presented directly on the LAN, not through the tunnel", async () => {
+    // §6/§9: externally exposed apps stay LAN-reachable without passing through Access,
+    // which makes an Access assertion arriving on a LAN-origin request meaningless —
+    // Cloudflare never evaluated its policy for it, so a bearer token copied out of a
+    // revoked user's browser would otherwise keep working until it expired.
+    // `app.inject`'s default `remoteAddress` is `127.0.0.1` — cloudflared's own
+    // loopback address, and `trustedProxies`' default — which is why every other test
+    // in this file is implicitly "through the tunnel". This one overrides it to a LAN
+    // address to prove the same, otherwise-valid token is ignored rather than accepted,
+    // and that the response is byte-identical to no header at all: a LAN caller cannot
+    // use this to fingerprint whether Access is configured or probe a candidate email.
+    const { app, privateKey } = await withAccessConfigured();
+    const token = await mintToken(privateKey, "admin@example.com");
+    const remoteAddress = "192.168.1.50";
+
+    const withHeader = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+      remoteAddress,
+    });
+    const withoutHeader = await app.inject({ method: "GET", url: "/api/me", remoteAddress });
+
+    expect(withHeader.statusCode).toBe(401);
+    expect(withHeader.statusCode).toBe(withoutHeader.statusCode);
+    expect(withHeader.json()).toEqual(withoutHeader.json());
+    await app.close();
+  });
+
+  it("matches the asserted email against the stored user case-insensitively", async () => {
+    // The IdP behind Access is a different system from Homestead's own `users` table
+    // and has no reason to agree on case; a mismatch here must not silently and
+    // permanently lock out an otherwise-valid Access sign-in.
+    const { app, privateKey, adminId } = await withAccessConfigured();
+    const token = await mintToken(privateKey, "Admin@Example.com");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      headers: { [ACCESS_JWT_HEADER]: token },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().id).toBe(adminId);
     await app.close();
   });
 });
