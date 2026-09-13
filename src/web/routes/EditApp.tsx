@@ -24,18 +24,18 @@ const STATUS_FALLBACK: Record<AppStatus, string> = {
 };
 
 /**
- * `overview`, `containers`, `logs`, `probes`, `compose`, `env`, `exposure` — Phase 1F's
- * full set plus 2F Task 3's exposure tab. A list rather than literals scattered across
- * the nav markup, so a later tab is one entry here plus one child `<Route>` in
- * `App.tsx` — not a hunt through JSX.
+ * `overview`, `containers`, `logs`, `probes`, `config`, `exposure` — Phase 1F's full set
+ * plus 2F Task 3's exposure tab, with the former `compose` and `env` tabs now merged into
+ * one `config` tab (`ConfigTab`, which renders `ComposeTab` and `EnvTab` side by side; see
+ * that file). A list rather than literals scattered across the nav markup, so a later tab
+ * is one entry here plus one child `<Route>` in `App.tsx` — not a hunt through JSX.
  */
 const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "overview", label: "Overview" },
   { to: "containers", label: "Containers" },
   { to: "logs", label: "Logs" },
   { to: "probes", label: "Probes" },
-  { to: "compose", label: "Compose" },
-  { to: "env", label: ".env" },
+  { to: "config", label: "Config" },
   { to: "exposure", label: "Exposure" },
 ];
 

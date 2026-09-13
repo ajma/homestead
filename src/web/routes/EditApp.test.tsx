@@ -72,14 +72,14 @@ function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app)
             <Route path="logs" element={<p>LOGS</p>} />
             <Route path="probes" element={<p>PROBES</p>} />
             {/*
-             * Stand-ins, not the real `ComposeTab`/`EnvTab` — this file is about `EditApp`'s
-             * own routing and the only-active-tab boundary it must preserve, not about what
-             * those tabs render. The real components are covered by their own test files;
-             * mounting them for real here would pull in CodeMirror and the vendored schema
-             * for a question this file isn't asking.
+             * A stand-in, not the real `ConfigTab` (which itself renders the real
+             * `ComposeTab`/`EnvTab`) — this file is about `EditApp`'s own routing and the
+             * only-active-tab boundary it must preserve, not about what those tabs render.
+             * The real components are covered by their own test files; mounting them for
+             * real here would pull in CodeMirror and the vendored schema for a question
+             * this file isn't asking.
              */}
-            <Route path="compose" element={<p>COMPOSE</p>} />
-            <Route path="env" element={<p>ENV</p>} />
+            <Route path="config" element={<p>CONFIG</p>} />
             <Route path="exposure" element={<p>EXPOSURE</p>} />
           </Route>
         </Routes>
@@ -126,71 +126,44 @@ describe("EditApp", () => {
     expect(screen.queryByText("OVERVIEW")).toBeNull();
   });
 
-  it("renders only the Compose tab's content, not every other tab alongside it", () => {
-    // This is the case that matters most: the real Compose tab mounts a whole CodeMirror
-    // instance, imports the vendored (86 KB) schema, and can fire a `docker compose
-    // config` spawn on load. If the shell ever rendered every tab and hid the inactive
-    // ones with CSS instead of routing through `<Outlet />`, opening the app's Overview
-    // tab would silently do all of that. This test only proves the routing boundary
-    // (stand-in tabs, not the real editor) — Task 4's own gate covers what the real tab
-    // does once mounted.
+  it("renders only the Config tab's content, not every other tab alongside it", () => {
+    // This is the case that matters most: the real Config tab mounts the real Compose and
+    // `.env` editors together — a whole CodeMirror instance, the vendored (86 KB) schema,
+    // and a `docker compose config` spawn on load. If the shell ever rendered every tab
+    // and hid the inactive ones with CSS instead of routing through `<Outlet />`, opening
+    // the app's Overview tab would silently do all of that. This test only proves the
+    // routing boundary (a stand-in tab, not the real editors) — `ConfigTab.test.tsx` and
+    // Task 4's own gate cover what the real tab does once mounted.
     stubFetch(app);
-    mount("/apps/jellyfin/compose");
-    expect(screen.getByText("COMPOSE")).toBeTruthy();
+    mount("/apps/jellyfin/config");
+    expect(screen.getByText("CONFIG")).toBeTruthy();
     expect(screen.queryByText("OVERVIEW")).toBeNull();
     expect(screen.queryByText("CONTAINERS")).toBeNull();
     expect(screen.queryByText("LOGS")).toBeNull();
     expect(screen.queryByText("PROBES")).toBeNull();
-    expect(screen.queryByText("ENV")).toBeNull();
-  });
-
-  it("renders only the .env tab's content, not every other tab alongside it", () => {
-    stubFetch(app);
-    mount("/apps/jellyfin/env");
-    expect(screen.getByText("ENV")).toBeTruthy();
-    expect(screen.queryByText("OVERVIEW")).toBeNull();
-    expect(screen.queryByText("CONTAINERS")).toBeNull();
-    expect(screen.queryByText("LOGS")).toBeNull();
-    expect(screen.queryByText("PROBES")).toBeNull();
-    expect(screen.queryByText("COMPOSE")).toBeNull();
+    expect(screen.queryByText("EXPOSURE")).toBeNull();
   });
 
   it("offers a tab link per route", () => {
     stubFetch(app);
     mount();
-    for (const name of [
-      "Overview",
-      "Containers",
-      "Logs",
-      "Probes",
-      "Compose",
-      ".env",
-      "Exposure",
-    ]) {
+    for (const name of ["Overview", "Containers", "Logs", "Probes", "Config", "Exposure"]) {
       expect(screen.getByRole("link", { name })).toBeTruthy();
     }
   });
 
-  it("orders the tabs Overview, Containers, Logs, Probes, Compose, .env, then Exposure", () => {
+  it("orders the tabs Overview, Containers, Logs, Probes, Config, then Exposure", () => {
     // Not just presence — the brief calls for "a sensible order" and this is the one a
-    // reader would expect: status/inspection tabs first, the two editors (the heaviest,
-    // least-often-needed tabs) after that, and 2F Task 3's exposure tab — the newest, and
-    // the one most apps will never touch — last of all.
+    // reader would expect: status/inspection tabs first, the combined Config tab (the
+    // heaviest, least-often-needed one) after that, and 2F Task 3's exposure tab — the
+    // newest, and the one most apps will never touch — last of all.
     stubFetch(app);
     mount();
     const nav = screen.getByRole("navigation", { name: "App sections" });
     const labels = within(nav)
       .getAllByRole("link")
       .map((link) => link.textContent);
-    expect(labels).toEqual([
-      "Overview",
-      "Containers",
-      "Logs",
-      "Probes",
-      "Compose",
-      ".env",
-      "Exposure",
-    ]);
+    expect(labels).toEqual(["Overview", "Containers", "Logs", "Probes", "Config", "Exposure"]);
   });
 
   describe("moving between tabs by clicking, not just visiting a tab's URL directly", () => {
@@ -210,8 +183,7 @@ describe("EditApp", () => {
       containers: "Containers",
       logs: "Logs",
       probes: "Probes",
-      compose: "Compose",
-      env: ".env",
+      config: "Config",
       exposure: "Exposure",
     };
 
@@ -227,21 +199,31 @@ describe("EditApp", () => {
     // The exact pair the bug report named.
     clickTo("overview", "exposure");
     // Every other destination from the same starting tab as the report — proving the
-    // break (and the fix) is not specific to Exposure.
+    // break (and the fix) is not specific to Exposure. Compose and `.env` used to be two
+    // separate destinations here (`overview` -> `compose`, `overview` -> `env`); merged
+    // into one Config tab, that's one link, not two.
     clickTo("overview", "containers");
     clickTo("overview", "logs");
     clickTo("overview", "probes");
-    clickTo("overview", "compose");
-    clickTo("overview", "env");
+    clickTo("overview", "config");
     // The reverse direction, and starting tabs other than the one the report named —
     // proving the splat capture is nonempty (and so the bug bites) from any tab, not
-    // only `overview`.
+    // only `overview`. `probes` -> `config` and `config` -> `exposure` stand in for the
+    // old `probes` -> `compose` and `compose`/`env` -> `exposure` pairs — Config is now
+    // the one heaviest, lazy-loaded tab those used to represent.
     clickTo("exposure", "overview");
     clickTo("containers", "logs");
     clickTo("logs", "probes");
-    clickTo("probes", "compose");
-    clickTo("compose", "env");
-    clickTo("env", "exposure");
+    clickTo("probes", "config");
+    clickTo("config", "exposure");
+    // Config is reachable from, and leads back to, every other tab — not just the two
+    // neighbours in the chain above — since it is the one tab users are now most likely
+    // to jump to directly from anywhere (it replaces two).
+    clickTo("containers", "config");
+    clickTo("config", "overview");
+    clickTo("logs", "config");
+    clickTo("exposure", "config");
+    clickTo("config", "probes");
   });
 
   it("says so plainly when the slug matches no app", async () => {

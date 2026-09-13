@@ -59,8 +59,14 @@ function messageFrom(error: unknown, fallback: string): string {
  * Reads the app via `useOutletContext`, the same pattern `OverviewTab`, `ContainersTab`
  * and `LogsTab` use — re-resolving `:slug` here would defeat the point of the tabs
  * sharing one lookup.
+ *
+ * `onDirtyChange` is `ConfigTab`'s doing: when it renders this tab side by side with
+ * `EnvTab`, it passes a callback here instead of letting this tab block navigation on
+ * its own — see `useUnsavedChanges`'s own doc comment for why two components blocking
+ * independently is actively broken, not just doubled-up UX. Left undefined (as every
+ * test in this file does), this tab behaves exactly as it did before `ConfigTab` existed.
  */
-export function ComposeTab() {
+export function ComposeTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void } = {}) {
   const { app } = useOutletContext<EditAppContext>();
   const appId = app.id;
   const queryClient = useQueryClient();
@@ -171,7 +177,13 @@ export function ComposeTab() {
   // (`beforeunload`, which no router can see). See `useUnsavedChanges`'s own doc comment
   // for the ref-based `beforeunload` pattern this replaces — `ComposeTab` used to
   // implement that alone, uniquely among the editors, and nothing here duplicates it now.
-  const { blocked: navBlocked, proceed: proceedNav, cancel: cancelNav } = useUnsavedChanges(dirty);
+  const {
+    blocked: navBlocked,
+    proceed: proceedNav,
+    cancel: cancelNav,
+  } = useUnsavedChanges(dirty, {
+    onDirtyChange,
+  });
 
   // Computed once per mount, not re-read on resize — a popup that was absent when this
   // tab opened staying absent through a later resize is an acceptable simplification;

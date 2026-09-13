@@ -163,28 +163,40 @@ describe("the admin route guard", () => {
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
-  it("sends a viewer away from the compose deep url", async () => {
-    // The compose tab is the heaviest thing this phase ships — a whole CodeMirror
-    // instance, an 86 KB vendored schema, and a `docker compose config` spawn on load.
-    // A viewer must never reach it by URL, bookmark or otherwise, even though the guard
-    // that stops them lives one level up in `App.tsx`'s route tree, not in the tab itself.
+  it("sends a viewer away from the config deep url", async () => {
+    // The Config tab is the heaviest thing this phase ships — a whole CodeMirror
+    // instance, an 86 KB vendored schema, a `docker compose config` spawn on load, and
+    // the `.env` editor alongside it. A viewer must never reach it by URL, bookmark or
+    // otherwise, even though the guard that stops them lives one level up in `App.tsx`'s
+    // route tree, not in the tab itself.
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/config");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Config" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
+  it("sends a viewer away from the old compose deep url too", async () => {
+    // `/compose` now just redirects to `/config` (see `RedirectToConfig` in `App.tsx`,
+    // kept so an old bookmark still lands somewhere real) — but the guard sits above both
+    // the redirect and the real tab, on `/apps/:slug` itself, so a viewer must still never
+    // reach this legacy URL either.
     stubMe({ role: "viewer" }, { apps: [jellyfin] });
     renderAt("/apps/jellyfin/compose");
 
     await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
-    expect(screen.queryByRole("link", { name: "Compose" })).toBeNull();
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
-  it("sends a viewer away from the env deep url", async () => {
-    // `.env` holds secrets on top of everything the compose tab already needs guarding
-    // against — this is the URL the viewer premise ("hand a housemate a link without
-    // thinking about it") most depends on staying closed.
+  it("sends a viewer away from the old env deep url too", async () => {
+    // `.env` holds secrets on top of everything else Config needs guarding against —
+    // this is the URL the viewer premise ("hand a housemate a link without thinking
+    // about it") most depends on staying closed, old redirect or not.
     stubMe({ role: "viewer" }, { apps: [jellyfin] });
     renderAt("/apps/jellyfin/env");
 
     await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
-    expect(screen.queryByRole("link", { name: ".env" })).toBeNull();
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
@@ -299,12 +311,12 @@ describe("moving between edit tabs by clicking, not just visiting the URL direct
     await waitFor(() => expect(window.location.pathname).toBe("/apps/jellyfin/overview"));
   });
 
-  it("lands on /apps/jellyfin/exposure when clicking Exposure from the compose tab", async () => {
-    // Neither endpoint of this click is the pair the bug report named, and the compose
-    // tab is the one behind `React.lazy` — proving the fix holds for a lazy-loaded
-    // starting tab too, not only the eagerly-rendered ones above.
+  it("lands on /apps/jellyfin/exposure when clicking Exposure from the config tab", async () => {
+    // Neither endpoint of this click is the pair the bug report named, and Config is the
+    // one tab behind `React.lazy` — proving the fix holds for a lazy-loaded starting tab
+    // too, not only the eagerly-rendered ones above.
     stubMe({ role: "admin" }, { apps: [jellyfin] });
-    const { container } = renderAt("/apps/jellyfin/compose");
+    const { container } = renderAt("/apps/jellyfin/config");
 
     await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
     fireEvent.click(screen.getByRole("link", { name: "Exposure" }));
@@ -381,23 +393,26 @@ describe("the tab data-loading boundary", () => {
     expect(urls.some((url) => url.includes("/env"))).toBe(false);
   });
 
-  it("fetches compose data once the compose tab is the one open", async () => {
+  it("fetches compose and env data once the config tab is the one open", async () => {
     // The mirror image of the test above: proves the assertion is actually discriminating
-    // between tabs, not just observing that nothing in this harness ever calls `/compose`.
+    // between tabs, not just observing that nothing in this harness ever calls
+    // `/compose`/`/env`. Both fire together now, since `ConfigTab` mounts `ComposeTab` and
+    // `EnvTab` side by side rather than one at a time.
     stubMe({ role: "admin" }, { apps: [jellyfin] });
-    const { container } = renderAt("/apps/jellyfin/compose");
+    const { container } = renderAt("/apps/jellyfin/config");
 
     await waitFor(() => {
       const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
       const urls = calls.map((call) => String(call[0]));
       expect(urls.some((url) => url.includes("/compose"))).toBe(true);
+      expect(urls.some((url) => url.endsWith("/env"))).toBe(true);
     });
-    // `ComposeTab` is loaded behind `React.lazy` now (Important 5 of the 1F final
-    // review), so this test's own render awaits the fallback and then the real chunk —
-    // without waiting for the actual editor to mount, this test's own cleanup can
-    // unmount the tree while the lazy import or the compose query is still settling,
-    // producing an update on an unmounted component instead of proving anything about
-    // the next test.
+    // `ConfigTab` is loaded behind `React.lazy` now (Important 5 of the 1F final review,
+    // carried forward when Compose and `.env` merged into one tab), so this test's own
+    // render awaits the fallback and then the real chunk — without waiting for the actual
+    // editor to mount, this test's own cleanup can unmount the tree while the lazy import
+    // or the compose query is still settling, producing an update on an unmounted
+    // component instead of proving anything about the next test.
     await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
   });
 });

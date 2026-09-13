@@ -213,8 +213,14 @@ function currentValueOf(entries: EnvEntry[], key: string): string | undefined {
  * conflict UI raw mode uses (see `hasStructuralEdits` in `handleSave`). A rename can
  * always merge safely against whatever the concurrent edit left alone; whether an add or
  * delete can is a judgement call about intent this tab does not try to make silently.
+ *
+ * `onDirtyChange` is `ConfigTab`'s doing: when it renders this tab side by side with
+ * `ComposeTab`, it passes a callback here instead of letting this tab block navigation on
+ * its own — see `useUnsavedChanges`'s own doc comment for why two components blocking
+ * independently is actively broken, not just doubled-up UX. Left undefined (as every test
+ * in this file does), this tab behaves exactly as it did before `ConfigTab` existed.
  */
-export function EnvTab() {
+export function EnvTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void } = {}) {
   const { app } = useOutletContext<EditAppContext>();
   const appId = app.id;
   const queryClient = useQueryClient();
@@ -327,7 +333,13 @@ export function EnvTab() {
   // Task 4 — not even `beforeunload` — despite editing the one file in this app that
   // holds credentials. `useUnsavedChanges` covers both an in-app tab click (`useBlocker`)
   // and closing the tab or reloading (`beforeunload`) from a single `dirty` declaration.
-  const { blocked: navBlocked, proceed: proceedNav, cancel: cancelNav } = useUnsavedChanges(dirty);
+  const {
+    blocked: navBlocked,
+    proceed: proceedNav,
+    cancel: cancelNav,
+  } = useUnsavedChanges(dirty, {
+    onDirtyChange,
+  });
 
   /**
    * The Table/Raw toggle. Leaving raw mode with nothing unsaved is the moment this tab

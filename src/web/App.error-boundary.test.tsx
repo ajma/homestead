@@ -9,10 +9,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // A separate file from `App.test.tsx` on purpose: `vi.mock` is hoisted to the top of
 // whatever file calls it and applies to every test in that file, so making this one
-// module throw here would otherwise poison `App.test.tsx`'s own "fetches compose data
-// once the compose tab is the one open" test, which needs the REAL `ComposeTab` to mount
-// far enough to render `.cm-editor`. Isolating the throwing mock to its own file is what
-// lets both exist.
+// module throw here would otherwise poison `App.test.tsx`'s own "fetches compose and env
+// data once the config tab is the one open" test, which needs the REAL `ComposeTab` to
+// mount far enough to render `.cm-editor`. Isolating the throwing mock to its own file is
+// what lets both exist. `ConfigTab` statically imports `ComposeTab` (see that file), so
+// throwing here still fails the whole combined Config chunk's dynamic `import()`, the
+// same as before this tab merged Compose and `.env` together.
 vi.mock("@web/routes/edit/ComposeTab", () => {
   throw new Error("Failed to fetch dynamically imported module");
 });
@@ -110,7 +112,7 @@ describe("the lazy editor's error boundary", () => {
     // uncaught inside `Suspense` and unmounted the entire root: not the route, the whole
     // admin UI, with no way back but a full reload.
     stubMe();
-    window.history.pushState({}, "", "/apps/jellyfin/compose");
+    window.history.pushState({}, "", "/apps/jellyfin/config");
     vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
     render(<App />);
 
