@@ -165,6 +165,13 @@ describe("AdminApps", () => {
     expect(shell.className).not.toContain("max-w-5xl");
   });
 
+  it("tightens row cell padding at md: and up to suit a data table, not a touch target", () => {
+    mount([app()]);
+    const cell = screen.getByText("Jellyfin").closest("td");
+    expect(cell?.className).toContain("md:py-2");
+    expect(cell?.className).not.toContain("md:py-3");
+  });
+
   it("links each row to that app's edit page by slug", async () => {
     mount([app({ slug: "jellyfin" })]);
     expect(screen.getByRole("link", { name: /Jellyfin/ }).getAttribute("href")).toBe(

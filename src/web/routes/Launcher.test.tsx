@@ -155,6 +155,19 @@ describe("Launcher", () => {
     expect(screen.queryByRole("dialog", { name: /Jellyfin/ })).toBeNull();
   });
 
+  it("adds a 2xl grid step, the breakpoint the lifted page shell now lets fire", () => {
+    // `xl:grid-cols-5` was already declared before this pass but never reachable — the
+    // old `max-w-5xl` shell capped the container before that breakpoint could matter.
+    // With the cap lifted (Task 1), a `2xl:` step is the payoff: more tiles visible on
+    // a wide screen, not more text per tile.
+    mount(client([tile({ category: "Media" })]));
+    const grid = screen.getByRole("heading", { name: "Media" }).nextElementSibling;
+    expect(grid?.className).toContain("xl:grid-cols-5");
+    expect(grid?.className).toContain("2xl:grid-cols-6");
+    // Phone base untouched.
+    expect(grid?.className).toContain("grid-cols-2");
+  });
+
   it("uses the shared page shell's width cap, not the old 1024px max-w-5xl", () => {
     // Pins the density-pass binding: `Launcher.tsx:83`'s `xl:grid-cols-5` only ever
     // fires once this outer cap is wide enough to let a 5-column grid matter. Asserts

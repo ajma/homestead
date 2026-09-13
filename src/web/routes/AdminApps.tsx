@@ -168,7 +168,7 @@ export function AdminApps() {
                   key={app.id}
                   className="block border-t border-slate-200 p-3 first:border-t-0 md:table-row md:border-t md:p-0 dark:border-slate-800"
                 >
-                  <td className="block md:table-cell md:px-4 md:py-3">
+                  <td className="block md:table-cell md:px-4 md:py-2">
                     <Link to={`/apps/${app.slug}`} className="flex items-center gap-3">
                       <AppIcon iconRef={app.iconRef} displayName={app.displayName} size="sm" />
                       <div className="min-w-0 flex-1">
@@ -188,22 +188,22 @@ export function AdminApps() {
                       </div>
                     </Link>
                   </td>
-                  <td className="mt-2 block md:mt-0 md:table-cell md:px-4 md:py-3">
+                  <td className="mt-2 block md:mt-0 md:table-cell md:px-4 md:py-2">
                     <StatusChip
                       status={app.status}
                       reason={app.statusDetail ?? STATUS_FALLBACK[app.status]}
                       since={null}
                     />
                   </td>
-                  <td className="mt-2 block truncate text-xs text-slate-500 md:mt-0 md:table-cell md:px-4 md:py-3 md:text-sm dark:text-slate-400">
+                  <td className="mt-2 block truncate text-xs text-slate-500 md:mt-0 md:table-cell md:px-4 md:py-2 md:text-sm dark:text-slate-400">
                     {app.directory}
                   </td>
-                  <td className="mt-2 block text-xs text-slate-500 md:mt-0 md:table-cell md:px-4 md:py-3 md:text-sm dark:text-slate-400">
+                  <td className="mt-2 block text-xs text-slate-500 md:mt-0 md:table-cell md:px-4 md:py-2 md:text-sm dark:text-slate-400">
                     {app.lastDeployAt === null
                       ? "Never"
                       : `${relativeTime(app.lastDeployAt, now)} ago`}
                   </td>
-                  <td className="mt-2 block md:mt-0 md:table-cell md:px-4 md:py-3">
+                  <td className="mt-2 block md:mt-0 md:table-cell md:px-4 md:py-2">
                     <RowActions app={app} />
                   </td>
                 </tr>

@@ -81,8 +81,12 @@ export function Launcher() {
             <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
               {category}
             </h2>
-            {/* 2-up on phone, up to 5 across on a wide desktop. */}
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {/* 2-up on phone, up to 6 across on a wide desktop. `xl:grid-cols-5` used to
+                never fire: the page shell capped out at 1024px before that breakpoint
+                (1280px) could matter. With the cap lifted (see `density.ts`), it does,
+                and `2xl:grid-cols-6` gives the wider end of the density band one more
+                step — density here means more tiles visible, not more text per tile. */}
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
               {apps.map((app) => (
                 <AppCard key={app.id} app={app} onOpenHealth={() => setOpenApp(app)} />
               ))}
