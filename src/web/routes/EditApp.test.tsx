@@ -274,4 +274,86 @@ describe("EditApp", () => {
       expect(rail.className).toContain("lg:flex");
     });
   });
+
+  describe("right-rail exposure summary", () => {
+    // Spec §8 names four things the rail should carry — actions, exposure, image
+    // updates, metadata — and the survey found exposure was the one missing: it existed
+    // only inside the Exposure tab itself, one click away.
+
+    // `ActionBar` (also in the rail) reads `GET .../jobs` for real whenever it isn't
+    // given `knownRunningJobId` — `EditApp` doesn't pass it — so every stub in this
+    // block must answer that endpoint with an array, not fall through to a shape
+    // `jobs?.find` cannot call.
+    function stubExposure(body: unknown) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/expose")) {
+            return new Response(JSON.stringify(body), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.endsWith("/jobs") || url.endsWith("/images")) {
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify(app), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }),
+      );
+    }
+
+    it("shows a compact exposure card linking to the Exposure tab", async () => {
+      stubExposure({
+        exposed: true,
+        hostname: "jellyfin.example.com",
+        state: "ready",
+        accessAppId: null,
+        accessAppAud: null,
+        runningJobId: null,
+        driftFindings: [],
+      });
+      mount();
+
+      const card = await screen.findByTestId("exposure-summary");
+      expect(await within(card).findByText("jellyfin.example.com")).toBeTruthy();
+      expect(within(card).getByText("ready")).toBeTruthy();
+      expect(card.getAttribute("href")).toBe("/apps/jellyfin/exposure");
+    });
+
+    it("says 'Not exposed' rather than leaving the card blank when the app has no exposure", async () => {
+      stubExposure({ exposed: false, runningJobId: null });
+      mount();
+
+      const card = await screen.findByTestId("exposure-summary");
+      expect(await within(card).findByText("Not exposed")).toBeTruthy();
+    });
+
+    it("carries a distinct accessible name from the nav's own Exposure tab link", async () => {
+      // Both the nav's tab link and this rail card could otherwise read as plain
+      // "Exposure" to assistive tech (and to `getByRole`), which would make the two
+      // links on this page indistinguishable by name.
+      stubFetch(app);
+      mount();
+      const navExposureLink = within(
+        screen.getByRole("navigation", { name: "App sections" }),
+      ).getByRole("link", { name: "Exposure" });
+      expect(navExposureLink).toBeTruthy();
+      expect(screen.getByRole("link", { name: "Exposure summary" })).toBeTruthy();
+    });
+
+    it("is absent on mobile widths, matching the metadata card's own treatment", async () => {
+      stubFetch(app);
+      mount();
+      const card = await screen.findByTestId("exposure-summary");
+      expect(card.className).toContain("hidden");
+      expect(card.className).toContain("lg:flex");
+    });
+  });
 });

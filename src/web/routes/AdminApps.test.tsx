@@ -156,6 +156,22 @@ describe("AdminApps", () => {
     expect(screen.getByText(/jellyfin/)).toBeTruthy();
   });
 
+  it("uses the shared page shell's width cap, not the old 1024px max-w-5xl", () => {
+    // A data table with a 1024px cap is exactly the anti-pattern the density pass exists
+    // to fix — pinned here as a class-string assertion since jsdom has no geometry.
+    const { container } = mount([app()]);
+    const shell = container.firstElementChild as HTMLElement;
+    expect(shell.className).toContain("max-w-[1680px]");
+    expect(shell.className).not.toContain("max-w-5xl");
+  });
+
+  it("tightens row cell padding at md: and up to suit a data table, not a touch target", () => {
+    mount([app()]);
+    const cell = screen.getByText("Jellyfin").closest("td");
+    expect(cell?.className).toContain("md:py-2");
+    expect(cell?.className).not.toContain("md:py-3");
+  });
+
   it("links each row to that app's edit page by slug", async () => {
     mount([app({ slug: "jellyfin" })]);
     expect(screen.getByRole("link", { name: /Jellyfin/ }).getAttribute("href")).toBe(

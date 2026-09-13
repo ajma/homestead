@@ -1,4 +1,5 @@
 import { UserManager } from "@web/components/UserManager";
+import { PAGE_SHELL, SECTION_GAP, TWO_UP_GRID } from "@web/lib/density";
 import { CloudflarePanel } from "@web/routes/settings/CloudflarePanel";
 import { HostCheckPanel } from "@web/routes/setup/HostCheckPanel";
 
@@ -19,24 +20,26 @@ import { HostCheckPanel } from "@web/routes/setup/HostCheckPanel";
  */
 export function Settings() {
   return (
-    <div className="mx-auto max-w-5xl space-y-8 p-4">
+    <div className={`${PAGE_SHELL} ${SECTION_GAP}`}>
       <h1 className="text-lg font-semibold">Settings</h1>
-      <section>
-        <h2 className="mb-2 text-base font-semibold">Host check</h2>
-        <p className="mb-4 text-sm text-slate-500">
-          Re-run the Docker and mount checks from setup — useful after fixing a bind mount setup
-          warned about.
-        </p>
-        <HostCheckPanel />
-      </section>
-      <section>
-        <h2 className="mb-2 text-base font-semibold">Cloudflare</h2>
-        <p className="mb-4 text-sm text-slate-500">
-          Store the Cloudflare account and API token used to expose apps through a tunnel. The token
-          is never shown again once saved — only its last four characters.
-        </p>
-        <CloudflarePanel />
-      </section>
+      <div className={TWO_UP_GRID}>
+        <section>
+          <h2 className="mb-2 text-base font-semibold">Host check</h2>
+          <p className="mb-4 text-sm text-slate-500">
+            Re-run the Docker and mount checks from setup — useful after fixing a bind mount setup
+            warned about.
+          </p>
+          <HostCheckPanel />
+        </section>
+        <section>
+          <h2 className="mb-2 text-base font-semibold">Cloudflare</h2>
+          <p className="mb-4 text-sm text-slate-500">
+            Store the Cloudflare account and API token used to expose apps through a tunnel. The
+            token is never shown again once saved — only its last four characters.
+          </p>
+          <CloudflarePanel />
+        </section>
+      </div>
       <section>
         <UserManager />
       </section>

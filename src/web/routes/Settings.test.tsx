@@ -43,6 +43,57 @@ describe("Settings", () => {
     expect(screen.getByText("Users")).toBeTruthy();
   });
 
+  it("uses the shared page shell's width cap, not the old 1024px max-w-5xl, and the tightened section gap", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    const shell = container.firstElementChild as HTMLElement;
+    expect(shell.className).toContain("max-w-[1680px]");
+    expect(shell.className).not.toContain("max-w-5xl");
+    expect(shell.className).toContain("space-y-6");
+    expect(shell.className).toContain("md:space-y-4");
+  });
+
+  it("places Host check and Cloudflare side by side at lg: and up, leaving Users full width", async () => {
+    // Host check and Cloudflare are short fact-and-action panels; Users is a genuine
+    // table and stays out of the grid, full width, below it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    const hostHeading = screen.getByRole("heading", { name: "Host check" });
+    const cloudflareHeading = screen.getByRole("heading", { name: "Cloudflare" });
+    const grid = hostHeading.closest("section")?.parentElement;
+    expect(grid?.className).toContain("lg:grid-cols-2");
+    expect(cloudflareHeading.closest("section")?.parentElement).toBe(grid);
+
+    const usersHeading = await screen.findByText("Users");
+    expect(usersHeading.closest("section")?.parentElement).not.toBe(grid);
+  });
+
   it("mounts the host check panel, reused from setup, with no wizard footer", async () => {
     vi.stubGlobal(
       "fetch",

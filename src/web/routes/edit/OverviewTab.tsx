@@ -4,6 +4,7 @@ import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { IconPicker } from "@web/components/IconPicker";
+import { FORM_CONTROL_MAX_WIDTH, FORM_LABEL, FORM_ROW } from "@web/lib/density";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
@@ -186,42 +187,42 @@ export function OverviewTab() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3">
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-900 dark:text-slate-100">Display name</span>
+        <label className={FORM_ROW}>
+          <span className={FORM_LABEL}>Display name</span>
           <input
             type="text"
             value={form.displayName}
             onChange={(event) => setForm((prev) => ({ ...prev, displayName: event.target.value }))}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+            className={`${FORM_CONTROL_MAX_WIDTH} rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950`}
           />
         </label>
 
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-900 dark:text-slate-100">
+        <label className={FORM_ROW}>
+          <span className={FORM_LABEL}>
             Description <span className="font-normal text-slate-500">(optional)</span>
           </span>
           <textarea
             value={form.description}
             onChange={(event) => setForm((prev) => ({ ...prev, description: event.target.value }))}
             rows={2}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+            className={`${FORM_CONTROL_MAX_WIDTH} rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950`}
           />
         </label>
 
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-900 dark:text-slate-100">
+        <label className={FORM_ROW}>
+          <span className={FORM_LABEL}>
             Category <span className="font-normal text-slate-500">(optional)</span>
           </span>
           <input
             type="text"
             value={form.category}
             onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+            className={`${FORM_CONTROL_MAX_WIDTH} rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950`}
           />
         </label>
 
-        <div className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-900 dark:text-slate-100">Icon</span>
+        <div className={FORM_ROW}>
+          <span className={FORM_LABEL}>Icon</span>
           <IconPicker
             value={form.iconRef}
             onChange={(slug) => setForm((prev) => ({ ...prev, iconRef: slug }))}

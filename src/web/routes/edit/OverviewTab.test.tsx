@@ -314,4 +314,26 @@ describe("OverviewTab", () => {
 
     expect(screen.getByRole("button", { name: /^Save$/ }).hasAttribute("disabled")).toBe(true);
   });
+
+  it("caps the Display name input's width instead of letting it stretch full-width", () => {
+    // The most visually broken item in the density survey: this input had no max-width
+    // at all, so on a wide screen a single-line field ran nearly the full window.
+    mount();
+    expect(screen.getByLabelText(/Display name/).className).toContain("max-w-lg");
+  });
+
+  it("caps the Description textarea and Category input the same way", () => {
+    mount();
+    expect(screen.getByLabelText(/Description/).className).toContain("max-w-lg");
+    expect(screen.getByLabelText(/Category/).className).toContain("max-w-lg");
+  });
+
+  it("puts the label beside the control at lg: and up, stacked below it", () => {
+    // jsdom has no layout engine — pinned as the class strings that encode the decision,
+    // the same way `ConfigTab.test.tsx` asserts its own breakpoint switch.
+    mount();
+    const row = screen.getByLabelText(/Display name/).closest("label");
+    expect(row?.className).toContain("flex-col");
+    expect(row?.className).toContain("lg:flex-row");
+  });
 });
