@@ -167,6 +167,39 @@ export class AccessPoliciesStore {
     return { clientId, clientSecret };
   }
 
+  /**
+   * Just the monitor half — `tokenId`/`clientId`/`monitorPolicyId`/`expiresAt` — present or
+   * not, independent of whether the human policy exists. `get()` cannot answer this: Phase
+   * 3A widened it to require `humanPolicyId` too (see that method's own doc comment), so it
+   * returns `null` for exactly the state this method exists to detect. Added for the
+   * Phase-2-to-3A upgrade path — see `createAccessPolicies`'s own doc comment on why
+   * treating that state as "nothing exists yet" is the wrong call. `null` unless all three
+   * IDs are present; a genuinely fresh install (nothing recorded) and a corrupted
+   * one-or-two-of-three-recorded state are both treated the same way by the caller — fall
+   * through to full creation — because only "all three present" is a state this method can
+   * complete safely without guessing at a missing id.
+   */
+  async getMonitorOnly(): Promise<{
+    tokenId: string;
+    clientId: string;
+    monitorPolicyId: string;
+    expiresAt: number | null;
+  } | null> {
+    const [tokenId, clientId, monitorPolicyId, expiresAtRaw] = await Promise.all([
+      this.readSetting(TOKEN_ID_KEY),
+      this.readSetting(CLIENT_ID_KEY),
+      this.readSetting(MONITOR_POLICY_ID_KEY),
+      this.readSetting(EXPIRES_AT_KEY),
+    ]);
+    if (tokenId === null || clientId === null || monitorPolicyId === null) return null;
+    return {
+      tokenId,
+      clientId,
+      monitorPolicyId,
+      expiresAt: expiresAtRaw === null ? null : Number(expiresAtRaw),
+    };
+  }
+
   /** Not transactional, the same reasoning as `TunnelStore.clear()`: a partial clear
    * still gets `get()` to `null` (any one of the required settings missing is already
    * "absent"), which is the outcome this method promises. */
@@ -301,6 +334,19 @@ async function createAccessPolicies(deps: {
   client: CloudflareClient;
   db: Db;
 }): Promise<AccessPolicies> {
+  // The carried fix from Task 2's report: an install that already ran Phase 2's
+  // `ensureMonitorAccess` has the monitor token and monitor policy recorded, but no
+  // `humanPolicyId` — `AccessPoliciesStore.get()` above returned `null` for that state
+  // (Phase 3A widened it to require the human policy too), and treating "not fully
+  // configured" as "nothing exists yet" would create a BRAND NEW service token here,
+  // orphaning the old one in the user's Cloudflare account with no local record it ever
+  // existed. Every external probe (2E) authenticates with the old token's secret until
+  // whatever picks up the new one runs, so the orphaned window is not cosmetic — probes
+  // fail for real. `getMonitorOnly` exists on the store specifically to detect this case
+  // without `get()`'s stricter, Phase-3A-only completeness check getting in the way.
+  const monitorOnly = await deps.store.getMonitorOnly();
+  if (monitorOnly) return completeHumanPolicy(deps, monitorOnly);
+
   const token = await deps.client.createServiceToken(MONITOR_TOKEN_NAME);
 
   let monitorPolicy: { id: string };
@@ -332,6 +378,56 @@ async function createAccessPolicies(deps: {
     expiresAt: token.expiresAt,
   };
   await deps.store.set(record, token.clientSecret);
+  return record;
+}
+
+/**
+ * Completes an install that already has the monitor half — the Phase 2 upgrade path (see
+ * `createAccessPolicies`'s own doc comment). Creates ONLY the human policy; the existing
+ * token and monitor policy are carried through unchanged, never recreated and never
+ * re-rotated. No new service token means no compensating delete on failure either — unlike
+ * `createAccessPolicies`'s own token-creation path, there is nothing THIS call made that
+ * needs unwinding if `createEmailPolicy` throws; the existing monitor token and policy are
+ * exactly as usable after a failed attempt as before it, so the error is simply propagated.
+ *
+ * `store.set()` always rewrites the secret alongside the four settings (`set()`'s own doc
+ * comment — there is no "settings-only" write on this store), so the existing plaintext
+ * secret is read back via `getCredentials()` — the one method on this store that reads it
+ * without requiring `get()`'s full-completeness check — and written back byte-for-byte. If
+ * it is somehow missing (the token id recorded with no paired secret — not reachable through
+ * this store's own transactional `set()`, only through direct tampering), this throws rather
+ * than guessing: inventing a placeholder secret would silently break every external probe's
+ * authentication, which is a worse outcome than a loud failure here.
+ */
+async function completeHumanPolicy(
+  deps: { store: AccessPoliciesStore; client: CloudflareClient; db: Db },
+  monitorOnly: {
+    tokenId: string;
+    clientId: string;
+    monitorPolicyId: string;
+    expiresAt: number | null;
+  },
+): Promise<AccessPolicies> {
+  const credentials = await deps.store.getCredentials();
+  if (!credentials) {
+    throw new Error(
+      "the monitor token's id is recorded but its secret is not — cannot complete the human " +
+        "policy without re-deriving a secret this store never had; this indicates the local " +
+        "record was tampered with outside of AccessPoliciesStore.set()",
+    );
+  }
+
+  const emails = await enabledUserEmails(deps.db);
+  const humanPolicy = await deps.client.createEmailPolicy(HUMAN_POLICY_NAME, emails);
+
+  const record: AccessPolicies = {
+    tokenId: monitorOnly.tokenId,
+    clientId: monitorOnly.clientId,
+    monitorPolicyId: monitorOnly.monitorPolicyId,
+    humanPolicyId: humanPolicy.id,
+    expiresAt: monitorOnly.expiresAt,
+  };
+  await deps.store.set(record, credentials.clientSecret);
   return record;
 }
 

@@ -373,6 +373,42 @@ describe("ensureAccessPolicies", () => {
     expect(calls.createEmailPolicy).toHaveLength(2);
   });
 
+  it("completes only the human policy when the monitor half already exists — the Phase 2 upgrade path", async () => {
+    // The carried fix from Task 2's report: `get()` requires the human policy too, so an
+    // install that already ran Phase 2's `ensureMonitorAccess` (monitor token + policy,
+    // no human policy) used to fall through to full recreation here — a NEW service token,
+    // orphaning the old one in the account and failing every external probe until the new
+    // one propagates. This proves the fix: the existing token id survives unchanged, and
+    // no new token is ever requested.
+    const { store, db, secrets } = await makeStore();
+    const { client, calls } = fakeClient();
+    await insertUser(db, { email: "admin@example.com" });
+    await db.insert(settings).values([
+      { key: "cloudflare.monitor.token_id", value: "existing-token" },
+      { key: "cloudflare.monitor.client_id", value: "existing-client" },
+      { key: "cloudflare.monitor.policy_id", value: "existing-monitor-policy" },
+    ]);
+    await secrets.set(MONITOR_CLIENT_SECRET_KEY, "existing-secret");
+
+    const result = await ensureAccessPolicies({ store, client, db });
+
+    expect(result).toEqual({
+      tokenId: "existing-token",
+      clientId: "existing-client",
+      monitorPolicyId: "existing-monitor-policy",
+      humanPolicyId: "policy-human",
+      expiresAt: null,
+    });
+    expect(calls.createServiceToken).toBe(0);
+    expect(calls.createMonitorPolicy).toBe(0);
+    expect(calls.createEmailPolicy).toEqual([
+      { name: HUMAN_POLICY_NAME, emails: ["admin@example.com"] },
+    ]);
+    // The secret is carried through byte-for-byte, never rewritten.
+    await expect(secrets.get(MONITOR_CLIENT_SECRET_KEY)).resolves.toBe("existing-secret");
+    await expect(store.get()).resolves.toEqual(result);
+  });
+
   it("deletes the token if monitor-policy creation fails, and records nothing", async () => {
     const { store, db } = await makeStore();
     const { client, calls } = fakeClient({
