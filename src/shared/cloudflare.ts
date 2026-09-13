@@ -105,3 +105,14 @@ export type CloudflareFault =
 export type MonitorAccessStatus =
   | { configured: false }
   | { configured: true; clientId: string; policyId: string; expiresAt: number | null };
+
+/**
+ * `GET /api/cloudflare/access`'s shape — a discriminated union on `configured`, the same
+ * pattern `CloudflareStatus`/`MonitorAccessStatus` use and for the same reason: a caller
+ * cannot accidentally read `teamDomain`/`aud` off a status that has none. Reflects
+ * `resolveAccessSettings` (2E Task 2) exactly: `null` there is `{ configured: false }`
+ * here, never a half-filled object.
+ */
+export type AccessConfigStatus =
+  | { configured: false }
+  | { configured: true; teamDomain: string; aud: string };

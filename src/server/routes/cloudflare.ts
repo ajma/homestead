@@ -1,7 +1,12 @@
-import type { CloudflareZone, MonitorAccessStatus } from "@shared/cloudflare.js";
+import type {
+  AccessConfigStatus,
+  CloudflareZone,
+  MonitorAccessStatus,
+} from "@shared/cloudflare.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { audit } from "../audit.js";
+import { resolveAccessSettings } from "../auth/access-settings.js";
 import { requireCapability } from "../auth/context.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
@@ -225,5 +230,23 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
       const fault = faultOf(error);
       return reply.code(502).send({ error: "cloudflare_error", fault });
     }
+  });
+
+  /**
+   * Read-only status of the resolved Access team domain and audience — same `cf:read`
+   * gate as the other status routes above, and the same "status is a local read" shape:
+   * `resolveAccessSettings` never calls Cloudflare, it only reads the environment and
+   * `settings`/`exposures` (2E Task 2). `null` there becomes `{ configured: false }`
+   * here, the same discriminated-union treatment every other status route in this file
+   * gives its own nullable record.
+   */
+  app.get("/api/cloudflare/access", async (request) => {
+    requireCapability(request, "cf:read");
+    const resolved = await resolveAccessSettings({ db, config: app.deps.config });
+    return (
+      resolved
+        ? { configured: true, teamDomain: resolved.teamDomain, aud: resolved.aud }
+        : { configured: false }
+    ) satisfies AccessConfigStatus;
   });
 }
