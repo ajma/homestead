@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
 import { SETUP_STEPS, type SetupState } from "@shared/setup.js";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App, queryClient } from "@web/App";
 import type { Me } from "@web/auth/useSession";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -249,6 +249,86 @@ describe("the admin route guard", () => {
     renderAt("/settings");
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy());
+  });
+});
+
+describe("moving between edit tabs by clicking, not just visiting the URL directly", () => {
+  // The bug as reported: from `/apps/metube/overview`, clicking the Exposure tab landed
+  // on `/apps/metube/overview/exposure` instead of `/apps/metube/exposure`. Every test
+  // above this one — and every test in `EditApp.test.tsx` — proves a tab renders once
+  // `renderAt`/`mount` has already put the URL there directly; none of them click a
+  // `<NavLink>` to get there, which is exactly the path a real user takes and the one
+  // Phase 2D's own lesson says to test. `/apps/:slug/*` (before this fix) is a splat
+  // route, and a *relative* `<Link>`/`<NavLink>` rendered by its element resolves
+  // against the parent's matched pathname *including* the splat capture — so once any
+  // tab is open, every relative tab link on the page, not only Exposure's, resolves
+  // relative to the currently-open tab instead of the app root. This exercises that
+  // claim against the real production route tree in `App.tsx`, through `createBrowserRouter`
+  // and real `window.location`, the same way the browser itself resolves the link.
+  it("lands on /apps/jellyfin/exposure when clicking Exposure from the overview tab", async () => {
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/overview");
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Exposure" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("link", { name: "Exposure" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/apps/jellyfin/exposure"));
+  });
+
+  it("lands on /apps/jellyfin/containers when clicking Containers from the overview tab", async () => {
+    // Not the tab the user named — proving the fix (and, before it, the break) is not
+    // specific to Exposure but applies to every sibling tab alike.
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/overview");
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Containers" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("link", { name: "Containers" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/apps/jellyfin/containers"));
+  });
+
+  it("lands on /apps/jellyfin/overview when clicking Overview from a non-overview tab", async () => {
+    // The reverse direction, and a starting tab other than the one the bug report named
+    // — the splat capture is nonempty from any tab, not only `overview`.
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/containers");
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Overview" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("link", { name: "Overview" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/apps/jellyfin/overview"));
+  });
+
+  it("lands on /apps/jellyfin/exposure when clicking Exposure from the compose tab", async () => {
+    // Neither endpoint of this click is the pair the bug report named, and the compose
+    // tab is the one behind `React.lazy` — proving the fix holds for a lazy-loaded
+    // starting tab too, not only the eagerly-rendered ones above.
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    const { container } = renderAt("/apps/jellyfin/compose");
+
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+    fireEvent.click(screen.getByRole("link", { name: "Exposure" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/apps/jellyfin/exposure"));
+  });
+});
+
+describe("an edit url with an unknown trailing segment", () => {
+  // `/apps/:slug/*`'s splat used to make this segment harmless by construction: it
+  // always matched the parent route, so a typo'd or stale trailing segment left the
+  // app shell on screen with a blank tab body rather than losing the app entirely.
+  // Dropping `/*` (the fix above) means this URL no longer matches `/apps/:slug` by
+  // itself — without a child route to catch it, it would instead fall through to the
+  // top-level `path="*"` catch-all a few lines below `/apps/:slug` in `App.tsx` and
+  // bounce the whole app to `/`, losing the slug the user actually typed. The child
+  // `<Route path="*" element={<RedirectToOverview />} />` added alongside the named
+  // tabs is what keeps this landing back inside the same app instead.
+  it("still lands inside the app, on its overview tab, rather than bouncing to the launcher", async () => {
+    stubMe({ role: "admin" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/nonsense");
+
+    await waitFor(() => expect(window.location.pathname).toBe("/apps/jellyfin/overview"));
+    expect(screen.getByRole("heading", { name: /Jellyfin/ })).toBeTruthy();
   });
 });
 
