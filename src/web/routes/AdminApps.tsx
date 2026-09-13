@@ -6,6 +6,7 @@ import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { JobOutput } from "@web/components/JobOutput";
 import { StatusChip } from "@web/components/StatusChip";
 import { describeActionError, useAppActions } from "@web/components/useAppActions";
+import { PAGE_SHELL } from "@web/lib/density";
 import { relativeTime } from "@web/lib/relative-time";
 import { useNow } from "@web/lib/use-now";
 import { AdoptDialog } from "@web/routes/AdoptDialog";
@@ -126,7 +127,7 @@ export function AdminApps() {
   const apps = data ?? [];
 
   return (
-    <div className="mx-auto max-w-5xl p-4">
+    <div className={PAGE_SHELL}>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="mr-auto text-lg font-semibold">Apps</h1>
         <button

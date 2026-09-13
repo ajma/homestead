@@ -2,6 +2,7 @@ import type { LauncherApp } from "@shared/launcher";
 import { useLauncherApps } from "@web/api/launcher";
 import { AppCard } from "@web/components/AppCard";
 import { HealthPanel } from "@web/components/HealthPanel";
+import { PAGE_SHELL, SECTION_GAP } from "@web/lib/density";
 import { useMemo, useState } from "react";
 
 const UNGROUPED = "Apps";
@@ -51,7 +52,7 @@ export function Launcher() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl p-4">
+    <div className={PAGE_SHELL}>
       <input
         type="search"
         value={query}
@@ -74,19 +75,21 @@ export function Launcher() {
         <p className="text-sm text-slate-500">No apps match “{query}”.</p>
       )}
 
-      {groupByCategory(filtered).map(([category, apps]) => (
-        <section key={category} className="mb-6">
-          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-            {category}
-          </h2>
-          {/* 2-up on phone, up to 5 across on a wide desktop. */}
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-            {apps.map((app) => (
-              <AppCard key={app.id} app={app} onOpenHealth={() => setOpenApp(app)} />
-            ))}
-          </div>
-        </section>
-      ))}
+      <div className={SECTION_GAP}>
+        {groupByCategory(filtered).map(([category, apps]) => (
+          <section key={category}>
+            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              {category}
+            </h2>
+            {/* 2-up on phone, up to 5 across on a wide desktop. */}
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {apps.map((app) => (
+                <AppCard key={app.id} app={app} onOpenHealth={() => setOpenApp(app)} />
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
 
       {openApp !== null && (
         <HealthPanel

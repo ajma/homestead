@@ -154,4 +154,14 @@ describe("Launcher", () => {
     await waitFor(() => expect(screen.getByRole("dialog", { name: /Gitea/ })).toBeTruthy());
     expect(screen.queryByRole("dialog", { name: /Jellyfin/ })).toBeNull();
   });
+
+  it("uses the shared page shell's width cap, not the old 1024px max-w-5xl", () => {
+    // Pins the density-pass binding: `Launcher.tsx:83`'s `xl:grid-cols-5` only ever
+    // fires once this outer cap is wide enough to let a 5-column grid matter. Asserts
+    // the class string, since jsdom has no layout engine to measure a rendered width.
+    mount(client([tile()]));
+    const shell = screen.getByRole("searchbox").parentElement;
+    expect(shell?.className).toContain("max-w-[1680px]");
+    expect(shell?.className).not.toContain("max-w-5xl");
+  });
 });

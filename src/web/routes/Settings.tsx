@@ -1,4 +1,5 @@
 import { UserManager } from "@web/components/UserManager";
+import { PAGE_SHELL, SECTION_GAP } from "@web/lib/density";
 import { CloudflarePanel } from "@web/routes/settings/CloudflarePanel";
 import { HostCheckPanel } from "@web/routes/setup/HostCheckPanel";
 
@@ -19,7 +20,7 @@ import { HostCheckPanel } from "@web/routes/setup/HostCheckPanel";
  */
 export function Settings() {
   return (
-    <div className="mx-auto max-w-5xl space-y-8 p-4">
+    <div className={`${PAGE_SHELL} ${SECTION_GAP}`}>
       <h1 className="text-lg font-semibold">Settings</h1>
       <section>
         <h2 className="mb-2 text-base font-semibold">Host check</h2>

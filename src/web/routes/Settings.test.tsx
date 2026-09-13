@@ -43,6 +43,29 @@ describe("Settings", () => {
     expect(screen.getByText("Users")).toBeTruthy();
   });
 
+  it("uses the shared page shell's width cap, not the old 1024px max-w-5xl, and the tightened section gap", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    const shell = container.firstElementChild as HTMLElement;
+    expect(shell.className).toContain("max-w-[1680px]");
+    expect(shell.className).not.toContain("max-w-5xl");
+    expect(shell.className).toContain("space-y-6");
+    expect(shell.className).toContain("md:space-y-4");
+  });
+
   it("mounts the host check panel, reused from setup, with no wizard footer", async () => {
     vi.stubGlobal(
       "fetch",
