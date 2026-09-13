@@ -1,5 +1,6 @@
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { useUnsavedChanges } from "@web/lib/use-unsaved-changes";
+import { useWideEditLayout } from "@web/routes/EditApp";
 import { ComposeTab } from "@web/routes/edit/ComposeTab";
 import { EnvTab } from "@web/routes/edit/EnvTab";
 import { useCallback, useState } from "react";
@@ -26,8 +27,14 @@ import { useCallback, useState } from "react";
  * layout is worth that risk for. Tests assert the class list, not measured geometry: jsdom
  * has no layout engine to measure against, but the Tailwind classes below are literal,
  * deterministic strings a test can (and does) read directly.
+ *
+ * Also the one tab that opts out of `EditApp`'s capped, centred content column
+ * (`EDIT_CONTENT_MAX_WIDTH` in `density.ts`) via `useWideEditLayout` — two side-by-side
+ * editors are the one case on this page dense enough to want the full row rather than a
+ * ~1024px column plus the rail.
  */
 export function ConfigTab() {
+  useWideEditLayout();
   const [composeDirty, setComposeDirty] = useState(false);
   const [envDirty, setEnvDirty] = useState(false);
   // Stable identities: `useUnsavedChanges`'s own reporting effect depends on the callback
