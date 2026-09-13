@@ -1,6 +1,7 @@
 import type { AdminApp } from "@shared/dto";
 import type { AppStatus } from "@shared/types";
 import { useAdminApp } from "@web/api/admin";
+import { useAppExposure } from "@web/api/cloudflare";
 import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
 import { ImageUpdates } from "@web/components/ImageUpdates";
@@ -83,6 +84,47 @@ function AppMetadata({ app, now }: { app: AdminApp; now: number }) {
   );
 }
 
+/**
+ * Spec §8's fourth and last rail item: "actions, exposure, image updates, and
+ * metadata" — the one the survey found missing (`ActionBar`, `ImageUpdates`, and
+ * `AppMetadata` below already cover the other three). A compact summary linking to the
+ * `Exposure` tab, not a second copy of that tab's form: just hostname and state.
+ *
+ * Reads `useAppExposure`, the exact hook `ExposureTab` itself reads — no new endpoint or
+ * DTO field, this data already exists per app (`GET /api/apps/:id/expose`); it was
+ * simply never surfaced anywhere but the tab itself. Same `hidden lg:flex` treatment as
+ * `AppMetadata`: mobile's fixed bottom bar has no room for a fifth block, and the
+ * `Exposure` tab is one tap away in the nav either way.
+ */
+function ExposureSummary({ app }: { app: AdminApp }) {
+  const { data } = useAppExposure(app.id);
+
+  return (
+    <Link
+      to="exposure"
+      data-testid="exposure-summary"
+      // Distinct from the nav's own "Exposure" tab link (`TABS`, above) — this rail
+      // card's own text content would otherwise sometimes equal exactly that string
+      // (when nothing exposed/not-exposed line has anything to add), making two links
+      // on the page share one accessible name.
+      aria-label="Exposure summary"
+      className="hidden flex-col gap-1 rounded-2xl border border-slate-200 p-3 text-xs lg:flex dark:border-slate-800"
+    >
+      <span className="font-medium text-slate-900 dark:text-slate-100">Exposure</span>
+      {data === undefined && <span className="text-slate-500 dark:text-slate-400">—</span>}
+      {data?.exposed === false && (
+        <span className="text-slate-500 dark:text-slate-400">Not exposed</span>
+      )}
+      {data?.exposed === true && (
+        <>
+          <span className="truncate text-slate-900 dark:text-slate-100">{data.hostname}</span>
+          <span className="text-slate-500 dark:text-slate-400">{data.state}</span>
+        </>
+      )}
+    </Link>
+  );
+}
+
 function tabLinkClass({ isActive }: { isActive: boolean }): string {
   return `border-b-2 px-3 py-2 text-sm ${
     isActive
@@ -162,6 +204,7 @@ export function EditApp() {
         </main>
         <aside className="fixed inset-x-0 bottom-0 z-10 flex flex-col gap-4 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
           <ActionBar app={app} />
+          <ExposureSummary app={app} />
           <ImageUpdates appId={app.id} />
           <AppMetadata app={app} now={now} />
         </aside>

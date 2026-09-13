@@ -49,3 +49,35 @@ export const SECTION_GAP = "space-y-6 md:space-y-4";
  * compact tile at every viewport and is out of scope for this pass.
  */
 export const CARD_PADDING = "p-4 md:p-5";
+
+/**
+ * Cap for a text input/textarea in a labeled form (e.g. `OverviewTab`'s Display
+ * name/Description/Category fields). Unlike the other tokens above, this one is NOT
+ * gated behind a breakpoint: a single-line field with no cap at all is wrong at every
+ * viewport, not only a wide one — on a desktop it stretches to the full column width for
+ * no reason, and capping it costs a phone nothing since the cap only ever binds once the
+ * container is already wider than this.
+ */
+export const FORM_CONTROL_MAX_WIDTH = "max-w-lg";
+
+/**
+ * A labeled form row: label above control on the phone base (unchanged), label beside
+ * control from `lg:` up. On a form with several fields, switching the axis at `lg:`
+ * recovers most of the vertical space label-above-input wastes once there's room to lay
+ * the two side by side instead — exactly what a 14" laptop is short of.
+ */
+export const FORM_ROW = "flex flex-col gap-1 text-sm lg:flex-row lg:items-start lg:gap-3";
+
+/** Paired with `FORM_ROW`: gives the label a fixed column width once it sits beside the
+ *  control, rather than stretching with the text. `lg:pt-2` lines its baseline up with
+ *  the control's own `py-2` padding now that they sit side by side instead of stacked. */
+export const FORM_LABEL =
+  "font-medium text-slate-900 dark:text-slate-100 lg:w-32 lg:shrink-0 lg:pt-2";
+
+/**
+ * Two short, unrelated panels (a fact-and-action block, not a table) placed side by
+ * side once there's room, stacked below it. For `Settings`' Host check/Cloudflare pair —
+ * a table-shaped section (like `Settings`' own `UserManager`) should stay full width
+ * rather than opt into this.
+ */
+export const TWO_UP_GRID = "grid grid-cols-1 gap-6 lg:grid-cols-2";
