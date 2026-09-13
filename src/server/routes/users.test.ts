@@ -33,10 +33,17 @@ function jsonResponse(body: unknown, status = 200): Response {
  * having been deleted out from under a recorded id, and `setFailing(true)` (pre-existing)
  * makes BOTH the GET and the PUT fail, the same "Cloudflare unreachable" shape either
  * verb would see from a genuine outage.
+ *
+ * `fetchCalls` is a method, not a plain number or a getter property, deliberately: a
+ * getter still reads live through `result.fetchCalls`, but collapses to a frozen snapshot
+ * the instant a caller destructures `{ fetchCalls }` out of the return value, which is
+ * exactly how every caller here uses it. A method survives destructuring — `fetchCalls()`
+ * re-reads the closed-over counter on every call — so `expect(fetchCalls()).toBe(0)` stays
+ * live even after the object it came from is long gone.
  */
 async function configureAccess(app: FastifyInstance): Promise<{
   updateEmailPolicyCalls: Array<{ policyId: string; emails: string[] }>;
-  fetchCalls: number;
+  fetchCalls: () => number;
   setFailing: (failing: boolean) => void;
   setPolicyMissing: (missing: boolean) => void;
 }> {
@@ -118,9 +125,7 @@ async function configureAccess(app: FastifyInstance): Promise<{
 
   return {
     updateEmailPolicyCalls,
-    get fetchCalls() {
-      return fetchCalls;
-    },
+    fetchCalls: () => fetchCalls,
     setFailing: (value: boolean) => {
       failing = value;
     },
@@ -1000,7 +1005,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
         payload: { disabled: true },
       });
       setFailing(true);
-      const callsBeforeDelete = fetchCalls;
+      const callsBeforeDelete = fetchCalls();
 
       const res = await app.inject({
         method: "DELETE",
@@ -1010,7 +1015,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
 
       expect(res.statusCode).toBe(204);
       // Already excluded from the policy — no email to remove, so no call was made.
-      expect(fetchCalls).toBe(callsBeforeDelete);
+      expect(fetchCalls()).toBe(callsBeforeDelete);
       await app.close();
     });
   });
@@ -1040,7 +1045,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({ error: "last_admin" });
       expect(updateEmailPolicyCalls).toHaveLength(0);
-      expect(fetchCalls).toBe(0);
+      expect(fetchCalls()).toBe(0);
       await app.close();
     });
 
@@ -1060,7 +1065,7 @@ describe("Cloudflare Access sync (Task 3)", () => {
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({ error: "last_admin" });
       expect(updateEmailPolicyCalls).toHaveLength(0);
-      expect(fetchCalls).toBe(0);
+      expect(fetchCalls()).toBe(0);
       await app.close();
     });
   });
@@ -1148,6 +1153,47 @@ describe("Cloudflare Access sync (Task 3)", () => {
 
       const accessPoliciesStore = new AccessPoliciesStore(app.deps.db, app.deps.secrets);
       expect(await accessPoliciesStore.get()).toBeNull();
+      await app.close();
+    });
+
+    // Both tests above pin the observable *effects* of the self-heal (the delete/disable
+    // still succeeds, `AccessPoliciesStore.get()` goes back to reporting incomplete) but
+    // neither reads the audit table — `cloudflare.access_policy_missing` is the only
+    // record that a policy was ever found missing and cleared, rather than, say, a
+    // deliberate `AccessPoliciesStore` reset. Nothing asserted it existed at all.
+    it("audits the self-heal as its own event, naming the policy that was found missing", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const { setPolicyMissing } = await configureAccess(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/users",
+        headers: { cookie },
+        payload: {
+          email: "viewer@example.com",
+          password: "correct-horse-battery",
+          name: "Viewer",
+          role: "viewer",
+          scopeAllApps: true,
+        },
+      });
+      const viewerId = created.json().id as string;
+      setPolicyMissing(true);
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: `/api/users/${viewerId}`,
+        headers: { cookie },
+      });
+
+      expect(res.statusCode).toBe(204);
+      const { auditLog } = await import("../db/schema.js");
+      const rows = await app.deps.db
+        .select()
+        .from(auditLog)
+        .where(eq(auditLog.action, "cloudflare.access_policy_missing"));
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0]?.detail)).toContain(HUMAN_POLICY_ID);
       await app.close();
     });
   });
