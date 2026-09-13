@@ -6,6 +6,7 @@ import { audit } from "../audit.js";
 import { requireCapability } from "../auth/context.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
+import { deprovision } from "../cloudflare/deprovision.js";
 import { exposeSteps } from "../cloudflare/expose.js";
 import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
@@ -121,5 +122,59 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
     }
 
     return reply.code(202).send({ jobId });
+  });
+
+  app.delete("/api/apps/:id/expose", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:write");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    // Same 404-not-403/409 reasoning as the POST route above: an app outside the
+    // caller's scope (or that does not exist at all) must never distinguish itself from
+    // "not exposed" or any other 409 below — a 409 here would confirm the app exists.
+    const appRow = await loadApp(db, ctx, id);
+    if (!appRow) return reply.code(404).send({ error: "not_found" });
+
+    const [exposure] = await db.select().from(exposures).where(eq(exposures.appId, id));
+    if (!exposure) {
+      return reply.code(409).send({ error: "not_exposed" });
+    }
+
+    const credentials = await credentialStore.get();
+    if (!credentials) {
+      return reply.code(409).send({ error: "not_configured" });
+    }
+
+    const client = createCloudflareClient({
+      token: credentials.token,
+      accountId: credentials.accountId,
+      fetch: app.deps.fetch,
+    });
+
+    // Audited BEFORE `deprovision` runs, not after — same reasoning as the POST route's
+    // own audit call: a crash partway through a real, multi-Cloudflare-call teardown
+    // must still leave a record that someone asked for it, not zero audit rows for the
+    // one action that starts pulling live resources down.
+    await audit(db, ctx, {
+      action: "cloudflare.expose_deprovision_started",
+      targetType: "app",
+      targetId: id,
+      detail: { hostname: exposure.hostname },
+    });
+
+    const outcome = await deprovision({ db, client, tunnelConfigLock }, exposure);
+
+    if (!outcome.ok) {
+      // Not a rollback and not a 4xx — the caller's request was well-formed and the app
+      // WAS exposed; some subset of the four resources could not be removed right now.
+      // The `exposures` row still exists (deliberately — see `deprovision.ts`'s own doc
+      // comment on why it is deleted last) with the flags for what succeeded already
+      // flipped, so calling this same endpoint again resumes exactly where it left off.
+      return reply.code(500).send({
+        error: "deprovision_incomplete",
+        failures: outcome.failures.map((f) => f.resource),
+      });
+    }
+
+    return reply.code(200).send({ ok: true });
   });
 }

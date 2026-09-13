@@ -35,7 +35,12 @@ function verifyingFetch(): typeof fetch {
  * a real (fake) HTTP exchange without ever leaving the process. No test in this file
  * makes a real network call, matching `cloudflare-tunnel.test.ts`'s own `tunnelFetch`.
  */
-function exposeFetch(): { fetch: typeof fetch; ingress: () => unknown[] } {
+function exposeFetch(): {
+  fetch: typeof fetch;
+  ingress: () => unknown[];
+  dnsRecords: Map<string, { id: string }>;
+  accessApps: Map<string, { id: string; aud: string }>;
+} {
   let ingress: Array<{ hostname?: string; service: string }> = [{ service: "http_status:404" }];
   const dnsRecords = new Map<string, { id: string }>();
   const accessApps = new Map<string, { id: string; aud: string }>();
@@ -97,7 +102,7 @@ function exposeFetch(): { fetch: typeof fetch; ingress: () => unknown[] } {
     throw new Error(`cloudflare-expose.test.ts: unexpected fetch ${method} ${url.pathname}`);
   }) as unknown as typeof fetch;
 
-  return { fetch: fetchFn, ingress: () => ingress };
+  return { fetch: fetchFn, ingress: () => ingress, dnsRecords, accessApps };
 }
 
 async function withFullSetup() {
@@ -335,6 +340,146 @@ describe("POST /api/apps/:id/expose", () => {
       kind: "http_external",
       target: "https://jellyfin.example.com",
     });
+
+    await app.close();
+  });
+});
+
+describe("DELETE /api/apps/:id/expose", () => {
+  it("requires an admin capability — a viewer gets 403", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: viewerCookie } = await createViewer(app, adminCookie);
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("gives a scoped admin 404 for an app outside their scope, not 409", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: scopedCookie } = await createScopedAdmin(app, adminCookie, { appIds: [] });
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie: scopedCookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("404s for a nonexistent app", async () => {
+    const { app, cookie } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: "/api/apps/does-not-exist/expose",
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("refuses an app that is in scope but was never exposed", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("not_exposed");
+    await app.close();
+  });
+
+  it("deprovisions an exposed app end to end: 200, ingress restored, DNS and Access removed, probe gone, row gone", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed, ingress, dnsRecords, accessApps } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const exposeRes = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+    expect(exposeRes.statusCode).toBe(202);
+    expect(dnsRecords.has("jellyfin.example.com")).toBe(true);
+    expect(accessApps.has("jellyfin.example.com")).toBe(true);
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(ingress()).toEqual([{ service: "http_status:404" }]);
+    expect(dnsRecords.has("jellyfin.example.com")).toBe(false);
+    expect(accessApps.has("jellyfin.example.com")).toBe(false);
+
+    const [exposureRow] = await app.deps.db
+      .select()
+      .from(exposures)
+      .where(eq(exposures.appId, appId));
+    expect(exposureRow).toBeUndefined();
+
+    const [probeRow] = await app.deps.db.select().from(probes).where(eq(probes.appId, appId));
+    expect(probeRow).toBeUndefined();
+
+    await app.close();
+  });
+
+  it("reports a partial failure without deleting the exposures row", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const exposeRes = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+    expect(exposeRes.statusCode).toBe(202);
+
+    // Once exposed, make every subsequent Cloudflare call fail — a 400 (`client` fault)
+    // rather than a thrown network error, so `createCloudflareClient`'s retry loop does
+    // not spend real backoff time on a fault it never retries. The deprovision route
+    // must still respond (not throw), report which resources failed, and leave the row
+    // in place.
+    app.deps.fetch = (async () =>
+      jsonResponse(
+        { success: false, errors: [{ code: 1000, message: "boom" }] },
+        400,
+      )) as unknown as typeof fetch;
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(500);
+    const body = res.json() as { error: string; failures: string[] };
+    expect(body.error).toBe("deprovision_incomplete");
+    expect(body.failures.length).toBeGreaterThan(0);
+
+    const [exposureRow] = await app.deps.db
+      .select()
+      .from(exposures)
+      .where(eq(exposures.appId, appId));
+    expect(exposureRow).toBeDefined();
 
     await app.close();
   });
