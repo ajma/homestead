@@ -1,3 +1,4 @@
+import type { Step } from "@server/apps/step-sequence";
 import { apps, jobs } from "@server/db/schema";
 import type { TestApp } from "@server/test-helpers";
 import { buildTestApp, createScopedAdmin, createViewer, signUpAdmin } from "@server/test-helpers";
@@ -473,6 +474,106 @@ describe("system apps", () => {
       headers: { cookie: outOfScope.cookie },
     });
     expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+});
+
+describe("GET /api/jobs/:jobId/stream against a job with no app", () => {
+  // 2C Task 4: `StepJobRunner`-run sequences (the tunnel provision job, and any future
+  // one) record with `appId: null` and have no `live` handle at all (`StepJobRunner`'s own
+  // class doc: "there is no live/cancel here"). Before this fix, `!live` alone meant
+  // "already finished" here, so attaching to one of these while it was still running
+  // reported `done` immediately with whatever the (still-empty) persisted `output` column
+  // held — a false completion a client cannot tell from a real one.
+  //
+  // A trivial one-step, gated sequence run directly through `app.deps.stepJobs`, not the
+  // Cloudflare route: this is testing `jobs.ts`'s general handling of "no live handle, no
+  // app", not anything Cloudflare-specific, and a fake step is enough to hold the job in
+  // `running` on demand.
+  function gatedNoAppStep(): { steps: Array<Step<Record<string, never>>>; release: () => void } {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const steps: Array<Step<Record<string, never>>> = [
+      {
+        name: "wait",
+        async run() {
+          await gate;
+        },
+        async undo() {},
+      },
+    ];
+    if (!release) throw new Error("release was not assigned synchronously");
+    return { steps, release };
+  }
+
+  it("holds the stream open until the job reaches a terminal status, then sends the real result", async () => {
+    const app = await buildTestApp();
+    const { cookie, id: userId } = await signUpAdmin(app);
+    const { steps, release } = gatedNoAppStep();
+
+    const startPromise = app.deps.stepJobs.start(null, "test_no_app_kind", steps, {}, userId);
+    const foundJobId = await until(
+      async () => {
+        const [row] = await app.deps.db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.kind, "test_no_app_kind"));
+        return row?.id ?? null;
+      },
+      (found) => found !== null,
+    );
+    if (foundJobId === null) throw new Error("job row was never inserted");
+    const jobId = foundJobId;
+
+    const streaming = app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}/stream`,
+      headers: { cookie },
+    });
+    // Give the handler a moment to reach the polling branch before proving it is still
+    // waiting — a coin-flip win by finishing instantly would pass for the wrong reason.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const [stillRunning] = await app.deps.db.select().from(jobs).where(eq(jobs.id, jobId));
+    expect(stillRunning?.status).toBe("running");
+
+    release();
+    const res = await streaming;
+    await startPromise;
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("event: done");
+    expect(res.body).toContain('"status":"succeeded"');
+
+    const [finished] = await app.deps.db.select().from(jobs).where(eq(jobs.id, jobId));
+    expect(finished?.status).toBe("succeeded");
+    await app.close();
+  });
+
+  it("still answers immediately for a no-app job that had already finished", async () => {
+    const app = await buildTestApp();
+    const { cookie, id: userId } = await signUpAdmin(app);
+    const steps: Array<Step<Record<string, never>>> = [
+      { name: "noop", async run() {}, async undo() {} },
+    ];
+    const { id: jobId } = await app.deps.stepJobs.start(
+      null,
+      "test_no_app_kind",
+      steps,
+      {},
+      userId,
+    );
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/jobs/${jobId}/stream`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("event: done");
+    expect(res.body).toContain('"status":"succeeded"');
     await app.close();
   });
 });

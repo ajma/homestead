@@ -5,11 +5,48 @@ import { z } from "zod";
 import { JOB_KINDS, JobBusyError, type JobKind } from "../apps/job-runner.js";
 import { audit } from "../audit.js";
 import { requireCapability } from "../auth/context.js";
+import type { Db } from "../db/client.js";
 import { jobs } from "../db/schema.js";
 import { sseResponse } from "../sse.js";
 import { loadApp } from "./apps.js";
 
 const kindSchema = z.enum(JOB_KINDS);
+
+/** Poll interval for `waitForTerminalJob` below — short enough that a test gating a
+ * fake compose call and releasing it a moment later does not sit around, and nothing
+ * about this path is on a request-latency budget a human would notice at this
+ * granularity: the sequence it is waiting on already runs for seconds to minutes. */
+const NO_LIVE_POLL_MS = 200;
+
+/**
+ * Waits for a job row with no `live` handle to reach a terminal status, for the `/stream`
+ * route below. Exists for exactly one reason: `JobRunner.live` only ever knows about jobs
+ * it started itself (`JOB_KINDS`) — a step sequence run through `StepJobRunner` has no
+ * live registry at all (its own class doc: "there is no live/cancel here"), so `!live` is
+ * true for one of those the entire time it runs, not just once it finishes. Without this,
+ * the route's existing "no live handle means already finished" branch would report `done`
+ * on a job that might still fail and roll back.
+ *
+ * Resolves with the finished row, or `undefined` if the client disconnected first —
+ * mirrors the live-job branch below, which also stops sending once `disconnected` is
+ * true rather than continuing to hold a request object for a client that has left.
+ */
+async function waitForTerminalJob(
+  db: Db,
+  jobId: string,
+  closed: Promise<void>,
+): Promise<typeof jobs.$inferSelect | undefined> {
+  let disconnected = false;
+  void closed.then(() => {
+    disconnected = true;
+  });
+  while (!disconnected) {
+    const [row] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+    if (row && row.status !== "running" && row.status !== "queued") return row;
+    await new Promise((resolve) => setTimeout(resolve, NO_LIVE_POLL_MS));
+  }
+  return undefined;
+}
 
 export async function jobRoutes(app: FastifyInstance): Promise<void> {
   const { db, jobs: runner } = app.deps;
@@ -109,13 +146,33 @@ export async function jobRoutes(app: FastifyInstance): Promise<void> {
     const { jobId } = z.object({ jobId: z.string() }).parse(request.params);
 
     const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
-    if (!job?.appId) return reply.code(404).send({ error: "not_found" });
-    if (!(await loadApp(db, ctx, job.appId))) return reply.code(404).send({ error: "not_found" });
+    if (!job) return reply.code(404).send({ error: "not_found" });
+    // A `null` `appId` (a step sequence with no app to scope to yet — `StepJobRunner.
+    // start`'s own doc, e.g. 2C's tunnel provision) has nothing left to check here:
+    // `requireCapability` above already gates this whole route to the same admin-only
+    // capability every other job route in this file uses. Only an app-scoped job goes
+    // through `loadApp`'s visibility check.
+    if (job.appId !== null && !(await loadApp(db, ctx, job.appId))) {
+      return reply.code(404).send({ error: "not_found" });
+    }
 
     const live = runner.live(jobId);
     const sse = sseResponse(request, reply);
 
     if (!live) {
+      if (job.status === "running" || job.status === "queued") {
+        // See `waitForTerminalJob`'s doc: no live handle does not mean finished for a
+        // job `JobRunner` never started. Hold the connection open — the same guarantee
+        // a live job's own `sse.closed` wiring gives — until the row is terminal.
+        const finished = await waitForTerminalJob(db, jobId, sse.closed);
+        sse.send("output", { text: finished?.output ?? job.output ?? "", stream: "stdout" });
+        sse.send("done", {
+          status: finished?.status ?? job.status,
+          exitCode: finished?.exitCode ?? job.exitCode,
+        });
+        sse.close();
+        return;
+      }
       // Already finished. Send what was persisted and close, so the client does not have
       // to know whether it attached in time.
       sse.send("output", { text: job.output ?? "", stream: "stdout" });
