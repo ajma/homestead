@@ -31,6 +31,38 @@ describe("bootstrap", () => {
     expect(second.statusCode).toBe(409);
     await app.close();
   });
+
+  it("does not permanently lock out setup when the bootstrap email has mixed case", async () => {
+    // Better-Auth lowercases email at signup, so `users.email` is `bob@x.com` regardless
+    // of what was submitted. Before normalising the comparison, the promotion UPDATE
+    // compared against the RAW `Bob@X.com` body, matched nothing, and returned 409
+    // `already_initialised` on the very first bootstrap attempt — leaving an unpromoted
+    // viewer as the only user and no route left that can ever create an admin.
+    const app = await buildTestApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/setup/admin",
+      payload: { email: "Bob@X.com", password: "correct-horse-battery", name: "Bob" },
+    });
+    expect(res.statusCode).toBe(201);
+
+    const cookie = String(res.headers["set-cookie"] ?? "").split(";")[0] ?? "";
+    const me = await app.inject({ method: "GET", url: "/api/me", headers: { cookie } });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ role: "admin", scopeAllApps: true });
+
+    // The installation must not be stuck: an admin genuinely exists and can sign in.
+    const status = await app.inject({ method: "GET", url: "/api/setup/status" });
+    expect(status.json()).toMatchObject({ needsSetup: false });
+
+    const signIn = await app.inject({
+      method: "POST",
+      url: "/api/auth/sign-in/email",
+      payload: { email: "Bob@X.com", password: "correct-horse-battery" },
+    });
+    expect(signIn.statusCode).toBe(200);
+    await app.close();
+  });
 });
 
 describe("user management", () => {
@@ -57,6 +89,29 @@ describe("user management", () => {
     });
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({ role: "viewer", scopeAllApps: false });
+    await app.close();
+  });
+
+  it("applies the requested role and scope to a mixed-case email exactly as a lowercase one would", async () => {
+    // Before normalising the comparison, this matched the follow-up role/scope UPDATE
+    // against zero rows (Better-Auth always stores email lowercase), so the created user
+    // silently kept its default role and scope and the response body was empty.
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/users",
+      headers: { cookie },
+      payload: {
+        email: "Carol@Example.com",
+        password: "correct-horse-battery",
+        name: "Carol",
+        role: "admin",
+        scopeAllApps: true,
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ role: "admin", scopeAllApps: true });
     await app.close();
   });
 
