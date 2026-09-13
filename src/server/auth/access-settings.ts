@@ -62,9 +62,14 @@ export async function recordAccessTeamDomain(
   return { wrote: true };
 }
 
-/** The `undo` half of `recordAccessTeamDomain` — deletes only what that call itself
- * wrote, never a value that predates it (the same "never delete what you merely found"
- * rule every adopted resource in `cloudflare/expose.ts` follows). */
+/** The `undo` half of `recordAccessTeamDomain` — an unconditional delete by key, nothing
+ * more. This function itself carries no "never delete what you merely found" guard: it
+ * deletes whatever is there, full stop. That guard exists entirely in the one caller,
+ * `cloudflare/expose.ts`'s `undo` (`if (!ctx.teamDomainRecorded) return;`), which only
+ * calls this when THIS sequence's own `recordAccessTeamDomain` reported it actually wrote
+ * the value (`wrote`, not "a value now exists"). A second caller added later without that
+ * same check would wipe an admin's hand-set team domain — see this module's own
+ * `recordAccessTeamDomain` for why `wrote` is the thing to gate on, not presence. */
 export async function clearAccessTeamDomain(db: Db): Promise<void> {
   await db.delete(settings).where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
 }

@@ -35,10 +35,18 @@ const HEALTHY_HOST_CHECK: HostCheck = {
  * that only knew about `host-check` would hand either a `SetupState` shaped nothing
  * like what it asked for, the same problem this function already solved for
  * `StepVerifyHost`. `finishedState`, when given, is what `POST /api/setup/finish`
- * answers with — standing in for the server's own one-way `completedAt` write. */
+ * answers with — standing in for the server's own one-way `completedAt` write.
+ * `cloudflareConfigured` answers `GET /api/cloudflare/credentials` — `FinishScreen` reads
+ * it to decide which of its two closing sentences to show (Phase 2F whole-branch review,
+ * F6); defaults to not configured, the common case for every test that doesn't care. */
 function stubState(
   state: SetupState,
-  options: { users?: ManagedUser[]; apps?: AdminApp[]; finishedState?: SetupState } = {},
+  options: {
+    users?: ManagedUser[];
+    apps?: AdminApp[];
+    finishedState?: SetupState;
+    cloudflareConfigured?: boolean;
+  } = {},
 ) {
   vi.stubGlobal(
     "fetch",
@@ -46,6 +54,19 @@ function stubState(
       if (url === "/api/setup/host-check") return json(200, HEALTHY_HOST_CHECK);
       if (url === "/api/users") return json(200, options.users ?? []);
       if (url === "/api/apps") return json(200, options.apps ?? []);
+      if (url === "/api/cloudflare/credentials") {
+        return json(
+          200,
+          options.cloudflareConfigured
+            ? {
+                configured: true,
+                accountId: "acct-1",
+                tokenHint: "abcd",
+                verifiedAt: 1_800_000_000,
+              }
+            : { configured: false },
+        );
+      }
       if (url === "/api/setup/finish" && (init?.method ?? "GET") === "POST") {
         return json(200, options.finishedState ?? { ...state, completedAt: 1_800_000_000 });
       }
@@ -411,6 +432,18 @@ describe("SetupWizard", () => {
       // against the sentence itself, not a bare `/Cloudflare/` — that now also matches
       // the step indicator's own "Cloudflare" label, above, once the step exists for real.
       expect(screen.getByText(/isn't set up yet/)).toBeTruthy();
+    });
+
+    it("tells a user who just configured Cloudflare that it's set up, not that it isn't", async () => {
+      // Phase 2F whole-branch review, F6: this screen used to say unconditionally that
+      // Cloudflare "isn't set up yet", even immediately after `StepCloudflare` had just
+      // saved credentials and provisioned a tunnel.
+      stubState(ALL_DONE, { apps: [], users: [managedUser()], cloudflareConfigured: true });
+      mount();
+
+      await waitFor(() => expect(screen.getByRole("heading", { name: /set up/i })).toBeTruthy());
+      await waitFor(() => expect(screen.getByText(/Cloudflare exposure is set up/)).toBeTruthy());
+      expect(screen.queryByText(/isn't set up yet/)).toBeNull();
     });
 
     it("finishing posts to /api/setup/finish and lands on the launcher", async () => {

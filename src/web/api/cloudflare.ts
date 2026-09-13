@@ -1,12 +1,11 @@
-import {
-  type AccessConfigStatus,
-  type AppExposureStatus,
-  type CloudflareFault,
-  type CloudflareStatus,
-  type CloudflareZone,
-  type MonitorAccessStatus,
-  TUNNEL_PROVISION_TIMEOUT_MS,
-  type TunnelStatus,
+import type {
+  AccessConfigStatus,
+  AppExposureStatus,
+  CloudflareFault,
+  CloudflareStatus,
+  CloudflareZone,
+  MonitorAccessStatus,
+  TunnelStatus,
 } from "@shared/cloudflare.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
@@ -214,25 +213,22 @@ export function describeTunnelError(error: unknown, fallback: string): string {
 }
 
 /**
- * `POST /api/cloudflare/tunnel`. A plain function, not `useMutation`, for a different
- * reason than `useSaveCloudflareCredentials`'s (there is no secret in this call's
- * variables — it takes none): this call needs a `timeoutMs` far longer than `apiFetch`'s
- * 30s default, and `useMutation`'s `mutationFn` has no per-call override for that, only a
- * fixed one baked in at the hook's definition. `TUNNEL_PROVISION_TIMEOUT_MS` is shared
- * with the server (`@shared/cloudflare.js`) precisely because both ends of this one call
- * need to agree: the route does not answer until its whole five-step sequence has
- * finished, so a client timeout shorter than that abandons a request that is still
- * succeeding (or failing and rolling back) on the server, with no jobId ever reaching the
- * browser to check on it.
+ * `POST /api/cloudflare/tunnel`. A plain function, not `useMutation`, for the same reason
+ * `useExposeApp` below is: provisioning creates real resources in the user's Cloudflare
+ * account, so the caller drives its own synchronous `starting` state rather than trusting
+ * `useMutation`'s `isPending` — see `CloudflarePanel`'s own doc comment on `notifyManager`
+ * deferring that flag through a `setTimeout(0)` a second click can land inside of. No
+ * custom `timeoutMs` (this used to need one far longer than `apiFetch`'s 30s default,
+ * shared with the server as `TUNNEL_PROVISION_TIMEOUT_MS`): 2F Task 1 detached this route
+ * from the five-step sequence it kicks off, so it now answers as soon as the job row
+ * exists, well inside the ordinary default — see `useExposeApp`'s identical note.
  */
 export function useProvisionTunnel() {
   const queryClient = useQueryClient();
   return async function provisionTunnel(): Promise<{ jobId: string }> {
-    const result = await apiFetch<{ jobId: string }>(
-      "/api/cloudflare/tunnel",
-      { method: "POST" },
-      { timeoutMs: TUNNEL_PROVISION_TIMEOUT_MS },
-    );
+    const result = await apiFetch<{ jobId: string }>("/api/cloudflare/tunnel", {
+      method: "POST",
+    });
     queryClient.invalidateQueries({ queryKey: cloudflareTunnelKey });
     return result;
   };

@@ -1,6 +1,7 @@
 import { type HostCheck, SETUP_STEPS, type SetupState, type SetupStep } from "@shared/setup.js";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAdminApps } from "@web/api/admin";
+import { useCloudflareStatus } from "@web/api/cloudflare";
 import { hostCheckKey, useCompleteStep, useFinishSetup, useSetupState } from "@web/api/setup";
 import { useUsers } from "@web/api/users";
 import { useRef, useState } from "react";
@@ -51,11 +52,11 @@ export type SetupStepProps = {
   onComplete: () => void;
   /** Reports a failure to the wizard shell, for the case a step can't just render its
    * own inline error (the way `StepCreateAdmin`'s validation and `StepVerifyHost`'s
-   * retry screen already do). Nothing currently calls this — it exists so a future step
-   * has somewhere to put a failure instead of swallowing it or reinventing a channel. */
+   * retry screen already do). `StepCloudflare` is the first caller — a save that fails
+   * verification has nowhere else in this shell to put the message. */
   onFail: (message: string) => void;
-  /** True for a step spec §9 allows skipping (`import`, `users`) — told to the step
-   * rather than left for each one to hard-code which category it's in. */
+  /** True for a step spec §9 allows skipping (`import`, `cloudflare`, `users`) — told to
+   * the step rather than left for each one to hard-code which category it's in. */
   skippable: boolean;
 };
 
@@ -75,10 +76,16 @@ export type SetupStepProps = {
  * question. `invitedCount` subtracts one for the administrator Step 1 always creates
  * before this screen is reachable — the founder wasn't "invited", they signed
  * themselves up, and the sentence below is about the household, not about them.
+ *
+ * `useCloudflareStatus` gates the Cloudflare sentence — 2F added a Cloudflare step
+ * between this screen's writing and its own arrival, and the sentence used to say
+ * unconditionally that Cloudflare "isn't set up yet" even for someone who just watched a
+ * tunnel provision on the previous screen (Phase 2F whole-branch review, F6).
  */
 function FinishScreen({ state }: { state: SetupState }) {
   const apps = useAdminApps();
   const users = useUsers();
+  const cloudflareStatus = useCloudflareStatus();
   const finishSetup = useFinishSetup();
   const [error, setError] = useState<string | null>(null);
   // Set synchronously in the click handler, before `mutate` — the same reason every
@@ -126,8 +133,9 @@ function FinishScreen({ state }: { state: SetupState }) {
           {invitedCount === 1 ? "user" : "users"} invited.
         </p>
         <p className="text-sm text-slate-500">
-          Cloudflare exposure isn't set up yet — that's fine, it can be turned on later from
-          Settings.
+          {cloudflareStatus.data?.configured === true
+            ? "Cloudflare exposure is set up — apps can be exposed from their own Exposure tab."
+            : "Cloudflare exposure isn't set up yet — that's fine, it can be turned on later from Settings."}
         </p>
       </div>
 
@@ -152,7 +160,7 @@ function FinishScreen({ state }: { state: SetupState }) {
 type WizardStep = SetupStep | "finish";
 
 /**
- * First step not yet in `completedSteps`, or `"finish"` once all four are. Computed
+ * First step not yet in `completedSteps`, or `"finish"` once all five are. Computed
  * fresh from the server's own answer on every render — this is the resume point, and
  * the entire reason this phase exists is that it must never come from local navigation
  * state: a reload has to land here, not wherever the user last clicked.
