@@ -53,6 +53,9 @@ function fakeClient(overrides: Partial<CloudflareClient> = {}): CloudflareClient
     listServiceTokens: unusedRead("listServiceTokens"),
     deleteServiceToken: unusedWrite("deleteServiceToken"),
     createMonitorPolicy: unusedWrite("createMonitorPolicy"),
+    createEmailPolicy: unusedWrite("createEmailPolicy"),
+    updateEmailPolicy: unusedWrite("updateEmailPolicy"),
+    getPolicy: unusedRead("getPolicy"),
     ...overrides,
   };
 }
@@ -74,6 +77,8 @@ function writeMethods(client: CloudflareClient) {
     client.rotateServiceToken,
     client.deleteServiceToken,
     client.createMonitorPolicy,
+    client.createEmailPolicy,
+    client.updateEmailPolicy,
   ];
 }
 

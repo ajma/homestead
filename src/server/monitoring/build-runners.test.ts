@@ -1,4 +1,4 @@
-import { MonitorAccessStore } from "@server/cloudflare/monitor-access";
+import { AccessPoliciesStore } from "@server/cloudflare/access-policies";
 import { SecretStore } from "@server/crypto/secrets";
 import { createDb, runMigrations } from "@server/db/client";
 import { buildHttpRunners } from "@server/monitoring/build-runners";
@@ -34,7 +34,7 @@ async function setup() {
   const { db } = await createDb(":memory:");
   await runMigrations(db);
   const secrets = new SecretStore(db, KEY);
-  const monitorStore = new MonitorAccessStore(db, secrets);
+  const monitorStore = new AccessPoliciesStore(db, secrets);
   return { db, secrets, monitorStore };
 }
 
@@ -59,7 +59,13 @@ describe("buildHttpRunners", () => {
   it("sends the exact credentials on record as the Access headers", async () => {
     const { db, secrets, monitorStore } = await setup();
     await monitorStore.set(
-      { tokenId: "token-1", clientId: "the-client-id", policyId: "policy-1", expiresAt: null },
+      {
+        tokenId: "token-1",
+        clientId: "the-client-id",
+        monitorPolicyId: "policy-monitor",
+        humanPolicyId: "policy-human",
+        expiresAt: null,
+      },
       "the-client-secret",
     );
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
@@ -80,7 +86,13 @@ describe("buildHttpRunners", () => {
     // a stale value fails it while a per-call read passes.
     const { db, secrets, monitorStore } = await setup();
     await monitorStore.set(
-      { tokenId: "token-1", clientId: "client-old", policyId: "policy-1", expiresAt: null },
+      {
+        tokenId: "token-1",
+        clientId: "client-old",
+        monitorPolicyId: "policy-monitor",
+        humanPolicyId: "policy-human",
+        expiresAt: null,
+      },
       "secret-old",
     );
     const { impl, calls } = fakeFetch(() => new Response(null, { status: 200 }));
@@ -91,7 +103,13 @@ describe("buildHttpRunners", () => {
     expect(firstHeaders["cf-access-client-secret"]).toBe("secret-old");
 
     await monitorStore.set(
-      { tokenId: "token-1", clientId: "client-new", policyId: "policy-1", expiresAt: null },
+      {
+        tokenId: "token-1",
+        clientId: "client-new",
+        monitorPolicyId: "policy-monitor",
+        humanPolicyId: "policy-human",
+        expiresAt: null,
+      },
       "secret-new",
     );
     await runners.external.run(probe(), ctx);
@@ -103,7 +121,13 @@ describe("buildHttpRunners", () => {
   it("never leaks the secret into the probe result", async () => {
     const { db, secrets, monitorStore } = await setup();
     await monitorStore.set(
-      { tokenId: "token-1", clientId: "the-client-id", policyId: "policy-1", expiresAt: null },
+      {
+        tokenId: "token-1",
+        clientId: "the-client-id",
+        monitorPolicyId: "policy-monitor",
+        humanPolicyId: "policy-human",
+        expiresAt: null,
+      },
       "super-secret-value",
     );
     const { impl } = fakeFetch(() => new Response(null, { status: 500 }));

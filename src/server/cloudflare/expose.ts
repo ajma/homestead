@@ -1,13 +1,40 @@
 import type { IngressRule } from "@shared/cloudflare.js";
+import type { ProbeKind } from "@shared/types.js";
 import { and, eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import type { Step } from "../apps/step-sequence.js";
 import { clearAccessTeamDomain, recordAccessTeamDomain } from "../auth/access-settings.js";
-import type { Db } from "../db/client.js";
+import type { Db, Tx } from "../db/client.js";
 import { retryOnBusy } from "../db/retry.js";
 import { exposures, probes } from "../db/schema.js";
 import type { CloudflareClient } from "./client.js";
 import { removeIngress, spliceIngress } from "./ingress.js";
+
+/**
+ * §6: "The same published ports serve three consumers: LAN devices, the `http_internal`
+ * probe, and the launcher's internal URL. One fact about an app rather than three." This is
+ * that one fact, computed exactly once rather than three call sites each writing their own
+ * `http://localhost:${port}` template literal and risking one of them drifting from the
+ * other two (a stray `https://`, a trailing slash, `127.0.0.1` in one place and `localhost`
+ * in another).
+ *
+ * F4 (whole-branch review, Important): this was true of only ONE of the two callers this
+ * phase actually added — `routes/cloudflare-expose.ts` (the value passed to `exposeSteps`
+ * below as `internalUrl`, used for BOTH the ingress rule's `service` field and the
+ * `http_internal` probe's `target` via `create-probe`) called this function, while
+ * `GET /api/apps/:id/probes/suggestions` (`routes/probes.ts`) still wrote its own
+ * `http://localhost:${port}` literal — the plan's Task 4 asked for that second call site
+ * to be the one that triggers this extraction, and it wasn't done. That gap stopped being
+ * cosmetic the moment `upsertProbe` below started refusing to create or adopt an
+ * `http_internal` probe whose target isn't byte-for-byte equal to what THIS function
+ * produces (`ProbeTargetConflictError`) — a second construction drifting from this one by
+ * even a trailing slash would make every suggestion `probes.ts` offers permanently
+ * rejected by exposure. Both callers now import this rather than reimplement it; a future
+ * launcher-URL caller (§6's third consumer, not built this phase) should do the same.
+ */
+export function internalServiceUrl(port: number): string {
+  return `http://localhost:${port}`;
+}
 
 /**
  * Serialises every write to the ONE tunnel's ingress config: read, splice-or-remove,
@@ -47,15 +74,20 @@ export class TunnelConfigLock {
 }
 
 /**
- * Thrown by `create-probe` (below) when the app's pre-existing `http_external` probe
- * targets something other than the hostname this run is exposing. Fix wave 2's Defect
- * 2: the first version of probe adoption matched purely on `(appId, "http_external")`
- * and adopted whatever it found unconditionally, so an app that already carried its own
- * external check — pointed at some other URL, entirely unrelated to this exposure — ended
- * up with NO probe watching the newly exposed hostname at all, while the UI kept showing
- * a green external probe the whole time (it was still successfully checking its own,
- * unrelated target). Silent, and worse than having no probe: nothing here ever told
- * anyone.
+ * Thrown by `create-probe` (below) when the app's pre-existing `http_external` OR
+ * `http_internal` probe targets something other than what this run is exposing. Fix wave
+ * 2's Defect 2: the first version of probe adoption matched purely on `(appId, kind)` and
+ * adopted whatever it found unconditionally, so an app that already carried its own check —
+ * pointed at some other URL, entirely unrelated to this exposure — ended up with NO probe
+ * watching the newly exposed target at all, while the UI kept showing a green probe the
+ * whole time (it was still successfully checking its own, unrelated target). Silent, and
+ * worse than having no probe: nothing here ever told anyone.
+ *
+ * Task 4 generalises this from `http_external` alone to either kind: 2F's ruling on the
+ * external case applies identically to the internal one — an app that already has an
+ * `http_internal` probe (created any time through `routes/probes.ts`, independent of
+ * exposure) is the adoption case again, and the SAME reasoning against retargeting holds
+ * (see below) with nothing about "internal" that changes it.
  *
  * Chosen fix: REFUSE rather than retarget. Retargeting was the other option on the
  * table — it is friendlier (the app comes up fully monitored with no extra step) — but it
@@ -70,14 +102,17 @@ export class TunnelConfigLock {
  */
 export class ProbeTargetConflictError extends Error {
   constructor(
+    readonly kind: ProbeKind,
     readonly existingTarget: string,
     readonly expectedTarget: string,
   ) {
     super(
-      `this app already has an http_external probe targeting ${existingTarget}, not ` +
-        `${expectedTarget} — adopting it unchanged would leave the newly exposed hostname ` +
-        `unmonitored while its status tile keeps showing a green external probe watching ` +
-        `something else. Delete or repoint the existing probe, then retry exposing this app.`,
+      `this app already has a ${kind} probe targeting ${existingTarget}, not ` +
+        `${expectedTarget} — adopting it unchanged would leave the newly exposed ` +
+        `${kind === "http_external" ? "hostname" : "internal service"} unmonitored while its ` +
+        `status tile keeps showing a green ${kind === "http_external" ? "external" : "internal"} ` +
+        `probe watching something else. Delete or repoint the existing probe, then retry ` +
+        `exposing this app.`,
     );
     this.name = "ProbeTargetConflictError";
   }
@@ -118,6 +153,14 @@ export type ExposeCtx = {
    * own `undo` the same way every other adopted-resource flag in this file does — see
    * `create-probe`'s doc comment. */
   probeCreatedByUs?: boolean;
+  /** Task 4's sibling to `probeId`/`probeCreatedByUs` above, for the `http_internal` probe
+   * `create-probe` now also creates or adopts — tracked separately, by its own id, for the
+   * exact reason `deprovision.ts`'s own doc comment gives: deleting by `(appId, kind)`
+   * instead of the recorded id is the defect that destroyed an admin's own probe and its
+   * whole check history (2D's whole-branch review, F1), and the internal probe carries the
+   * identical exposure now that it exists. */
+  probeInternalId?: string;
+  probeInternalCreatedByUs?: boolean;
   /** `true` only when `record-self-access-settings` (2F Task 2, present only when
    * `ExposeDeps.selfAccessTeamDomain` is set) actually wrote the team-domain setting —
    * `false` when it found one already recorded and left it alone. Gates that step's own
@@ -136,16 +179,24 @@ export type ExposeDeps = {
   hostname: string;
   zoneId: string;
   tunnelId: string;
-  /** `http://localhost:<published-port>` — spec §6's `cloudflared` networking section.
-   * Accepted as-is rather than derived here: deriving it needs the app's compose config,
-   * which is the caller's (the route's) concern, not this sequence's. */
-  ingressService: string;
-  /** The admin-chosen policy demanding a human identity — §6: "policy list containing the
-   * chosen human policy plus the shared monitor policy by ID." Homestead does not create
-   * or manage this policy; it is referenced by id, the same way the shared monitor policy
-   * (below) is. */
+  /** `internalServiceUrl(port)` — spec §6's `cloudflared` networking section — resolved and
+   * validated by the caller (`routes/cloudflare-expose.ts`) against the app's own compose
+   * config before this sequence ever runs: deriving and validating it needs the resolved
+   * compose file, which is the route's concern, not this sequence's. Used for BOTH the
+   * ingress rule's `service` field (`splice-ingress`, below) and the `http_internal`
+   * probe's `target` (`create-probe`, below) — one value, two consumers, per §6's "one fact
+   * about an app rather than three." Still written into the `exposures.ingress_service`
+   * column unchanged (that column's own name and meaning predate this rename). */
+  internalUrl: string;
+  /** `AccessPolicies.humanPolicyId` (`access-policies.ts`, Task 2/3) — the one reusable
+   * `allow` policy every enabled Homestead user's email is kept in, resolved by the
+   * caller (`routes/cloudflare-expose.ts`) from `AccessPoliciesStore`, not supplied by the
+   * admin. §6's "policy list containing the chosen human policy plus the shared monitor
+   * policy by ID" predates Phase 3A, which made Homestead create and keep this policy
+   * current itself (`ensureAccessPolicies`, `sync-access-users.ts`) rather than treating it
+   * as something an admin pastes in per exposure, the way §6 originally described. */
   humanPolicyId: string;
-  /** `MonitorAccess.policyId` (`monitor-access.ts`, Task 2) — the one reusable
+  /** `AccessPolicies.monitorPolicyId` (`access-policies.ts`, Task 2) — the one reusable
    * `non_identity` policy shared by every exposed app. */
   monitorPolicyId: string;
   /**
@@ -159,6 +210,39 @@ export type ExposeDeps = {
    */
   selfAccessTeamDomain?: string;
 };
+
+/**
+ * Adopts an existing `(appId, kind)` probe whose target already matches, refuses one whose
+ * target does not (`ProbeTargetConflictError` — see its own doc comment), or creates a new
+ * one — the one piece of logic `create-probe` needs twice (once per probe kind), extracted
+ * so both call sites can never drift into checking the conflict differently. Callers pass
+ * this the SAME transaction their own write happens in — see `create-probe`'s own comment
+ * on why the read and the write must share one transaction.
+ */
+async function upsertProbe(
+  tx: Tx,
+  args: { appId: string; kind: ProbeKind; expectedTarget: string },
+): Promise<{ id: string; createdByUs: boolean }> {
+  const [existing] = await tx
+    .select()
+    .from(probes)
+    .where(and(eq(probes.appId, args.appId), eq(probes.kind, args.kind)));
+  if (existing && existing.target !== args.expectedTarget) {
+    throw new ProbeTargetConflictError(
+      args.kind,
+      existing.target ?? "(no target)",
+      args.expectedTarget,
+    );
+  }
+  const id = existing?.id ?? ulid();
+  const createdByUs = existing === undefined;
+  if (createdByUs) {
+    await tx
+      .insert(probes)
+      .values({ id, appId: args.appId, kind: args.kind, target: args.expectedTarget });
+  }
+  return { id, createdByUs };
+}
 
 /**
  * The four-step expose sequence (spec §6), for `runSteps`/`StepJobRunner` — five when
@@ -209,7 +293,7 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
           createdByUs = originalRule === undefined;
           const updated = spliceIngress(config.ingress, {
             hostname: deps.hostname,
-            service: deps.ingressService,
+            service: deps.internalUrl,
           });
           // `{ ...config, ingress: updated }`, never a fresh `{ ingress: updated }` — the
           // whole config (`warp-routing`, a tunnel-level `originRequest`, every OTHER
@@ -226,7 +310,7 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
               hostname: deps.hostname,
               zoneId: deps.zoneId,
               tunnelId: deps.tunnelId,
-              ingressService: deps.ingressService,
+              ingressService: deps.internalUrl,
               ingressRuleCreatedByUs: createdByUs,
               state: "provisioning",
             }),
@@ -403,66 +487,75 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
           throw new Error("create-probe ran before splice-ingress produced an exposure row");
         }
         const exposureId = ctx.exposureId;
-        // The 2C lesson, applied to the fourth resource this sequence touches (2D's
-        // whole-branch review, F1): an app can already carry its OWN `http_external`
-        // probe — `routes/probes.ts` lets an admin create one any time, independent of
-        // exposure — and this step must not duplicate it. Read under the same transaction
-        // the write below happens in, so a concurrent probe creation can't land in the
-        // gap between this check and the insert (Postgres-style TOCTOU is not this
-        // project's storage engine, but `retryOnBusy` already exists for exactly this
-        // kind of write contention — see its own doc comment).
+        // The 2C lesson, applied to the fourth AND fifth resources this sequence touches
+        // (2D's whole-branch review, F1; Task 4 adds the internal probe as the fifth): an
+        // app can already carry its OWN `http_external` or `http_internal` probe —
+        // `routes/probes.ts` lets an admin create either any time, independent of exposure
+        // — and this step must not duplicate either. Both checks run under the SAME
+        // transaction the writes below happen in, so a concurrent probe creation can't
+        // land in the gap between either check and its insert (Postgres-style TOCTOU is
+        // not this project's storage engine, but `retryOnBusy` already exists for exactly
+        // this kind of write contention — see its own doc comment).
         //
-        // Fix wave 2's Defect 2: adoption alone is not enough — an adopted probe that
-        // targets something other than THIS hostname must not be adopted silently (see
-        // `ProbeTargetConflictError`'s own doc comment for why refusing, not retargeting,
-        // is the chosen fix). Checked and thrown from inside the same transaction as the
-        // read that found it, before anything is written, so a refusal here leaves
-        // nothing for this step's own `undo` to clean up — `runSteps` rolls back the
-        // three earlier steps exactly as it would for any other failing step.
-        const expectedTarget = `https://${deps.hostname}`;
-        let probeId: string | undefined;
-        let createdByUs: boolean | undefined;
-        // Both writes below are local, with no network call between them — unlike the two
-        // steps above, they can share ONE transaction: either both land or neither does,
-        // so there is no partial-failure window for `runSteps`' "the failing step is
-        // never undone" rule to strand one half of this pair in.
+        // Fix wave 2's Defect 2, applied to both kinds: adoption alone is not enough — an
+        // adopted probe that targets something other than THIS exposure's own target must
+        // not be adopted silently (see `ProbeTargetConflictError`'s own doc comment for
+        // why refusing, not retargeting, is the chosen fix, and Task 4's own note there on
+        // why the internal case follows the identical ruling). Checked and thrown from
+        // inside the same transaction as the read that found it, before anything is
+        // written, so a refusal here leaves nothing for this step's own `undo` to clean up
+        // — `runSteps` rolls back the three earlier steps exactly as it would for any
+        // other failing step.
+        const expectedExternalTarget = `https://${deps.hostname}`;
+        const expectedInternalTarget = deps.internalUrl;
+        let external: { id: string; createdByUs: boolean } | undefined;
+        let internal: { id: string; createdByUs: boolean } | undefined;
+        // All four writes below (two possible inserts, one exposures update) are local,
+        // with no network call between them — unlike the two steps above, they can share
+        // ONE transaction: either all land or none does, so there is no partial-failure
+        // window for `runSteps`' "the failing step is never undone" rule to strand one
+        // probe's half of this pair in without the other.
         await retryOnBusy(() =>
           deps.db.transaction(async (tx) => {
-            const [existing] = await tx
-              .select()
-              .from(probes)
-              .where(and(eq(probes.appId, deps.appId), eq(probes.kind, "http_external")));
-            if (existing && existing.target !== expectedTarget) {
-              throw new ProbeTargetConflictError(existing.target ?? "(no target)", expectedTarget);
-            }
-            const thisProbeId = existing?.id ?? ulid();
-            const thisCreatedByUs = existing === undefined;
-            if (thisCreatedByUs) {
-              await tx.insert(probes).values({
-                id: thisProbeId,
-                appId: deps.appId,
-                kind: "http_external",
-                target: expectedTarget,
-              });
-            }
+            external = await upsertProbe(tx, {
+              appId: deps.appId,
+              kind: "http_external",
+              expectedTarget: expectedExternalTarget,
+            });
+            internal = await upsertProbe(tx, {
+              appId: deps.appId,
+              kind: "http_internal",
+              expectedTarget: expectedInternalTarget,
+            });
             await tx
               .update(exposures)
-              .set({ state: "ready", probeId: thisProbeId, probeCreatedByUs: thisCreatedByUs })
+              .set({
+                state: "ready",
+                probeId: external.id,
+                probeCreatedByUs: external.createdByUs,
+                probeInternalId: internal.id,
+                probeInternalCreatedByUs: internal.createdByUs,
+              })
               .where(eq(exposures.id, exposureId));
-            probeId = thisProbeId;
-            createdByUs = thisCreatedByUs;
           }),
         );
-        ctx.probeId = probeId;
-        ctx.probeCreatedByUs = createdByUs;
+        ctx.probeId = external?.id;
+        ctx.probeCreatedByUs = external?.createdByUs;
+        ctx.probeInternalId = internal?.id;
+        ctx.probeInternalCreatedByUs = internal?.createdByUs;
       },
       async undo(ctx) {
-        if (ctx.probeId === undefined) return;
         // Gated on THIS run's own flag, the same 2C lesson every other undo in this file
         // applies: an adopted probe — the admin's own, predating this exposure — is left
-        // alone, never deleted just because `ctx` happens to hold its id.
-        if (!ctx.probeCreatedByUs) return;
-        await deps.db.delete(probes).where(eq(probes.id, ctx.probeId));
+        // alone, never deleted just because `ctx` happens to hold its id. Each probe is
+        // gated and deleted independently — one may be adopted while the other was
+        // created by this run.
+        if (ctx.probeId !== undefined && ctx.probeCreatedByUs) {
+          await deps.db.delete(probes).where(eq(probes.id, ctx.probeId));
+        }
+        if (ctx.probeInternalId !== undefined && ctx.probeInternalCreatedByUs) {
+          await deps.db.delete(probes).where(eq(probes.id, ctx.probeInternalId));
+        }
       },
     },
   ];

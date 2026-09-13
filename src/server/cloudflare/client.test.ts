@@ -1217,4 +1217,109 @@ describe("createCloudflareClient", () => {
       expect(policy).toEqual({ id: "policy-1" });
     });
   });
+
+  describe("createEmailPolicy", () => {
+    it("sends decision: allow and one include per email on the request body", async () => {
+      // The binding assertion Phase 3A's brief calls out by name: `non_identity` here
+      // would silently admit the monitor's service token where a human is meant to log
+      // in, and nothing else in the system would notice.
+      const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const sent = JSON.parse(String(init?.body));
+        expect(sent).toEqual({
+          name: "Homestead Access",
+          decision: "allow",
+          include: [{ email: { email: "a@example.com" } }, { email: { email: "b@example.com" } }],
+        });
+        return jsonResponse(envelope({ success: true, result: { id: "policy-human" } }));
+      });
+      const policy = await client({ fetch: fetchMock }).createEmailPolicy("Homestead Access", [
+        "a@example.com",
+        "b@example.com",
+      ]);
+      expect(policy).toEqual({ id: "policy-human" });
+    });
+
+    it("raises before making a network call when the email list is empty", async () => {
+      const fetchMock = vi.fn();
+      const error = await client({ fetch: fetchMock })
+        .createEmailPolicy("Homestead Access", [])
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect((error as CloudflareError).fault).toBe("client");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("updateEmailPolicy", () => {
+    it("PUTs the full desired email list, not a delta", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.method).toBe("PUT");
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/policies/policy-human`,
+        );
+        const sent = JSON.parse(String(init?.body));
+        expect(sent).toEqual({
+          name: "Homestead Access",
+          decision: "allow",
+          include: [{ email: { email: "a@example.com" } }, { email: { email: "c@example.com" } }],
+        });
+        return jsonResponse(envelope({ success: true, result: { id: "policy-human" } }));
+      });
+      await expect(
+        client({ fetch: fetchMock }).updateEmailPolicy("policy-human", "Homestead Access", [
+          "a@example.com",
+          "c@example.com",
+        ]),
+      ).resolves.toBeUndefined();
+    });
+
+    it("raises before making a network call when the email list is empty", async () => {
+      const fetchMock = vi.fn();
+      const error = await client({ fetch: fetchMock })
+        .updateEmailPolicy("policy-human", "Homestead Access", [])
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect((error as CloudflareError).fault).toBe("client");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("getPolicy", () => {
+    it("returns the id and name of an existing policy", async () => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        expect(String(input)).toBe(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/access/policies/policy-human`,
+        );
+        return jsonResponse(
+          envelope({ success: true, result: { id: "policy-human", name: "Homestead Access" } }),
+        );
+      });
+      const policy = await client({ fetch: fetchMock }).getPolicy("policy-human");
+      expect(policy).toEqual({ id: "policy-human", name: "Homestead Access" });
+    });
+
+    it("returns null rather than throwing for a missing policy", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(
+          envelope({ success: false, errors: [{ code: 12112, message: "not found" }] }),
+          { status: 404 },
+        ),
+      );
+      const policy = await client({ fetch: fetchMock }).getPolicy("policy-human");
+      expect(policy).toBeNull();
+    });
+
+    it("still raises on a genuine, non-404 failure", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse(envelope({ success: false, errors: [{ code: 9109, message: "forbidden" }] }), {
+          status: 403,
+        }),
+      );
+      const error = (await client({ fetch: fetchMock, sleep: fakeSleep() })
+        .getPolicy("policy-human")
+        .catch((e: unknown) => e)) as CloudflareError;
+      expect(error).toBeInstanceOf(CloudflareError);
+      expect(error.fault).toBe("permission");
+    });
+  });
 });

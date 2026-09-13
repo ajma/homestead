@@ -1,4 +1,4 @@
-import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
+import { AccessPoliciesStore } from "../cloudflare/access-policies.js";
 import type { SecretStore } from "../crypto/secrets.js";
 import type { Db } from "../db/client.js";
 import { createHttpRunners } from "./http-runner.js";
@@ -6,7 +6,7 @@ import type { ProbeRunner } from "./types.js";
 
 /**
  * Builds the `http_internal`/`http_external` probe runners, wiring the external one to
- * 2D's `MonitorAccessStore` for its Access service-token credentials.
+ * 2D's `AccessPoliciesStore` for its Access service-token credentials.
  *
  * This is its own function, pulled out of `index.ts`'s composition root, for
  * testability: `index.ts` is a top-level-await entry point with real side effects and
@@ -32,7 +32,7 @@ export function buildHttpRunners(deps: { fetch: typeof fetch; db: Db; secrets: S
   internal: ProbeRunner;
   external: ProbeRunner;
 } {
-  const monitorStore = new MonitorAccessStore(deps.db, deps.secrets);
+  const monitorStore = new AccessPoliciesStore(deps.db, deps.secrets);
   return createHttpRunners({
     fetch: deps.fetch,
     accessCredentials: () => monitorStore.getCredentials(),

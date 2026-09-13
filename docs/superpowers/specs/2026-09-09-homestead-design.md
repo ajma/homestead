@@ -472,8 +472,12 @@ Four steps, run as a recorded job, each idempotent, with reverse-order rollback 
 2. **DNS** — create a proxied CNAME to `<tunnelId>.cfargotunnel.com`, store the record ID.
    Cloudflare only auto-creates this from the dashboard; via API it is ours to create and clean up.
 3. **Access application** — `type: self_hosted`, `domain: <hostname>`, policy list containing the
-   chosen human policy plus the shared monitor policy **by ID**. Store the app ID and `aud`.
-4. **Probe** — create the `http_external` probe.
+   shared human policy plus the shared monitor policy **by ID**. Store the app ID and `aud`.
+4. **Probes** — create the `http_external` and `http_internal` probes.
+
+The ingress service is not asked for. Homestead constructs `http://localhost:<port>` from a
+compose service and one of its published ports, validated against the resolved compose file, so
+the same fact serves the tunnel, both probes and the launcher's internal URL.
 
 **All tunnel-config writes are serialised behind a single mutex, with a re-read immediately
 before each PUT.** There is no "add one ingress rule" endpoint — the entire array is replaced.
@@ -481,12 +485,32 @@ Two concurrent provisions would each read the old array, each append their own r
 second PUT would silently erase the first app's hostname. This is a correctness bug, not a
 performance concern.
 
-### One service token, one reusable policy
+### Two shared policies, created at setup
 
-Homestead creates a single `Homestead Monitor` service token and a single **reusable**
+Setting up Cloudflare creates **both** policies every exposed app needs. Neither is a separate
+step and neither is ever pasted in by hand.
+
+**The monitor policy.** A single `Homestead Monitor` service token and a single **reusable**
 `non_identity` policy including it (`include: [{ service_token: { token_id } }]`), attached to
 every provisioned app as `{ "id": "..." }`. One token and one policy for N apps, so rotation is
 a single operation.
+
+**The human policy.** A single reusable `decision: "allow"` policy whose includes are the email
+addresses of every **enabled** Homestead user. Homestead owns this list and rewrites it in full
+whenever users change — there is no add-one-email endpoint, the same shape as the ingress array.
+The identity provider itself is configured in Cloudflare's dashboard; an email include works
+against whatever login methods the account has enabled.
+
+**Removing or disabling a user must succeed in Cloudflare or the operation fails locally.** You
+cannot revoke someone while Cloudflare is unreachable, which is accepted; being told someone is
+gone while they still have internet access to your apps is not. Adding is best-effort by
+contrast, because a delayed grant is an inconvenience where a delayed revoke is a hole. Where
+Access was never configured, none of this runs and user management is untouched.
+
+**One shared human policy, deliberately ignoring per-app scope.** A viewer scoped to one app is
+admitted by Access to every exposed app. Homestead's own UI still hides the others, so the
+tunnel is more permissive than the application — a known property, chosen over the alternative
+of one policy per app. Per-app policies are the upgrade path if it ever matters.
 
 **Service tokens expire** — the API returns `duration: "8760h"` and a concrete `expires_at`.
 A year after setup every external probe would begin failing simultaneously with nothing actually

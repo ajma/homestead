@@ -3,9 +3,24 @@ import { and, eq, exists, isNotNull, isNull, ne, notExists, or, sql } from "driz
 import { alias } from "drizzle-orm/sqlite-core";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { audit } from "../audit.js";
+import { type AuditContext, audit } from "../audit.js";
 import { requireAdmin, requireAuth } from "../auth/context.js";
+import { AccessPoliciesStore } from "../cloudflare/access-policies.js";
+import { type CloudflareClient, createCloudflareClient } from "../cloudflare/client.js";
+import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
+import { CloudflareError } from "../cloudflare/errors.js";
+import { syncAccessUsers, syncAccessUsersExcluding } from "../cloudflare/sync-access-users.js";
 import { userAppScope, users } from "../db/schema.js";
+
+/**
+ * Reads a `CloudflareError`'s fault off any thrown value, defaulting to `network` for
+ * whatever isn't one — the same helper `routes/cloudflare.ts` defines for its own
+ * Cloudflare-facing routes; duplicated here rather than shared because it's a one-line
+ * classification, not shared logic worth a new module for two call sites.
+ */
+function faultOf(error: unknown): CloudflareError["fault"] {
+  return error instanceof CloudflareError ? error.fault : "network";
+}
 
 const createUserSchema = z.object({
   // z.email(), not z.string().email() — the latter is @deprecated in zod 4.
@@ -32,8 +47,103 @@ const otherUsers = alias(users, "other_users");
 
 export async function userRoutes(app: FastifyInstance): Promise<void> {
   const { db, auth, events } = app.deps;
+  const credentialStore = new CloudflareCredentialStore(db, app.deps.secrets);
+  const accessPoliciesStore = new AccessPoliciesStore(db, app.deps.secrets);
 
   const countUsers = async () => (await db.select({ id: users.id }).from(users)).length;
+
+  /**
+   * `null` when Access has never been configured on this installation — by far the most
+   * common case, and the one Task 3's brief calls out as the most likely to be got wrong
+   * and the most damaging: an installation that never touched Cloudflare must delete,
+   * disable and create users exactly as it did before this phase, calling Cloudflare not at
+   * all. Every mutation route below calls this FIRST and only proceeds to build a client and
+   * touch Cloudflare when it returns non-null — so "not configured" isn't a fast exit taken
+   * after already doing the work, it's the reason the work never starts.
+   *
+   * Requires BOTH `CloudflareCredentialStore` (the token) and `AccessPoliciesStore` (the
+   * human policy id) — an install that saved credentials but whose `ensureAccessPolicies`
+   * attempt never completed (or one where credentials were later cleared while a stale
+   * policy id remained recorded) is treated the same as fully unconfigured, not as a
+   * half-broken state to attempt and fail loudly on. Read fresh on every call, not cached at
+   * `userRoutes` registration time, so credentials saved or cleared after startup take
+   * effect on the very next request — the same reasoning `cloudflare-expose.ts` re-reads its
+   * own stores per request rather than once.
+   */
+  async function accessSync(): Promise<{ client: CloudflareClient; policyId: string } | null> {
+    const credentials = await credentialStore.get();
+    if (!credentials) return null;
+    const accessPolicies = await accessPoliciesStore.get();
+    if (!accessPolicies) return null;
+    const client = createCloudflareClient({
+      token: credentials.token,
+      accountId: credentials.accountId,
+      fetch: app.deps.fetch,
+    });
+    return { client, policyId: accessPolicies.humanPolicyId };
+  }
+
+  /**
+   * The blocking half of Ruling 2 (disable/delete must succeed in Cloudflare before the
+   * local write), with the Critical fix from the whole-branch review: a recorded
+   * `humanPolicyId` that Cloudflare no longer has must never be permanent. Before this
+   * existed, `syncAccessUsersExcluding` throwing on a stale id turned into an unconditional
+   * 502 on every future disable and delete — `store.get()` still reported "configured"
+   * (nothing ever re-checked or cleared the id), so "Retry setup" was a no-op and the only
+   * recovery was editing SQLite by hand. Reachable two ordinary ways: saving a different
+   * Cloudflare account's credentials over an old one (closed by `clear()` now also clearing
+   * this store — see `routes/cloudflare.ts`), or an admin deleting the policy itself in
+   * Cloudflare's dashboard — which this half exists for.
+   *
+   * `getPolicy` (`client.ts`) — added this phase for exactly this question and never
+   * called until now — answers "does the policy still exist" without a failed PUT's status
+   * code standing in for it. `null` means Cloudflare has already stopped enforcing this
+   * policy: it admits nobody, so there is nothing this removal can be blocked on, and
+   * continuing to treat the stale id as configured only reproduces the lockout. Rather than
+   * silently degrading, this clears `humanPolicyId` (not the whole store — the token and
+   * monitor policy are still perfectly good) and audits the fact, which also repairs "Retry
+   * setup": `AccessPoliciesStore.get()` now reports incomplete, so `ensureAccessPolicies`
+   * takes the same `completeHumanPolicy` path a Phase-2 upgrade does, recreating only the
+   * missing policy. Any OTHER failure (network, auth, rate limit, a genuine 5xx) still
+   * blocks the removal — those don't tell us the policy is gone, only that this call
+   * couldn't find out either way, and Ruling 2 says fail closed on that uncertainty.
+   *
+   * `null` return means "proceed with the local write"; anything else is the 502 body the
+   * caller should send instead.
+   */
+  async function syncBeforeRemoval(
+    sync: { client: CloudflareClient; policyId: string },
+    ctx: AuditContext,
+    excludeUserId: string,
+  ): Promise<{ error: string; fault: CloudflareError["fault"] } | null> {
+    let policy: { id: string; name: string } | null;
+    try {
+      policy = await sync.client.getPolicy(sync.policyId);
+    } catch (error) {
+      return { error: "cloudflare_error", fault: faultOf(error) };
+    }
+
+    if (policy === null) {
+      await accessPoliciesStore.clearHumanPolicy();
+      await audit(db, ctx, {
+        action: "cloudflare.access_policy_missing",
+        detail: { policyId: sync.policyId },
+      });
+      return null;
+    }
+
+    try {
+      await syncAccessUsersExcluding({
+        db,
+        client: sync.client,
+        policyId: sync.policyId,
+        excludeUserId,
+      });
+      return null;
+    } catch (error) {
+      return { error: "cloudflare_error", fault: faultOf(error) };
+    }
+  }
 
   /**
    * SQL condition guarding the invariant "at least one administrator can still log in".
@@ -124,6 +234,20 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       },
     );
 
+    // Best-effort, and in practice never fires yet: Access cannot be configured before an
+    // administrator exists (every Cloudflare route requires one), so `accessSync()` always
+    // returns `null` here. Present anyway for the same reason the create/re-enable routes
+    // below call this best-effort — adding access is never the operation that fails
+    // (Ruling 2 covers removal specifically) — and so bootstrap does not silently diverge
+    // from every other place a user is added the moment that ordering assumption ever stops
+    // holding (a future re-bootstrap path, a restored backup with credentials already set).
+    const sync = await accessSync();
+    if (sync) {
+      await syncAccessUsers({ db, client: sync.client, policyId: sync.policyId }).catch(() => {
+        // Best-effort — see the comment above.
+      });
+    }
+
     for (const [key, value] of result.headers) {
       reply.header(key, value);
     }
@@ -182,6 +306,19 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     if (row && !body.scopeAllApps && body.appIds.length > 0) {
       await db.insert(userAppScope).values(body.appIds.map((appId) => ({ userId: row.id, appId })));
     }
+    // Best-effort, run AFTER the local write — Ruling 2 (Task 3's brief) covers removal
+    // specifically: adding a user is never a security risk, so a Cloudflare hiccup here
+    // must not fail an otherwise-successful account creation. This is deliberately a
+    // different code path from disable/delete below, which block on Cloudflare success
+    // BEFORE committing locally — see `accessSync`'s own doc comment on why "not
+    // configured" short-circuits before either kind of call is ever attempted.
+    const sync = await accessSync();
+    if (sync) {
+      await syncAccessUsers({ db, client: sync.client, policyId: sync.policyId }).catch(() => {
+        // Best-effort — see the comment above.
+      });
+    }
+
     await audit(db, ctx, {
       action: "user.created",
       targetType: "user",
@@ -208,6 +345,57 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     // the guard as part of the UPDATE itself rather than as a preceding SELECT.
     const stripsAdminPowers = body.role === "viewer" || body.disabled === true;
 
+    // Ruling 2 (Task 3's brief): disabling a user must succeed in Cloudflare, or the
+    // WHOLE operation fails, before the local disable is ever committed — never the
+    // reverse, where the row is disabled here while Cloudflare Access still lets that
+    // person into every exposed app. This runs BEFORE the guarded UPDATE below, computing
+    // the post-disable email list as if the row were already disabled (`syncAccessUsers
+    // Excluding`) rather than disabling first and reverting on failure: the alternative
+    // ("disable, sync, undo the disable if the sync fails") is a plain column flip to
+    // revert here — cheap — but the identical pattern for DELETE below is not, so both
+    // routes use the same before-the-write ordering for consistency rather than one
+    // routine doing it the easy way and the other the hard way.
+    //
+    // Only fires when the row is CURRENTLY enabled: an already-disabled user was never in
+    // the policy (`enabledUserEmails`'s predicate), so disabling it again touches nothing
+    // in Cloudflare and needs no call at all — including when Access is not configured,
+    // where `accessSync()` returns `null` before any client is even built.
+    if (body.disabled === true) {
+      const [target] = await db
+        .select({ role: users.role, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, id));
+      if (!target) return reply.code(404).send({ error: "not_found" });
+
+      if (target.disabledAt === null) {
+        // Fast path, not a replacement for `lastActiveAdminIsSafe` on the UPDATE below —
+        // the same "check-then-write can race, the WHERE clause is what actually
+        // prevents it" distinction `/api/setup/admin`'s own `countUsers()` comment makes.
+        // This exists purely to avoid the ordinary, non-racing case (an admin disabling
+        // the sole remaining admin) from removing that person's Cloudflare access only to
+        // then have the local disable itself refused.
+        if (target.role === "admin") {
+          const [otherAdmin] = await db
+            .select({ id: otherUsers.id })
+            .from(otherUsers)
+            .where(
+              and(
+                eq(otherUsers.role, "admin"),
+                ne(otherUsers.id, id),
+                isNull(otherUsers.disabledAt),
+              ),
+            );
+          if (!otherAdmin) return reply.code(409).send({ error: "last_admin" });
+        }
+
+        const sync = await accessSync();
+        if (sync) {
+          const failure = await syncBeforeRemoval(sync, ctx, id);
+          if (failure) return reply.code(502).send(failure);
+        }
+      }
+    }
+
     const updated = await db
       .update(users)
       .set({
@@ -229,6 +417,18 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       return exists_
         ? reply.code(409).send({ error: "last_admin" })
         : reply.code(404).send({ error: "not_found" });
+    }
+
+    // Re-enabling restores access — not a security risk (Ruling 2 covers removal
+    // specifically), so this runs best-effort AFTER the local write, the same as
+    // creation above, rather than blocking on Cloudflare the way disabling does.
+    if (body.disabled === false) {
+      const sync = await accessSync();
+      if (sync) {
+        await syncAccessUsers({ db, client: sync.client, policyId: sync.policyId }).catch(() => {
+          // Best-effort — see the comment above.
+        });
+      }
     }
 
     await audit(db, ctx, {
@@ -288,6 +488,44 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/api/users/:id", async (request, reply) => {
     const ctx = requireAdmin(request);
     const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const [target] = await db
+      .select({ role: users.role, disabledAt: users.disabledAt })
+      .from(users)
+      .where(eq(users.id, id));
+    if (!target) return reply.code(404).send({ error: "not_found" });
+
+    // Same ordering as PATCH's disable path, and for the identical reason (Ruling 2,
+    // Task 3's brief): the delete must succeed in Cloudflare, or the whole operation
+    // fails, BEFORE the row is ever removed locally — never the reverse. Computed before
+    // any local write rather than deleting-then-reverting-on-failure: `users` cascades to
+    // `sessions`, `accounts` (the Better-Auth password credential) and `userAppScope`
+    // (`schema.ts`), and reversing a committed delete cleanly would mean capturing and
+    // reinserting all three tables' rows — see `sync-access-users.ts`'s own doc comment on
+    // `syncAccessUsersExcluding` for why that is a materially riskier operation than never
+    // committing the delete until Cloudflare has already accepted the post-removal state.
+    //
+    // Only fires when the row is CURRENTLY enabled — an already-disabled user was never in
+    // the policy, so deleting it touches nothing in Cloudflare.
+    if (target.disabledAt === null) {
+      // Fast path, not a replacement for `lastActiveAdminIsSafe` on the DELETE below — see
+      // PATCH's identical comment.
+      if (target.role === "admin") {
+        const [otherAdmin] = await db
+          .select({ id: otherUsers.id })
+          .from(otherUsers)
+          .where(
+            and(eq(otherUsers.role, "admin"), ne(otherUsers.id, id), isNull(otherUsers.disabledAt)),
+          );
+        if (!otherAdmin) return reply.code(409).send({ error: "last_admin" });
+      }
+
+      const sync = await accessSync();
+      if (sync) {
+        const failure = await syncBeforeRemoval(sync, ctx, id);
+        if (failure) return reply.code(502).send(failure);
+      }
+    }
 
     const deleted = await db
       .delete(users)

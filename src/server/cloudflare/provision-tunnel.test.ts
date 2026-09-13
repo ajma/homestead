@@ -110,6 +110,15 @@ function fakeClient() {
     async createMonitorPolicy() {
       throw new Error("not used by provisioning");
     },
+    async createEmailPolicy() {
+      throw new Error("not used by provisioning");
+    },
+    async updateEmailPolicy() {
+      throw new Error("not used by provisioning");
+    },
+    async getPolicy() {
+      throw new Error("not used by provisioning");
+    },
   };
 
   return { client, tunnels, calls };

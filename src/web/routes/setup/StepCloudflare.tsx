@@ -19,10 +19,15 @@ import type { SetupStepProps } from "./SetupWizard";
  *
  * Reuses `CloudflarePanel`'s own hooks and error-describing helpers rather than
  * reimplementing credential saving or tunnel provisioning — this step offers a strict
- * subset of that panel (save credentials, optionally provision the tunnel) and defers the
- * monitor token and Access sign-in sections entirely to Settings, since neither is needed
- * to expose a single app later and both would just add more ways this one screen could
- * fail before a household ever gets past onboarding.
+ * subset of that panel (save credentials, optionally provision the tunnel) and leaves the
+ * monitor token and Access sign-in sections' own DISPLAY entirely to Settings, since
+ * neither needs a UI here to expose a single app later. Phase 3A's `ensureAccessPolicies`
+ * still runs from here, though: it rides along inside `useSaveCloudflareCredentials`
+ * itself (see that hook's own doc comment), best-effort, so saving valid credentials in
+ * THIS step already creates both the monitor and the human Access policy without this
+ * step needing to know that happened — a failure there does not block `onComplete`, the
+ * same "can be completed later from Settings" resilience §6/§10 already promise for
+ * Cloudflare as a whole.
  *
  * `useSaveCloudflareCredentials` is a plain function, not `useMutation`, for the same
  * reason `CloudflarePanel` avoids it: the token passing through this component's own

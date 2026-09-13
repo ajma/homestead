@@ -376,11 +376,19 @@ describe("ActionBar", () => {
     stubFetch({}, { jobs: [jobRow({ id: "existing-job", status: "running" })] });
     mount();
 
+    // Wait on the `EventSource` itself, not on the Deploy button's `disabled` attribute as
+    // a proxy for it. Both land in the same commit (the render that sets `activeJobId`),
+    // but `useSseText`'s mount effect that actually constructs the `EventSource` is a
+    // passive effect flushed asynchronously after that commit — under load, `waitFor` can
+    // observe the DOM already showing `disabled` before that effect has run, and a
+    // synchronous assertion on `FakeEventSource.instances[0]` right after reads undefined.
+    // The `disabled` attribute and `job-output` node are both synchronous parts of that
+    // same earlier commit, so once the stream exists they are already guaranteed true.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+      expect(FakeEventSource.instances[0]?.url).toBe("/api/jobs/existing-job/stream"),
     );
+    expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByTestId("job-output")).toBeTruthy();
-    expect(FakeEventSource.instances[0]?.url).toBe("/api/jobs/existing-job/stream");
   });
 
   it("does not disable when the app's most recent job already finished", async () => {

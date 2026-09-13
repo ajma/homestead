@@ -8,14 +8,14 @@ import { z } from "zod";
 import { audit } from "../audit.js";
 import { isPresent, resolveAccessSettings } from "../auth/access-settings.js";
 import { requireCapability } from "../auth/context.js";
+import {
+  AccessPoliciesStore,
+  ensureAccessPolicies,
+  rotateMonitorSecret,
+} from "../cloudflare/access-policies.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { CloudflareError } from "../cloudflare/errors.js";
-import {
-  ensureMonitorAccess,
-  MonitorAccessStore,
-  rotateMonitorSecret,
-} from "../cloudflare/monitor-access.js";
 import { reconcileExposures } from "../cloudflare/reconcile.js";
 
 // `.trim()` before `.min(1)`: a token pasted out of the Cloudflare dashboard frequently
@@ -42,12 +42,16 @@ function faultOf(error: unknown): CloudflareError["fault"] {
 export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   const { db, secrets } = app.deps;
   const store = new CloudflareCredentialStore(db, secrets);
-  const monitorStore = new MonitorAccessStore(db, secrets);
+  const monitorStore = new AccessPoliciesStore(db, secrets);
 
-  /** `MonitorAccess` (never carries the secret — see `monitor-access.ts`) to the wire
+  /** `AccessPolicies` (never carries the secret — see `access-policies.ts`) to the wire
    * shape `MonitorAccessStatus` — the same discriminated-union treatment
    * `CloudflareCredentialStore.status()` gives credentials, for the same reason: a
-   * caller cannot accidentally read `clientId` off a status that has none. */
+   * caller cannot accidentally read `clientId` off a status that has none.
+   *
+   * Still named `policyId` on the wire — kept for the monitor policy id, same as before
+   * Phase 3A. `humanPolicyId` is new: Task 5 (Settings) is the first caller that needs to
+   * show BOTH policies exist, not only the monitor half. */
   function toMonitorStatus(
     access: Awaited<ReturnType<typeof monitorStore.get>>,
   ): MonitorAccessStatus {
@@ -55,7 +59,8 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
     return {
       configured: true,
       clientId: access.clientId,
-      policyId: access.policyId,
+      policyId: access.monitorPolicyId,
+      humanPolicyId: access.humanPolicyId,
       expiresAt: access.expiresAt,
     };
   }
@@ -121,6 +126,15 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/api/cloudflare/credentials", async (request, reply) => {
     const ctx = requireCapability(request, "cf:write");
     await store.clear();
+    // Whole-branch review, Critical: a new account's policies are a different account's
+    // policies. Before this call existed, `AccessPoliciesStore.clear()` had no production
+    // caller at all — removing credentials here left the old account's `humanPolicyId`
+    // recorded, and saving a different account's credentials afterward made every user
+    // delete/disable sync against a policy id the new token could never reach, permanently
+    // (`routes/users.ts`'s `accessSync()` treats a recorded id as "still configured", it
+    // never re-checks it). Clearing both stores together means "no credentials" and "no
+    // recorded Access setup" can never drift apart.
+    await monitorStore.clear();
     await audit(db, ctx, { action: "cloudflare.credentials_deleted" });
     return reply.code(204).send();
   });
@@ -157,7 +171,7 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
    * Read-only status of the one shared monitor service token and policy — gated on
    * `cf:read` like `GET /zones` and `GET /tunnel` above, for the same reason (every role
    * today holds both `cf:read` and `cf:write` or neither, so this is cosmetic until a
-   * read-only role exists). Never touches Cloudflare: this reads what `MonitorAccessStore`
+   * read-only role exists). Never touches Cloudflare: this reads what `AccessPoliciesStore`
    * already has recorded, the same "status is a local read" shape `GET /credentials` and
    * `GET /tunnel` both use.
    */
@@ -167,10 +181,15 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
-   * Creates the one shared monitor token and policy if they do not exist yet, or
-   * returns the existing ones unchanged — `ensureMonitorAccess`'s own idempotency (see
-   * its doc comment) is what makes a double-click or a retry safe here, not anything
-   * this route does on top of it.
+   * Creates the one shared service token, the monitor policy, and (Phase 3A) the human
+   * sign-in policy, if they do not all exist yet, or returns the existing ones unchanged
+   * — `ensureAccessPolicies`'s own idempotency (see its doc comment) is what makes a
+   * double-click or a retry safe here, not anything this route does on top of it.
+   *
+   * No longer reached from a dedicated Settings button (3A): `useSaveCloudflareCredentials`
+   * on the web side now calls this itself, best-effort, right after a credentials PUT
+   * succeeds — see that hook's own doc comment. The route stays exactly as it was so that
+   * hook (and a future retry path, if one is ever added) has something idempotent to call.
    */
   app.post("/api/cloudflare/monitor", async (request, reply) => {
     const ctx = requireCapability(request, "cf:write");
@@ -185,7 +204,7 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
         accountId: creds.accountId,
         fetch: app.deps.fetch,
       });
-      const access = await ensureMonitorAccess({ store: monitorStore, client });
+      const access = await ensureAccessPolicies({ store: monitorStore, client, db });
       await audit(db, ctx, {
         action: "cloudflare.monitor_access_ensured",
         targetId: access.tokenId,

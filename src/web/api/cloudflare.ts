@@ -1,5 +1,6 @@
 import type {
   AccessConfigStatus,
+  AppComposeServicesStatus,
   AppExposureStatus,
   CloudflareFault,
   CloudflareStatus,
@@ -114,6 +115,22 @@ export function describeCloudflareError(error: unknown, fallback: string): strin
  * never carries zones, only `CloudflarePanel`'s separate `useCloudflareZones` fetch does,
  * and a stale or absent zones list left over from before this save would be a lie the
  * moment the panel calls this "configured" for a different account.
+ *
+ * **Phase 3A**: once the credentials PUT succeeds, this ALSO fires `POST
+ * /api/cloudflare/monitor` — the endpoint that now creates both the monitor policy and
+ * the human sign-in policy (`ensureAccessPolicies`) — so that "setting up Cloudflare"
+ * (this hook, shared by the setup wizard's `StepCloudflare` and Settings'
+ * `CloudflarePanel`) is the one action that makes both policies exist, with no separate
+ * button either surface has to offer. Deliberately best-effort: its failure is swallowed
+ * here, not re-thrown, so a token that verifies and saves cleanly but happens to lack the
+ * Access-policy permission (or hits a transient Cloudflare error at that exact moment)
+ * does not turn "save credentials" into a failure the wizard's onboarding flow — which
+ * must stay completable without a Cloudflare account at all — would otherwise block on.
+ * `CloudflarePanel`'s Monitor section is what surfaces an incomplete setup after the
+ * fact, once `cloudflareMonitorKey` refetches — and (Task 5) offers a "Retry setup"
+ * button wired to `useEnsureAccessPolicies` below, which calls this exact same idempotent
+ * route directly, so a failed best-effort attempt no longer requires removing and
+ * re-adding credentials just to run it again.
  */
 export function useSaveCloudflareCredentials() {
   const queryClient = useQueryClient();
@@ -127,6 +144,18 @@ export function useSaveCloudflareCredentials() {
     });
     queryClient.setQueryData(cloudflareStatusKey, status);
     queryClient.invalidateQueries({ queryKey: cloudflareZonesKey });
+
+    try {
+      const monitorStatus = await apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor", {
+        method: "POST",
+      });
+      queryClient.setQueryData(cloudflareMonitorKey, monitorStatus);
+    } catch {
+      // Best-effort — see the doc comment above. `cloudflareMonitorKey` is left as-is
+      // (not written), so a subsequent refetch of `useMonitorAccess` is what tells the
+      // truth about whether this actually completed.
+    }
+
     return status;
   };
 }
@@ -255,11 +284,38 @@ export function useAppExposure(appId: string) {
   });
 }
 
+/** Own leaf under `["cloudflare", ...]`, per app — same prefix-matching reasoning as
+ * `appExposureKey`: a compose file's resolved services are refetched on their own trigger
+ * (this app's compose file changing) and must not share an `invalidateQueries` blast
+ * radius with this app's exposure status. */
+export const appComposeServicesKey = (appId: string) =>
+  ["cloudflare", "compose-services", appId] as const;
+
+/**
+ * `GET /api/apps/:id/expose/services` (Task 5) — the resolved compose services and their
+ * published ports, for the service/port picker `ExposureTab` offers in place of Task 4's
+ * plain text/number inputs. `enabled` mirrors `useCloudflareZones`'s own parameter: the
+ * caller already knows whether the form needing this is even being shown (a tunnel must
+ * be provisioned and the app not already exposed), so this hook does not re-derive that
+ * from a second read of state it does not own.
+ */
+export function useComposeServices(appId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: appComposeServicesKey(appId),
+    queryFn: () => apiFetch<AppComposeServicesStatus>(`/api/apps/${appId}/expose/services`),
+    enabled,
+  });
+}
+
 export type ExposeAppBody = {
   hostname: string;
   zoneId: string;
-  ingressService: string;
-  policyId: string;
+  /** The compose service to route to, and the port it publishes — Task 4: the server
+   * constructs `http://localhost:<port>` itself and validates both against the app's own
+   * resolved compose file, rather than accepting a free-text URL (`routes/cloudflare-
+   * expose.ts`'s own comment on `exposeBody`). */
+  serviceName: string;
+  port: number;
   /** Only sent for the app marked `systemKind: "self"` — see `exposeBody`'s own comment
    * in `routes/cloudflare-expose.ts` for why the server requires it only there. */
   teamDomain?: string;
@@ -399,12 +455,19 @@ export function useMonitorAccess() {
   });
 }
 
-/** `POST /api/cloudflare/monitor` — creates the one shared token and policy, or returns
- * the existing ones unchanged (`ensureMonitorAccess`'s own idempotency). `useMutation`,
- * not a plain function: nothing in its request body or response is a secret (the
- * response is `MonitorAccessStatus`, which never carries one), so there is nothing here
- * for `useMutation`'s cache to leak the way `useSaveCloudflareCredentials` avoids. */
-export function useEnsureMonitorAccess() {
+/**
+ * `POST /api/cloudflare/monitor` — the SAME idempotent route `useSaveCloudflareCredentials`
+ * already fires best-effort right after a credentials save (see that hook's own doc
+ * comment). This is the repair affordance Task 2's implementer flagged was missing: if
+ * that best-effort call failed (a transient Cloudflare error, a token that verified but
+ * turned out to lack the Access-policy permission at that exact moment), Settings used to
+ * offer no way back short of removing and re-adding credentials. `ensureAccessPolicies`
+ * (`access-policies.ts`) is a no-op once both policies already exist, so retrying here is
+ * safe to click more than once and safe to click after the fact — unlike the removed
+ * "Set up monitor token" button, this is not a required step an admin has to know to take;
+ * it only ever appears to REPAIR a setup that should already have completed on its own.
+ */
+export function useEnsureAccessPolicies() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor", { method: "POST" }),

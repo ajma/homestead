@@ -7,6 +7,7 @@ import {
   useAppExposure,
   useCloudflareTunnel,
   useCloudflareZones,
+  useComposeServices,
   useDeprovisionApp,
   useExposeApp,
   useReconcileExposures,
@@ -17,34 +18,19 @@ import type { EditAppContext } from "@web/routes/EditApp";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
 
-/**
- * Client-side mirror of `cloudflare-expose.ts`'s `ingressServiceSchema` — same rule
- * (only `http:`/`https:` is fetchable) as `ProbesPanel`'s own `isHttpUrl`, duplicated
- * for the same reason that one is: this exists purely for immediate form feedback, and
- * the server's copy stays the one actually enforced.
- */
-function isHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
 type FormState = {
   hostname: string;
   zoneId: string;
-  ingressService: string;
-  policyId: string;
+  serviceName: string;
+  port: string;
   teamDomain: string;
 };
 
 const EMPTY_FORM: FormState = {
   hostname: "",
   zoneId: "",
-  ingressService: "",
-  policyId: "",
+  serviceName: "",
+  port: "",
   teamDomain: "",
 };
 
@@ -127,6 +113,9 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
   const tunnelStatus = useCloudflareTunnel();
   const tunnelProvisioned = tunnelStatus.data?.provisioned === true;
   const zones = useCloudflareZones(tunnelProvisioned);
+  // Same `enabled` gate as `zones` above — the picker this feeds only ever appears once a
+  // tunnel exists, so there is nothing useful to resolve before then.
+  const composeServices = useComposeServices(app.id, tunnelProvisioned);
   const exposeApp = useExposeApp(app.id);
   const deprovisionMutation = useDeprovisionApp(app.id);
 
@@ -164,6 +153,42 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
     }
   }, [knownRunningJobId]);
 
+  // A service publishing no ports is shown as not exposable rather than offered and then
+  // refused server-side (Task 4's own `service_publishes_no_ports` 422) — split here once,
+  // rather than filtering inline at each render site below.
+  const resolvedServices =
+    composeServices.data?.valid === true ? composeServices.data.services : [];
+  const exposableServices = resolvedServices.filter((s) => s.publishedPorts.length > 0);
+  const nonExposableServices = resolvedServices.filter((s) => s.publishedPorts.length === 0);
+  const selectedService = resolvedServices.find((s) => s.name === form.serviceName);
+
+  /** The common case is one click: with exactly one exposable service, it (and, if it
+   * publishes exactly one port, that port too) is preselected the moment the resolved
+   * compose file loads. Guarded on `prev.serviceName === ""` so this never overwrites a
+   * choice the admin already made — including choosing something else back out of a
+   * single-service compose file, which this effect must not immediately re-apply. */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally keyed on the resolved service list only
+  useEffect(() => {
+    if (exposableServices.length !== 1) return;
+    const [only] = exposableServices;
+    if (!only) return;
+    setForm((prev) => {
+      if (prev.serviceName !== "") return prev;
+      const port = only.publishedPorts.length === 1 ? String(only.publishedPorts[0]) : "";
+      return { ...prev, serviceName: only.name, port };
+    });
+  }, [composeServices.data]);
+
+  /** Choosing a service resets the port rather than leaving a stale selection from a
+   * previous service in place — unless the newly chosen service itself publishes exactly
+   * one port, in which case that one click also picks the port. */
+  function handleServiceChange(name: string) {
+    const service = resolvedServices.find((s) => s.name === name);
+    const port =
+      service && service.publishedPorts.length === 1 ? String(service.publishedPorts[0]) : "";
+    setForm((prev) => ({ ...prev, serviceName: name, port }));
+  }
+
   function handleExposeSubmit(event: FormEvent) {
     event.preventDefault();
     setFormError(null);
@@ -178,14 +203,14 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
       setFormError("Choose a zone.");
       return;
     }
-    const ingressService = form.ingressService.trim();
-    if (!isHttpUrl(ingressService)) {
-      setFormError("Enter a valid http:// or https:// URL for the internal service.");
+    const serviceName = form.serviceName;
+    if (serviceName === "") {
+      setFormError("Choose the compose service to route to.");
       return;
     }
-    const policyId = form.policyId.trim();
-    if (policyId === "") {
-      setFormError("Enter the Access policy id that should protect this hostname.");
+    const port = Number(form.port);
+    if (!Number.isInteger(port) || port <= 0) {
+      setFormError("Choose the published port to route to.");
       return;
     }
     const teamDomain = form.teamDomain.trim();
@@ -194,7 +219,7 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
       return;
     }
 
-    const body: ExposeAppBody = { hostname, zoneId: form.zoneId, ingressService, policyId };
+    const body: ExposeAppBody = { hostname, zoneId: form.zoneId, serviceName, port };
     if (isSelf) body.teamDomain = teamDomain;
 
     // Drops the previous attempt's transcript, if any — a retry's own output should not
@@ -432,30 +457,71 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
             </select>
           )}
 
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium text-slate-900 dark:text-slate-100">
-              Internal service URL
-            </span>
-            <input
-              type="text"
-              value={form.ingressService}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, ingressService: event.target.value }))
-              }
-              placeholder="http://localhost:8096"
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
-            />
+          <label htmlFor="expose-service" className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-900 dark:text-slate-100">Compose service</span>
           </label>
+          {composeServices.isPending && (
+            <p className="text-sm text-slate-500">Loading compose services…</p>
+          )}
+          {composeServices.isError && (
+            <p role="alert" className="text-sm text-red-600">
+              Could not load this app's compose services.
+            </p>
+          )}
+          {composeServices.data && !composeServices.data.valid && (
+            <p role="alert" className="text-sm text-red-600">
+              This app's compose file is invalid: {composeServices.data.message}
+            </p>
+          )}
+          {composeServices.data?.valid === true && (
+            <select
+              id="expose-service"
+              value={form.serviceName}
+              onChange={(event) => handleServiceChange(event.target.value)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+            >
+              <option value="">Choose a service…</option>
+              {exposableServices.map((service) => (
+                <option key={service.name} value={service.name}>
+                  {service.name}
+                </option>
+              ))}
+              {nonExposableServices.map((service) => (
+                <option key={service.name} value={service.name} disabled>
+                  {service.name} — not exposable (publishes no ports)
+                </option>
+              ))}
+            </select>
+          )}
 
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="font-medium text-slate-900 dark:text-slate-100">Access policy id</span>
-            <input
-              type="text"
-              value={form.policyId}
-              onChange={(event) => setForm((prev) => ({ ...prev, policyId: event.target.value }))}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
-            />
+          <label htmlFor="expose-port" className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-900 dark:text-slate-100">Published port</span>
           </label>
+          <select
+            id="expose-port"
+            value={form.port}
+            onChange={(event) => setForm((prev) => ({ ...prev, port: event.target.value }))}
+            disabled={selectedService === undefined}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-800 dark:bg-slate-950"
+          >
+            <option value="">Choose a port…</option>
+            {(selectedService?.publishedPorts ?? []).map((port) => (
+              <option key={port} value={String(port)}>
+                {port}
+              </option>
+            ))}
+          </select>
+
+          {/* The sentence that matters most in this form (§6's shared-policy scope,
+              stated where the admin is making the decision, not only in a doc): the
+              Access policy protecting every exposed app is the SAME one for all of them,
+              regardless of what any one user can see inside Homestead itself. */}
+          <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            Exposing {app.displayName} grants sign-in access to every enabled Homestead user —
+            including viewers scoped to entirely different apps — because every exposed app shares
+            the same Access sign-in policy. Homestead's own per-app permissions do not carry through
+            to who Cloudflare lets in.
+          </p>
 
           {isSelf && (
             <label className="flex flex-col gap-1 text-sm">

@@ -1,15 +1,15 @@
-import type { AppExposureStatus } from "@shared/cloudflare.js";
+import type { AppComposeServicesStatus, AppExposureStatus } from "@shared/cloudflare.js";
 import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { AppBusyError } from "../apps/app-lock.js";
 import { audit } from "../audit.js";
 import { requireCapability } from "../auth/context.js";
+import { AccessPoliciesStore } from "../cloudflare/access-policies.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { deprovision } from "../cloudflare/deprovision.js";
-import { exposeSteps } from "../cloudflare/expose.js";
-import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
+import { exposeSteps, internalServiceUrl } from "../cloudflare/expose.js";
 import { parseDriftFindings } from "../cloudflare/reconcile.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
 import type { Db } from "../db/client.js";
@@ -22,33 +22,19 @@ import { loadApp } from "./apps.js";
  * outside that filter. */
 export const EXPOSE_KIND = "cloudflare_expose";
 
-/** `cloudflared` fetches this exact URL — spec §6's networking section:
- * `http://localhost:<published-port>`, dialled from inside the `cloudflared` container
- * (`network_mode: host`, so it can reach anything on the NAS or its LAN — §6), NOT the
- * Homestead server itself. This is not the same SSRF exposure `routes/probes.ts`'s
- * `targetSchema` guards against (the server fetching a probe target), even though it
- * reuses the same http(s)-only shape: the value here is written into the tunnel's
- * ingress array, which is why `ssh://`, `unix:`, `tcp://` and the special `http_status:`
- * services are still worth rejecting through this route — an admin has no other reason to
- * write one of those here, and cloudflared's own ingress config already has room for
- * behaviour this project does not want to expose through a plain string field. */
-const ingressServiceSchema = z.string().refine((value) => {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}, "ingressService must be an http or https URL");
-
 const exposeBody = z.object({
   hostname: z.string().trim().min(1),
   zoneId: z.string().trim().min(1),
-  ingressService: ingressServiceSchema,
-  /** The admin-chosen Access policy demanding a human identity — spec §6. Homestead does
-   * not create or manage this policy; it is referenced by id, the same way the shared
-   * monitor policy is (see `expose.ts`'s `ExposeDeps.humanPolicyId`). */
-  policyId: z.string().trim().min(1),
+  /** The compose service `cloudflared` should route to — Task 4: this route no longer
+   * accepts a raw URL from the admin (an `ingressService` string, free to typo into a port
+   * nothing serves). Both this and `port` below are validated against the app's OWN
+   * resolved compose config before anything is provisioned — see the route body. */
+  serviceName: z.string().trim().min(1),
+  /** The published port on `serviceName` — validated to be one `serviceName` actually
+   * publishes (`ResolvedService.publishedPorts`, `compose-config.ts`) before this route
+   * constructs `http://localhost:<port>` (`internalServiceUrl`) and hands it to
+   * `exposeSteps`. */
+  port: z.number().int().positive(),
   /**
    * Required ONLY when the app being exposed is `systemKind: "self"` — checked below,
    * not in this schema, since that depends on a database row the schema cannot see. The
@@ -78,10 +64,50 @@ async function runningExposeJobId(db: Db, appId: string): Promise<string | null>
 }
 
 export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void> {
-  const { db, secrets, stepJobs, tunnelConfigLock } = app.deps;
+  const { db, secrets, stepJobs, tunnelConfigLock, composeConfig } = app.deps;
   const credentialStore = new CloudflareCredentialStore(db, secrets);
   const tunnelStore = new TunnelStore(db, secrets);
-  const monitorStore = new MonitorAccessStore(db, secrets);
+  const monitorStore = new AccessPoliciesStore(db, secrets);
+
+  /**
+   * The compose services the exposure form can offer to route to — Task 5's answer to
+   * Task 4's own flagged gap: nothing returned the app's resolved compose services, so the
+   * form fell back to plain text/number inputs a typo could break in a way the POST
+   * route's own validation (below) would only catch after the fact.
+   *
+   * Reuses `composeConfig.resolve` — the SAME `ComposeConfigCache` instance and the SAME
+   * cached result the POST route's own validation reads from a moment later — rather than
+   * a second call to `docker compose config`, the expensive command this cache exists to
+   * avoid running twice for one exposure attempt (`compose-config.ts`'s own doc comment).
+   * A service publishing no ports is still returned, with `publishedPorts: []`, not
+   * filtered out: the form is what shows it as not exposable, with the reason, in place of
+   * Task 4's own server-side `service_publishes_no_ports` refusal, which the form should
+   * never reach for a service it could have known not to offer.
+   *
+   * Gated on `cf:read` and scoped through `loadApp`, identically to `GET
+   * /api/apps/:id/expose` below — same reasoning: a viewer, or an admin scoped away from
+   * this app, gets a 404, never a 403 that would confirm the app exists.
+   */
+  app.get("/api/apps/:id/expose/services", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:read");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const appRow = await loadApp(db, ctx, id);
+    if (!appRow) return reply.code(404).send({ error: "not_found" });
+
+    const composeTarget = { directory: appRow.directory, composeFile: appRow.composeFile };
+    const resolved = await composeConfig.resolve(composeTarget);
+    if (!resolved.valid) {
+      return { valid: false, message: resolved.message } satisfies AppComposeServicesStatus;
+    }
+    return {
+      valid: true,
+      services: resolved.resolved.services.map((service) => ({
+        name: service.name,
+        publishedPorts: service.publishedPorts,
+      })),
+    } satisfies AppComposeServicesStatus;
+  });
 
   /**
    * Read-only status of this one app's exposure — 2F Task 3's only consumer, and the one
@@ -175,6 +201,32 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       return reply.code(409).send({ error: "not_configured" });
     }
 
+    // Task 4: validate `serviceName`/`port` against the app's OWN resolved compose file —
+    // checked here, after every state prerequisite above (tunnel, monitor, credentials)
+    // but before anything is provisioned, so a typo'd service or port never gets as far as
+    // constructing a URL and splicing it into the tunnel's ingress config. Placed last
+    // among the checks (rather than first) so the routes' many existing state-prerequisite
+    // tests never need a working compose fixture just to reach an unrelated 409 — this is
+    // the one check specific to the request BODY's own content, not to whether exposing is
+    // possible at all right now.
+    const composeTarget = { directory: appRow.directory, composeFile: appRow.composeFile };
+    const resolved = await composeConfig.resolve(composeTarget);
+    if (!resolved.valid) {
+      return reply.code(422).send({ error: "compose_invalid", message: resolved.message });
+    }
+    const service = resolved.resolved.services.find((s) => s.name === body.serviceName);
+    if (!service) {
+      return reply.code(422).send({ error: "service_not_found" });
+    }
+    if (service.publishedPorts.length === 0) {
+      // Say so clearly rather than constructing a URL to nowhere — a service that
+      // publishes no ports cannot be exposed, whatever port number the request asked for.
+      return reply.code(422).send({ error: "service_publishes_no_ports" });
+    }
+    if (!service.publishedPorts.includes(body.port)) {
+      return reply.code(422).send({ error: "port_not_published" });
+    }
+
     const client = createCloudflareClient({
       token: credentials.token,
       accountId: credentials.accountId,
@@ -189,9 +241,12 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       hostname: body.hostname,
       zoneId: body.zoneId,
       tunnelId: tunnel.tunnelId,
-      ingressService: body.ingressService,
-      humanPolicyId: body.policyId,
-      monitorPolicyId: monitorAccess.policyId,
+      internalUrl: internalServiceUrl(body.port),
+      // Task 5: no longer admin-supplied. Both policies exist from Cloudflare setup now
+      // (`ensureAccessPolicies`, Task 2/3) — asking for an id here was always internal
+      // plumbing leaking into a form the admin never should have needed to fill in.
+      humanPolicyId: monitorAccess.humanPolicyId,
+      monitorPolicyId: monitorAccess.monitorPolicyId,
       // `undefined` for every non-self app — see `ExposeDeps.selfAccessTeamDomain`'s own
       // doc comment for why that must be an absent field, not merely an unused one.
       selfAccessTeamDomain: isSelf ? body.teamDomain : undefined,

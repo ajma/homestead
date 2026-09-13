@@ -90,6 +90,23 @@ function stubFetch(
       if (opts.provisionPost) return opts.provisionPost();
       return json(202, { jobId: "job-1" });
     }
+    // `useSaveCloudflareCredentials` (Phase 3A) fires this, best-effort, right after a
+    // successful credentials PUT — see that hook's own doc comment. This step never reads
+    // the result, so a plain "configured" answer is enough to keep the save's own promise
+    // chain from swallowing an "unhandled request" error on every successful save.
+    if (url === "/api/cloudflare/monitor" && method === "POST") {
+      // F7 (whole-branch review, Minor): a valid `MonitorAccessStatus` needs
+      // `humanPolicyId` too (Phase 3A) — this fixture omitted it, so it was never a shape
+      // this route could actually return. Harmless (this step never reads the result —
+      // see the comment above), but worth matching what ships rather than what predates it.
+      return json(200, {
+        configured: true,
+        clientId: "client-1",
+        policyId: "policy-1",
+        humanPolicyId: "human-policy-1",
+        expiresAt: null,
+      });
+    }
     throw new Error(`unhandled request: ${method} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);

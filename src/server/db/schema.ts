@@ -192,6 +192,12 @@ export const exposures = sqliteTable("exposures", {
   // (`deprovision.ts`), so a dangling value here after a probe is deleted directly is
   // harmless by construction, not by luck.
   probeId: text("probe_id"),
+  // Task 4's sibling to `probeId` above — the `http_internal` probe `create-probe` created
+  // or adopted, tracked separately so `deprovision.ts` can delete each probe BY ITS OWN
+  // RECORDED ID, never by `(appId, kind)`. Same soft-reference reasoning as `probeId`: no
+  // FK, a stale or missing value after a direct probe delete is harmless, every reader
+  // already treats it as "nothing to act on".
+  probeInternalId: text("probe_internal_id"),
   dnsRecordCreatedByUs: integer("dns_record_created_by_us", { mode: "boolean" })
     .notNull()
     .default(false),
@@ -207,6 +213,12 @@ export const exposures = sqliteTable("exposures", {
   // touches — see `expose.ts`'s `create-probe` step and `deprovision.ts`'s own doc
   // comment.
   probeCreatedByUs: integer("probe_created_by_us", { mode: "boolean" }).notNull().default(false),
+  // `true` when `create-probe` created the `http_internal` probe above; `false` when it
+  // adopted the app's own pre-existing one. Same adopted-resource pattern as
+  // `probeCreatedByUs`, applied to the fifth resource this sequence now touches (Task 4).
+  probeInternalCreatedByUs: integer("probe_internal_created_by_us", { mode: "boolean" })
+    .notNull()
+    .default(false),
   state: text("state", { enum: ["provisioning", "ready", "error", "drifted"] })
     .notNull()
     .default("provisioning"),
