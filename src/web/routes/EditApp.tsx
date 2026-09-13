@@ -24,11 +24,10 @@ const STATUS_FALLBACK: Record<AppStatus, string> = {
 };
 
 /**
- * `overview`, `containers`, `logs`, `probes`, `compose`, `env` — Phase 1F's full set. A
- * list rather than literals scattered across the nav markup, so a later tab is one entry
- * here plus one child `<Route>` in `App.tsx` — not a hunt through JSX.
- *
- * Deliberately no `exposure` entry: Cloudflare is Phase 2.
+ * `overview`, `containers`, `logs`, `probes`, `compose`, `env`, `exposure` — Phase 1F's
+ * full set plus 2F Task 3's exposure tab. A list rather than literals scattered across
+ * the nav markup, so a later tab is one entry here plus one child `<Route>` in
+ * `App.tsx` — not a hunt through JSX.
  */
 const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "overview", label: "Overview" },
@@ -37,6 +36,7 @@ const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "probes", label: "Probes" },
   { to: "compose", label: "Compose" },
   { to: "env", label: ".env" },
+  { to: "exposure", label: "Exposure" },
 ];
 
 /**

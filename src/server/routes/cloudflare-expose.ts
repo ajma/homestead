@@ -1,4 +1,5 @@
-import { eq } from "drizzle-orm";
+import type { AppExposureStatus } from "@shared/cloudflare.js";
+import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { AppBusyError } from "../apps/app-lock.js";
@@ -10,7 +11,8 @@ import { deprovision } from "../cloudflare/deprovision.js";
 import { exposeSteps } from "../cloudflare/expose.js";
 import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
-import { exposures } from "../db/schema.js";
+import type { Db } from "../db/client.js";
+import { exposures, jobs } from "../db/schema.js";
 import { loadApp } from "./apps.js";
 
 /** The `jobs.kind` this route records under. Never in `JOB_KINDS` (`job-runner.ts`) —
@@ -60,11 +62,59 @@ const exposeBody = z.object({
   teamDomain: z.string().trim().min(1).optional(),
 });
 
+/** This app's own currently-running expose job, if any — mirrors
+ * `cloudflare-tunnel.ts`'s `runningProvisionJobId`, scoped to one app instead of system-
+ * wide since (unlike the tunnel provision sequence, which creates the app it eventually
+ * registers) an expose job always has a real `appId` from the moment `stepJobs.start`
+ * inserts its row. Read fresh on every `GET`, not cached: this is exactly the fact a
+ * reloaded tab (or a second admin's tab) has no other way to learn. */
+async function runningExposeJobId(db: Db, appId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(eq(jobs.appId, appId), eq(jobs.kind, EXPOSE_KIND), eq(jobs.status, "running")));
+  return row?.id ?? null;
+}
+
 export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void> {
   const { db, secrets, stepJobs, tunnelConfigLock } = app.deps;
   const credentialStore = new CloudflareCredentialStore(db, secrets);
   const tunnelStore = new TunnelStore(db, secrets);
   const monitorStore = new MonitorAccessStore(db, secrets);
+
+  /**
+   * Read-only status of this one app's exposure — 2F Task 3's only consumer, and the one
+   * of "eleven Cloudflare routes" the exposure tab needs that nothing before it returned:
+   * every other route in this file only ever starts or tears down an exposure, never
+   * reports what one currently looks like. Gated on `cf:read` like every other Cloudflare
+   * status read in this codebase, and scoped through `loadApp` exactly like the POST and
+   * DELETE routes below — a viewer, or an admin scoped away from this app, gets the same
+   * 404 either of those already gives, never a 403 that would confirm the app exists.
+   */
+  app.get("/api/apps/:id/expose", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:read");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const appRow = await loadApp(db, ctx, id);
+    if (!appRow) return reply.code(404).send({ error: "not_found" });
+
+    const [[exposure], runningJobId] = await Promise.all([
+      db.select().from(exposures).where(eq(exposures.appId, id)),
+      runningExposeJobId(db, id),
+    ]);
+
+    if (!exposure) {
+      return { exposed: false, runningJobId } satisfies AppExposureStatus;
+    }
+    return {
+      exposed: true,
+      hostname: exposure.hostname,
+      state: exposure.state,
+      accessAppId: exposure.accessAppId,
+      accessAppAud: exposure.accessAppAud,
+      runningJobId,
+    } satisfies AppExposureStatus;
+  });
 
   app.post("/api/apps/:id/expose", async (request, reply) => {
     const ctx = requireCapability(request, "cf:write");
@@ -229,7 +279,18 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
         // flipped, so calling this same endpoint again resumes exactly where it left off.
         return reply.code(500).send({
           error: "deprovision_incomplete",
-          failures: outcome.failures.map((f) => f.resource),
+          // The resource slug AND the message `deprovision.ts` built for it — 2F Task 3's
+          // change. The slug alone (what this used to send) told an admin WHICH of four
+          // resources failed but never WHY, which is exactly backwards for the
+          // access-app case: that message is the only place an admin learns the hostname
+          // is still fully routed and unauthenticated, and what to do about it. `message`
+          // is `String(error)` for the rare non-`Error` throw, matching every other
+          // "read a caught error for display" spot in this codebase (e.g.
+          // `describeCloudflareError` on the client).
+          failures: outcome.failures.map((f) => ({
+            resource: f.resource,
+            message: f.error instanceof Error ? f.error.message : String(f.error),
+          })),
         });
       }
 

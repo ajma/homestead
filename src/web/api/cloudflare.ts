@@ -1,4 +1,5 @@
 import {
+  type AppExposureStatus,
   type CloudflareFault,
   type CloudflareStatus,
   type CloudflareZone,
@@ -233,4 +234,151 @@ export function useProvisionTunnel() {
     queryClient.invalidateQueries({ queryKey: cloudflareTunnelKey });
     return result;
   };
+}
+
+/** One leaf per app, not folded into `cloudflareTunnelKey` — same prefix-matching
+ * reasoning as every other key in this file: this app's exposure and the account's one
+ * tunnel are refetched on different triggers and must not share an `invalidateQueries`
+ * blast radius. */
+export const appExposureKey = (appId: string) => ["cloudflare", "expose", appId] as const;
+
+/**
+ * `GET /api/apps/:id/expose` (2F Task 3) — the one read the exposure tab needs that
+ * nothing before it returned; see `AppExposureStatus`'s own doc comment in
+ * `@shared/cloudflare.js`. Polls every 5s only while `runningJobId` is set, the same
+ * `useCloudflareTunnel` pattern above and for the same reason: a tab reloaded mid-expose,
+ * or a second admin's tab, needs to notice the sequence without a manual refresh.
+ */
+export function useAppExposure(appId: string) {
+  return useQuery({
+    queryKey: appExposureKey(appId),
+    queryFn: () => apiFetch<AppExposureStatus>(`/api/apps/${appId}/expose`),
+    refetchInterval: (query) => (query.state.data?.runningJobId ? 5_000 : false),
+  });
+}
+
+export type ExposeAppBody = {
+  hostname: string;
+  zoneId: string;
+  ingressService: string;
+  policyId: string;
+  /** Only sent for the app marked `systemKind: "self"` — see `exposeBody`'s own comment
+   * in `routes/cloudflare-expose.ts` for why the server requires it only there. */
+  teamDomain?: string;
+};
+
+/**
+ * `POST /api/apps/:id/expose`. A plain function, not `useMutation` — the same shape as
+ * `useProvisionTunnel` above, and for a related reason: Expose creates real resources in
+ * the user's Cloudflare account (a DNS record, an Access application, an ingress rule),
+ * the same class of consequential action Provision is, so the caller drives its own
+ * synchronous `starting` state rather than trusting `useMutation`'s `isPending` — see
+ * `CloudflarePanel`'s own doc comment on `notifyManager` deferring that flag through a
+ * `setTimeout(0)` a second click can land inside of. Unlike `useProvisionTunnel`, no
+ * custom `timeoutMs`: 2F Task 1 detached BOTH step-job routes from the sequence they kick
+ * off, so this POST already answers as soon as the job row exists, well inside
+ * `apiFetch`'s ordinary default.
+ */
+export function useExposeApp(appId: string) {
+  const queryClient = useQueryClient();
+  return async function exposeApp(body: ExposeAppBody): Promise<{ jobId: string }> {
+    const result = await apiFetch<{ jobId: string }>(`/api/apps/${appId}/expose`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    queryClient.invalidateQueries({ queryKey: appExposureKey(appId) });
+    return result;
+  };
+}
+
+/** `DELETE /api/apps/:id/expose`'s error bodies are `{ error: <code> }` for every 409, the
+ * same shape `tunnelErrorCode` already reads — reused rather than duplicated. */
+function exposeErrorCode(error: unknown): string | null {
+  return tunnelErrorCode(error);
+}
+
+const EXPOSE_ERROR_MESSAGES: Record<string, string> = {
+  tunnel_not_provisioned: "No tunnel is provisioned yet. Provision one from Settings first.",
+  monitor_not_configured:
+    "The monitor service token is not set up yet. Configure it from Settings first.",
+  not_configured: "Add Cloudflare credentials in Settings before exposing this app.",
+  already_exposed: "This app is already exposed.",
+  hostname_taken: "That hostname is already used by another exposed app.",
+  team_domain_required: "Enter this app's Cloudflare Zero Trust team domain to expose it.",
+  app_busy: "Another job is already running for this app. Try again shortly.",
+};
+
+/** Mirrors `describeTunnelError` above, over the expose route's own error codes. */
+export function describeExposeError(error: unknown, fallback: string): string {
+  const code = exposeErrorCode(error);
+  const message = code === null ? undefined : EXPOSE_ERROR_MESSAGES[code];
+  if (message !== undefined) return message;
+  if (error instanceof ApiTimeoutError) return TIMEOUT_MESSAGE;
+  if (!(error instanceof ApiError)) {
+    return "Could not reach the server. Check the network and try again.";
+  }
+  return fallback;
+}
+
+/** `DELETE /api/apps/:id/expose`'s 500 `deprovision_incomplete` body — see
+ * `cloudflare-expose.ts`'s own comment on why this carries a message per resource, not
+ * just the resource's name. */
+type DeprovisionFailure = { resource: string; message: string };
+
+function deprovisionFailures(error: unknown): DeprovisionFailure[] | null {
+  if (!(error instanceof ApiError)) return null;
+  if (error.body === null || typeof error.body !== "object" || !("failures" in error.body)) {
+    return null;
+  }
+  const { failures } = error.body as { failures: unknown };
+  return Array.isArray(failures) ? (failures as DeprovisionFailure[]) : null;
+}
+
+const DEPROVISION_ERROR_MESSAGES: Record<string, string> = {
+  not_exposed: "This app is not exposed.",
+  not_configured: "Add Cloudflare credentials in Settings before removing this exposure.",
+  app_busy: "Another job is already running for this app. Try again shortly.",
+};
+
+/**
+ * `deprovision.ts`'s own carefully-worded refusal — "the actual reason and what to do
+ * about it" (2F Task 3's brief) — reaches here as `failures[].message` and is rendered
+ * verbatim, one clause per resource, rather than collapsed into a generic "could not
+ * remove" sentence. **Prominence, not just presence**: every failing resource is listed,
+ * not only the first, because a partial success (three resources gone, one refused) is
+ * exactly the shape a user must read in full to know what is still live. Joined with
+ * `"; "`, not newlines — this string is rendered inside `ConfirmDialog`'s plain `<p>`
+ * (reused, not reimplemented: see this tab's own doc comment on why), which does not
+ * preserve whitespace, so a newline-joined list would collapse into a run-on sentence
+ * with no visible separation at all.
+ */
+export function describeDeprovisionError(error: unknown, fallback: string): string {
+  const failures = deprovisionFailures(error);
+  if (failures && failures.length > 0) {
+    const detail = failures.map((f) => `${f.resource} — ${f.message}`).join("; ");
+    return `Could not fully remove this exposure: ${detail}`;
+  }
+  const code = exposeErrorCode(error);
+  const message = code === null ? undefined : DEPROVISION_ERROR_MESSAGES[code];
+  if (message !== undefined) return message;
+  if (error instanceof ApiTimeoutError) return TIMEOUT_MESSAGE;
+  if (!(error instanceof ApiError)) {
+    return "Could not reach the server. Check the network and try again.";
+  }
+  return fallback;
+}
+
+/** `DELETE /api/apps/:id/expose`. `useMutation`, unlike Expose above: nothing here is a
+ * secret, and the destructive click already goes through `ConfirmDialog`, which owns its
+ * own once-only guard (`pendingRef`) independent of `isPending` — the same reasoning
+ * `OverviewTab`'s own delete mutation and `useDeleteCloudflareCredentials` both rely on.
+ * `onSettled`, not `onSuccess` alone: a failed deprovision still changes the `exposures`
+ * row (some flags flip to `false` even though the row survives — `deprovision.ts`'s own
+ * doc comment), so the tab's view of it needs refreshing either way. */
+export function useDeprovisionApp(appId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<{ ok: true }>(`/api/apps/${appId}/expose`, { method: "DELETE" }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: appExposureKey(appId) }),
+  });
 }

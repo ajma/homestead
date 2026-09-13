@@ -517,6 +517,152 @@ describe("POST /api/apps/:id/expose", () => {
   });
 });
 
+describe("GET /api/apps/:id/expose", () => {
+  it("requires the read capability — a viewer gets 403", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: viewerCookie } = await createViewer(app, adminCookie);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("gives a scoped admin 404 for an app outside their scope, not a normal not-exposed answer", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: scopedCookie } = await createScopedAdmin(app, adminCookie, { appIds: [] });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie: scopedCookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("404s for a nonexistent app", async () => {
+    const { app, cookie } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps/does-not-exist/expose",
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("reports not exposed, with no running job, for an app never exposed", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ exposed: false, runningJobId: null });
+    await app.close();
+  });
+
+  it("reports the exposure's hostname, state and Access application once exposed", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const exposeRes = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+    expect(exposeRes.statusCode).toBe(202);
+    const { jobId } = exposeRes.json() as { jobId: string };
+    await waitForJobTerminal(app.deps.db, jobId);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      exposed: boolean;
+      hostname: string;
+      state: string;
+      accessAppId: string | null;
+      accessAppAud: string | null;
+      runningJobId: string | null;
+    };
+    expect(body).toEqual({
+      exposed: true,
+      hostname: "jellyfin.example.com",
+      state: "ready",
+      accessAppId: expect.any(String),
+      accessAppAud: expect.any(String),
+      runningJobId: null,
+    });
+    await app.close();
+  });
+
+  it("reports the in-flight job's id while an expose sequence is still running, before anything is exposed yet", async () => {
+    // The gap `TunnelStatus.runningJobId` closes for the tunnel provision sequence
+    // (2C Task 4), applied here: a page loaded the instant after `POST .../expose`
+    // returns its `jobId` has no exposure row yet (the first step has not run), but
+    // there IS a sequence in flight this tab needs to notice rather than silently
+    // showing the "not exposed, offer the form again" state.
+    const { app, cookie, appId } = await withFullSetup();
+    let releaseIngress: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseIngress = resolve;
+    });
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = (async (
+      input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ) => {
+      const url = new URL(typeof input === "string" ? input : input.toString());
+      if (url.pathname.endsWith("/configurations") && (init?.method ?? "GET") === "GET") {
+        await gate;
+      }
+      return exposed(input, init);
+    }) as typeof fetch;
+
+    const exposeRes = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+    expect(exposeRes.statusCode).toBe(202);
+    const { jobId } = exposeRes.json() as { jobId: string };
+
+    const res = await until(
+      async () =>
+        app.inject({
+          method: "GET",
+          url: `/api/apps/${appId}/expose`,
+          headers: { cookie },
+        }),
+      (r) => (r.json() as { runningJobId: string | null }).runningJobId !== null,
+    );
+    expect(res.json()).toEqual({ exposed: false, runningJobId: jobId });
+
+    releaseIngress?.();
+    await waitForJobTerminal(app.deps.db, jobId);
+    await app.close();
+  });
+});
+
 describe("DELETE /api/apps/:id/expose", () => {
   it("requires an admin capability — a viewer gets 403", async () => {
     const { app, cookie: adminCookie, appId } = await withFullSetup();
@@ -683,9 +829,17 @@ describe("DELETE /api/apps/:id/expose", () => {
     });
 
     expect(res.statusCode).toBe(500);
-    const body = res.json() as { error: string; failures: string[] };
+    const body = res.json() as {
+      error: string;
+      failures: Array<{ resource: string; message: string }>;
+    };
     expect(body.error).toBe("deprovision_incomplete");
     expect(body.failures.length).toBeGreaterThan(0);
+    // The reason, not just which resource — see `cloudflare-expose.ts`'s own comment on
+    // why the slug alone used to be worse than useless for the access-app case.
+    expect(typeof body.failures[0]?.resource).toBe("string");
+    expect(typeof body.failures[0]?.message).toBe("string");
+    expect(body.failures[0]?.message.length).toBeGreaterThan(0);
 
     const [exposureRow] = await app.deps.db
       .select()

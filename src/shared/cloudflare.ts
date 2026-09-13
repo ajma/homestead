@@ -116,3 +116,31 @@ export type MonitorAccessStatus =
 export type AccessConfigStatus =
   | { configured: false }
   | { configured: true; teamDomain: string; aud: string };
+
+/**
+ * `GET /api/apps/:id/expose`'s shape — 2F Task 3's read model over the `exposures` row
+ * `cloudflare/expose.ts`'s step sequence writes, plus whatever expose (or, in principle, a
+ * future re-expose) job is running right now for this app. A discriminated union on
+ * `exposed`, the same pattern every other Cloudflare status route in this file uses, for
+ * the same reason: a caller cannot accidentally read `hostname` off a status that has
+ * none.
+ *
+ * `runningJobId` sits on BOTH branches, the same way `TunnelStatus.runningJobId` does and
+ * for the same reason: `POST /api/apps/:id/expose`'s own sequence writes the `exposures`
+ * row from an early step onward (Homestead is exposed, in the `provisioning` state) well
+ * before the sequence's last step finishes, and could still fail and roll everything back
+ * out — a caller that only checked `exposed` would announce success before it was earned.
+ * Independently, the row does not exist AT ALL until that first step runs, so a page
+ * loaded the instant after a POST returns its `jobId` needs `runningJobId` on the `false`
+ * branch too, to notice a sequence is already under way with nothing exposed yet.
+ */
+export type AppExposureStatus =
+  | { exposed: false; runningJobId: string | null }
+  | {
+      exposed: true;
+      hostname: string;
+      state: "provisioning" | "ready" | "error" | "drifted";
+      accessAppId: string | null;
+      accessAppAud: string | null;
+      runningJobId: string | null;
+    };

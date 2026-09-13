@@ -206,6 +206,19 @@ describe("the admin route guard", () => {
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
+  it("sends a viewer away from the exposure deep url", async () => {
+    // 2F Task 3: the exposure tab is a new admin surface, and the viewer boundary is
+    // proved by navigation, not by link visibility — Phase 1G's own lesson, applied to
+    // the one tab this phase adds. Breaking the `isAdmin` guard for `/apps/:slug/*`
+    // would fail this the same way it fails every sibling test above.
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/exposure");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Exposure" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
   it("sends a viewer away from settings", async () => {
     // `/settings` has no per-app slug to guard, only the role check `App.tsx` applies
     // to the whole `/settings/*` subtree — the same claim as every route above, made

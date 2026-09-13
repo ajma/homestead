@@ -139,28 +139,39 @@ describe("EditApp", () => {
   it("offers a tab link per route", () => {
     stubFetch(app);
     mount();
-    for (const name of ["Overview", "Containers", "Logs", "Probes", "Compose", ".env"]) {
+    for (const name of [
+      "Overview",
+      "Containers",
+      "Logs",
+      "Probes",
+      "Compose",
+      ".env",
+      "Exposure",
+    ]) {
       expect(screen.getByRole("link", { name })).toBeTruthy();
     }
   });
 
-  it("orders the tabs Overview, Containers, Logs, Probes, Compose, then .env", () => {
+  it("orders the tabs Overview, Containers, Logs, Probes, Compose, .env, then Exposure", () => {
     // Not just presence — the brief calls for "a sensible order" and this is the one a
     // reader would expect: status/inspection tabs first, the two editors (the heaviest,
-    // least-often-needed tabs) last.
+    // least-often-needed tabs) after that, and 2F Task 3's exposure tab — the newest, and
+    // the one most apps will never touch — last of all.
     stubFetch(app);
     mount();
     const nav = screen.getByRole("navigation", { name: "App sections" });
     const labels = within(nav)
       .getAllByRole("link")
       .map((link) => link.textContent);
-    expect(labels).toEqual(["Overview", "Containers", "Logs", "Probes", "Compose", ".env"]);
-  });
-
-  it("has no exposure tab, since Cloudflare is Phase 2", () => {
-    stubFetch(app);
-    mount();
-    expect(screen.queryByRole("link", { name: /Exposure/ })).toBeNull();
+    expect(labels).toEqual([
+      "Overview",
+      "Containers",
+      "Logs",
+      "Probes",
+      "Compose",
+      ".env",
+      "Exposure",
+    ]);
   });
 
   it("says so plainly when the slug matches no app", async () => {
