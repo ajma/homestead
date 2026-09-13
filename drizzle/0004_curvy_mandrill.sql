@@ -1,0 +1,1 @@
+ALTER TABLE `exposures` ADD `drift_findings` text;

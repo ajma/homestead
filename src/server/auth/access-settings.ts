@@ -23,8 +23,12 @@ export type AccessSettings = { teamDomain: string; aud: string } | null;
  */
 export const ACCESS_TEAM_DOMAIN_SETTING_KEY = "cloudflare.access.team_domain";
 
-/** `""` is not a value — see the module doc comment on `resolveAccessSettings`. */
-function isPresent(value: string | null | undefined): value is string {
+/** `""` is not a value — see the module doc comment on `resolveAccessSettings`.
+ * Exported for `routes/cloudflare.ts` alone: `GET /api/cloudflare/access` (2F Task 4)
+ * has to tell an admin WHICH source `resolveAccessSettings` resolved from, and re-runs
+ * this exact "is the environment complete" check to do it rather than duplicating a
+ * second, drifting copy of the emptiness rule. */
+export function isPresent(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== "";
 }
 
@@ -34,19 +38,61 @@ async function readSetting(db: Db, key: string): Promise<string | null> {
 }
 
 /**
+ * Records the account's Cloudflare Access team domain — the write side of the gap this
+ * module's own doc comment on `readFromDatabase` used to describe as unbuilt. Called from
+ * `cloudflare/expose.ts`'s step sequence, and ONLY when the app being exposed is marked
+ * `systemKind: "self"` (`self-detect.ts` / the explicit override in `routes/apps.ts`) —
+ * this setting is account-wide, not per-app, so writing it for any other app's exposure
+ * would silently repoint Access verification at a team domain unrelated to what
+ * `resolveAccessSettings` is meant to protect.
+ *
+ * Idempotent the same way every step in `exposeSteps` is: a value already recorded here
+ * is left untouched rather than overwritten, so re-running (or retrying) an expose never
+ * clobbers a value a previous run — or an admin by hand — already set correctly. Returns
+ * whether it actually wrote anything, which is exactly what the calling step's own
+ * `undo` needs to know whether cleanup applies.
+ */
+export async function recordAccessTeamDomain(
+  db: Db,
+  teamDomain: string,
+): Promise<{ wrote: boolean }> {
+  const existing = await readSetting(db, ACCESS_TEAM_DOMAIN_SETTING_KEY);
+  if (existing !== null) return { wrote: false };
+  await db.insert(settings).values({ key: ACCESS_TEAM_DOMAIN_SETTING_KEY, value: teamDomain });
+  return { wrote: true };
+}
+
+/** The `undo` half of `recordAccessTeamDomain` — an unconditional delete by key, nothing
+ * more. This function itself carries no "never delete what you merely found" guard: it
+ * deletes whatever is there, full stop. That guard exists entirely in the one caller,
+ * `cloudflare/expose.ts`'s `undo` (`if (!ctx.teamDomainRecorded) return;`), which only
+ * calls this when THIS sequence's own `recordAccessTeamDomain` reported it actually wrote
+ * the value (`wrote`, not "a value now exists"). A second caller added later without that
+ * same check would wipe an admin's hand-set team domain — see this module's own
+ * `recordAccessTeamDomain` for why `wrote` is the thing to gate on, not presence. */
+export async function clearAccessTeamDomain(db: Db): Promise<void> {
+  await db.delete(settings).where(eq(settings.key, ACCESS_TEAM_DOMAIN_SETTING_KEY));
+}
+
+/**
  * Reads the Access team domain and audience recorded for the app marked
  * `systemKind: "self"` — Homestead's own exposure, per §10: these values "normally live
  * in the database, written when Homestead provisions its own exposure." `exposures.aud`
  * is already stored per-exposure (2D); the team domain is account-wide, stored under
  * `ACCESS_TEAM_DOMAIN_SETTING_KEY`.
  *
- * **Known gap, stated plainly**: nothing in the codebase sets `systemKind: "self"` yet.
- * 1I deferred that as a design question and 2B settled only what `self` *means*, not who
- * assigns it — assigning it, and the write step that would then record these two values
- * at provisioning time, are both left to a later phase. This function only resolves what
- * is already there; if no app is marked `self`, or its exposure carries no audience, or
- * the team-domain setting was never written, this returns `null` — the correct answer
- * for "not configured yet", not a bug in this function.
+ * **Formerly a known gap, closed by 2F Task 2**: through 2E, nothing in the codebase set
+ * `systemKind: "self"` — 1I deferred it as a design question and 2B settled only what
+ * `self` *means*, not who assigns it — so this function's database branch was
+ * unreachable in production; only the environment override actually activated Access
+ * sign-in. `self-detect.ts` (adoption-time detection, with an explicit override via
+ * `PATCH /api/apps/:id`) now assigns it, and `cloudflare/expose.ts`'s step sequence now
+ * calls `recordAccessTeamDomain` (above) when the app it exposes carries that mark — see
+ * `cloudflare-expose.test.ts`'s end-to-end assertion. This function itself is unchanged:
+ * it only ever resolves what is already there, so if no app is marked `self`, or its
+ * exposure carries no audience yet, or the team-domain setting was never written (the
+ * self app has simply never been exposed), this still returns `null` — "not configured
+ * yet", not a bug.
  */
 async function readFromDatabase(db: Db): Promise<AccessSettings> {
   const [selfApp] = await db.select().from(apps).where(eq(apps.systemKind, "self"));

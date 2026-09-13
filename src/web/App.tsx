@@ -7,6 +7,7 @@ import { AdminApps } from "@web/routes/AdminApps";
 import { AppLayout } from "@web/routes/AppLayout";
 import { EditApp } from "@web/routes/EditApp";
 import { ContainersTab } from "@web/routes/edit/ContainersTab";
+import { ExposureTab } from "@web/routes/edit/ExposureTab";
 import { LogsTab } from "@web/routes/edit/LogsTab";
 import { OverviewTab } from "@web/routes/edit/OverviewTab";
 import { ProbesTab } from "@web/routes/edit/ProbesPanel";
@@ -148,6 +149,7 @@ function Routed() {
               <Route path="probes" element={<ProbesTab />} />
               <Route path="compose" element={<LazyTab loader={loadComposeTab} />} />
               <Route path="env" element={<LazyTab loader={loadEnvTab} />} />
+              <Route path="exposure" element={<ExposureTab />} />
             </Route>
             <Route
               path="/settings/*"

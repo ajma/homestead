@@ -35,10 +35,18 @@ const HEALTHY_HOST_CHECK: HostCheck = {
  * that only knew about `host-check` would hand either a `SetupState` shaped nothing
  * like what it asked for, the same problem this function already solved for
  * `StepVerifyHost`. `finishedState`, when given, is what `POST /api/setup/finish`
- * answers with — standing in for the server's own one-way `completedAt` write. */
+ * answers with — standing in for the server's own one-way `completedAt` write.
+ * `cloudflareConfigured` answers `GET /api/cloudflare/credentials` — `FinishScreen` reads
+ * it to decide which of its two closing sentences to show (Phase 2F whole-branch review,
+ * F6); defaults to not configured, the common case for every test that doesn't care. */
 function stubState(
   state: SetupState,
-  options: { users?: ManagedUser[]; apps?: AdminApp[]; finishedState?: SetupState } = {},
+  options: {
+    users?: ManagedUser[];
+    apps?: AdminApp[];
+    finishedState?: SetupState;
+    cloudflareConfigured?: boolean;
+  } = {},
 ) {
   vi.stubGlobal(
     "fetch",
@@ -46,6 +54,19 @@ function stubState(
       if (url === "/api/setup/host-check") return json(200, HEALTHY_HOST_CHECK);
       if (url === "/api/users") return json(200, options.users ?? []);
       if (url === "/api/apps") return json(200, options.apps ?? []);
+      if (url === "/api/cloudflare/credentials") {
+        return json(
+          200,
+          options.cloudflareConfigured
+            ? {
+                configured: true,
+                accountId: "acct-1",
+                tokenHint: "abcd",
+                verifiedAt: 1_800_000_000,
+              }
+            : { configured: false },
+        );
+      }
       if (url === "/api/setup/finish" && (init?.method ?? "GET") === "POST") {
         return json(200, options.finishedState ?? { ...state, completedAt: 1_800_000_000 });
       }
@@ -148,8 +169,46 @@ describe("SetupWizard", () => {
     expect(screen.queryByRole("button", { name: /Back/ })).toBeNull();
   });
 
-  it("offers Skip on the users step, which spec §9 marks skippable", async () => {
+  it("resumes at the cloudflare step when it is the first incomplete one", async () => {
+    // 2F Task 5: step 4, inserted between import and users. A browser closed right after
+    // import must land here on reload, not skip straight past it to users.
     stubState({ completedSteps: ["admin", "host", "import"], completedAt: null });
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Cloudflare/ })).toBeTruthy());
+  });
+
+  it("offers Skip on the cloudflare step, and skipping it advances to users", async () => {
+    // Unlike `stubState`'s catch-all (which always echoes the same fixed state back),
+    // this stub actually appends the completed step to `completedSteps` on
+    // `POST .../complete`, the way the real server does — needed here because advancing
+    // past Skip depends on the NEXT `GET /api/setup/state`-shaped response actually
+    // containing "cloudflare".
+    let completedSteps: string[] = ["admin", "host", "import"];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/setup/host-check") return json(200, HEALTHY_HOST_CHECK);
+        if (url === "/api/users") return json(200, []);
+        if (url === "/api/apps") return json(200, []);
+        if (url.endsWith("/complete") && (init?.method ?? "GET") === "POST") {
+          const step = /\/state\/([^/]+)\/complete$/.exec(url)?.[1];
+          if (step && !completedSteps.includes(step)) completedSteps = [...completedSteps, step];
+          return json(200, { completedSteps, completedAt: null });
+        }
+        return json(200, { completedSteps, completedAt: null });
+      }),
+    );
+    mount();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Cloudflare/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /Skip/ }));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /Invite users/ })).toBeTruthy());
+  });
+
+  it("offers Skip on the users step, which spec §9 marks skippable", async () => {
+    stubState({ completedSteps: ["admin", "host", "import", "cloudflare"], completedAt: null });
     mount();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: /Invite users/ })).toBeTruthy());
@@ -308,7 +367,7 @@ describe("SetupWizard", () => {
 
   describe("finishing", () => {
     const ALL_DONE: SetupState = {
-      completedSteps: ["admin", "host", "import", "users"],
+      completedSteps: ["admin", "host", "import", "cloudflare", "users"],
       completedAt: null,
     };
 
@@ -369,8 +428,22 @@ describe("SetupWizard", () => {
       await waitFor(() => expect(screen.getByText(/2 apps adopted/)).toBeTruthy());
       expect(screen.getByText(/1 user invited/)).toBeTruthy();
       // Spec §9: step 4 (Cloudflare exposure) is skippable and completable afterwards —
-      // this is the moment to say so, since Phase 2 is where it actually lands.
-      expect(screen.getByText(/Cloudflare/)).toBeTruthy();
+      // this is the moment to say so, since Phase 2 is where it actually lands. Matched
+      // against the sentence itself, not a bare `/Cloudflare/` — that now also matches
+      // the step indicator's own "Cloudflare" label, above, once the step exists for real.
+      expect(screen.getByText(/isn't set up yet/)).toBeTruthy();
+    });
+
+    it("tells a user who just configured Cloudflare that it's set up, not that it isn't", async () => {
+      // Phase 2F whole-branch review, F6: this screen used to say unconditionally that
+      // Cloudflare "isn't set up yet", even immediately after `StepCloudflare` had just
+      // saved credentials and provisioned a tunnel.
+      stubState(ALL_DONE, { apps: [], users: [managedUser()], cloudflareConfigured: true });
+      mount();
+
+      await waitFor(() => expect(screen.getByRole("heading", { name: /set up/i })).toBeTruthy());
+      await waitFor(() => expect(screen.getByText(/Cloudflare exposure is set up/)).toBeTruthy());
+      expect(screen.queryByText(/isn't set up yet/)).toBeNull();
     });
 
     it("finishing posts to /api/setup/finish and lands on the launcher", async () => {

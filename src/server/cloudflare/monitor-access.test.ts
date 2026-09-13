@@ -228,6 +228,42 @@ describe("ensureMonitorAccess", () => {
     });
   });
 
+  it("collapses two concurrent calls onto one token creation", async () => {
+    // The race this closes: `await deps.store.get()` is a real gap, and two callers that
+    // land in it — a double-click, or two requests hitting `POST /api/cloudflare/monitor`
+    // at once — must not both create a real, billed Cloudflare service token. Only one
+    // `createServiceToken` call, no matter how many callers arrive before the store is
+    // written.
+    const { store } = await makeStore();
+    const { client, calls } = fakeClient();
+
+    const [first, second] = await Promise.all([
+      ensureMonitorAccess({ store, client }),
+      ensureMonitorAccess({ store, client }),
+    ]);
+
+    expect(calls.createServiceToken).toBe(1);
+    expect(calls.createMonitorPolicy).toBe(1);
+    expect(second).toEqual(first);
+    await expect(store.get()).resolves.toEqual(first);
+  });
+
+  it("does not collapse concurrent calls against two independent stores", async () => {
+    // The WeakMap is keyed on the store instance so two genuinely separate installs (or,
+    // here, two separate test fixtures) never share an in-flight promise.
+    const { store: storeA } = await makeStore();
+    const { store: storeB } = await makeStore();
+    const { client, calls } = fakeClient();
+
+    await Promise.all([
+      ensureMonitorAccess({ store: storeA, client }),
+      ensureMonitorAccess({ store: storeB, client }),
+    ]);
+
+    expect(calls.createServiceToken).toBe(2);
+    expect(calls.createMonitorPolicy).toBe(2);
+  });
+
   it("deletes the token if policy creation fails, and records nothing", async () => {
     const { store } = await makeStore();
     const { client, calls } = fakeClient({

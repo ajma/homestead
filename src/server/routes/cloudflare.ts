@@ -6,7 +6,7 @@ import type {
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { audit } from "../audit.js";
-import { resolveAccessSettings } from "../auth/access-settings.js";
+import { isPresent, resolveAccessSettings } from "../auth/access-settings.js";
 import { requireCapability } from "../auth/context.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
@@ -16,6 +16,7 @@ import {
   MonitorAccessStore,
   rotateMonitorSecret,
 } from "../cloudflare/monitor-access.js";
+import { reconcileExposures } from "../cloudflare/reconcile.js";
 
 // `.trim()` before `.min(1)`: a token pasted out of the Cloudflare dashboard frequently
 // carries a trailing newline or space, invisible in a `type="password"` field. Untrimmed,
@@ -243,10 +244,51 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/cloudflare/access", async (request) => {
     requireCapability(request, "cf:read");
     const resolved = await resolveAccessSettings({ db, config: app.deps.config });
-    return (
-      resolved
-        ? { configured: true, teamDomain: resolved.teamDomain, aud: resolved.aud }
-        : { configured: false }
-    ) satisfies AccessConfigStatus;
+    if (!resolved) return { configured: false } satisfies AccessConfigStatus;
+    // Recomputes which source won, using the exact precedence `resolveAccessSettings`
+    // documents (environment wins ONLY when it supplies both values) — see
+    // `AccessConfigStatus.source`'s own doc comment for why this lives here rather than
+    // in that function's return value.
+    const envConfigured =
+      isPresent(app.deps.config.accessTeamDomain) && isPresent(app.deps.config.accessAud);
+    return {
+      configured: true,
+      teamDomain: resolved.teamDomain,
+      aud: resolved.aud,
+      source: envConfigured ? "environment" : "database",
+    } satisfies AccessConfigStatus;
+  });
+
+  /**
+   * The periodic reconcile (§6), triggered on demand rather than by a background timer —
+   * this phase wires the check and its UI, not a scheduler; see `reconcile.ts`'s own doc
+   * comment for what it actually does and, more importantly, what it never does. `cf:write`,
+   * not `cf:read`, even though every Cloudflare call this makes is a read: unlike the
+   * status routes above, this one changes local state (`exposures.state`/`driftFindings`) that
+   * every exposure-status read after it reflects, which is closer to Provision or Expose
+   * than to a plain status fetch.
+   */
+  app.post("/api/cloudflare/reconcile", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:write");
+    const creds = await store.get();
+    if (!creds) {
+      return reply.code(409).send({ error: "not_configured" });
+    }
+
+    const client = createCloudflareClient({
+      token: creds.token,
+      accountId: creds.accountId,
+      fetch: app.deps.fetch,
+    });
+
+    const outcomes = await reconcileExposures({ db, client });
+    const drifted = outcomes.filter((o) => o.findings.length > 0).length;
+
+    await audit(db, ctx, {
+      action: "cloudflare.reconcile_ran",
+      detail: { checked: outcomes.length, drifted },
+    });
+
+    return { checked: outcomes.length, drifted };
   });
 }

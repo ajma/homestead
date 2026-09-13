@@ -144,6 +144,19 @@ async function appRowFor(db: Db, directory: string) {
   return row;
 }
 
+/** Polls `jobs` until `id`'s row leaves `running` — `StepJobRunner.start` (2F Task 1) no
+ * longer stays pending for the sequence, so a test reading the finished row can no longer
+ * just `await start(...)` and read it back. Mirrors `step-job-runner.test.ts`'s own
+ * `waitForTerminal`. */
+async function waitForTerminal(db: Db, id: string) {
+  for (let i = 0; i < 200; i++) {
+    const [row] = await db.select().from(jobs).where(eq(jobs.id, id));
+    if (row && row.status !== "running") return row;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`job ${id} never reached a terminal status`);
+}
+
 describe("tunnelProvisionSteps — happy path", () => {
   it("creates the tunnel, stores it, writes the app, and brings it up", async () => {
     const { db, tunnelStore } = await seedDb();
@@ -525,7 +538,7 @@ describe("tunnelProvisionSteps via StepJobRunner — the wiring StepJobRunner ow
 
     const { id } = await runner.start(null, "cloudflare_tunnel_provision", steps, {}, userId);
 
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    const saved = await waitForTerminal(db, id);
     expect(saved?.status).toBe("failed");
     const output = saved?.output ?? "";
 
@@ -557,7 +570,7 @@ describe("tunnelProvisionSteps via StepJobRunner — the wiring StepJobRunner ow
     });
     const { id } = await runner.start(null, "cloudflare_tunnel_provision", steps, {}, userId);
 
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    const saved = await waitForTerminal(db, id);
     expect(saved?.status).toBe("succeeded");
     expect(saved?.appId).toBeNull();
   });

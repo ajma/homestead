@@ -206,6 +206,19 @@ describe("the admin route guard", () => {
     expect(screen.queryByText("Jellyfin")).toBeNull();
   });
 
+  it("sends a viewer away from the exposure deep url", async () => {
+    // 2F Task 3: the exposure tab is a new admin surface, and the viewer boundary is
+    // proved by navigation, not by link visibility — Phase 1G's own lesson, applied to
+    // the one tab this phase adds. Breaking the `isAdmin` guard for `/apps/:slug/*`
+    // would fail this the same way it fails every sibling test above.
+    stubMe({ role: "viewer" }, { apps: [jellyfin] });
+    renderAt("/apps/jellyfin/exposure");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("link", { name: "Exposure" })).toBeNull();
+    expect(screen.queryByText("Jellyfin")).toBeNull();
+  });
+
   it("sends a viewer away from settings", async () => {
     // `/settings` has no per-app slug to guard, only the role check `App.tsx` applies
     // to the whole `/settings/*` subtree — the same claim as every route above, made
@@ -376,6 +389,33 @@ describe("the setup route guard", () => {
     renderAt("/setup");
 
     await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+  });
+
+  it("a completed install is not reopened by a step it never saw", async () => {
+    // The migration hazard 2F Task 5 exists to close: `SETUP_STEPS` gained a fifth entry
+    // ("cloudflare") between `import` and `users`, and the test VM's real `setup_state`
+    // row was written before that step existed — `completedAt` is set, but
+    // `completedSteps` is exactly the four-entry array from before this phase shipped,
+    // with no `"cloudflare"` in it. An install that finished must not be dragged back
+    // into onboarding just because a new incomplete step appeared in the allow-list.
+    // `App.tsx` gates on `completedAt` alone (see `Routed`'s own comment), never on
+    // whether `completedSteps` contains every currently-known step — this proves that
+    // holds rather than assuming it, per Phase 1G's carry-forward.
+    stubSetupGuard(
+      {
+        id: "u1",
+        email: "admin@example.com",
+        name: "Admin",
+        role: "admin",
+        scopeAllApps: true,
+        appIds: [],
+      },
+      { completedSteps: ["admin", "host", "import", "users"], completedAt: 1_800_000_000 },
+    );
+    renderAt("/setup");
+
+    await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
+    expect(screen.queryByRole("heading", { name: /Cloudflare/ })).toBeNull();
   });
 
   it("never sends a viewer into the wizard, even mid-setup", async () => {

@@ -210,7 +210,27 @@ export const exposures = sqliteTable("exposures", {
   state: text("state", { enum: ["provisioning", "ready", "error", "drifted"] })
     .notNull()
     .default("provisioning"),
+  // No writer anywhere in this codebase as of Phase 2F (grepped every assignment to
+  // confirm — see that phase's whole-branch review, "the `lastError` ruling"). Reserved
+  // for a plain human-readable message describing why the LAST PROVISION ATTEMPT failed
+  // (paired with `state: "error"`, two lines above) — the review found this column two
+  // lines from `state` with no doc comment at all, which is exactly the setup for the
+  // next error path to write a plain string here by "obvious" instinct, colliding with
+  // drift findings if they had stayed here too. They don't: see `driftFindings` below,
+  // added in the same fix wave specifically so these two meanings never share one
+  // column. Whoever writes the first real value here should replace this comment with
+  // one naming that call site.
   lastError: text("last_error"),
+  // What the last reconcile (§6, `cloudflare/reconcile.ts`) found wrong with this
+  // exposure, JSON-encoded (`DriftFinding[]`, see `shared/cloudflare.ts`) — `null` when
+  // nothing has been checked yet or the last check found nothing wrong. `reconcileExposures`
+  // is the sole writer, `parseDriftFindings` the sole reader; both defensive about
+  // anything else ending up here (a hand edit, a future migration gone wrong) degrading
+  // to `[]` rather than throwing. A plain `text` column rather than Drizzle's `mode:
+  // "json"` for the same reason `routes/setup.ts`'s `completed_steps` is: the reader
+  // controls its own parsing and degrades gracefully, rather than trusting Drizzle's
+  // automatic decode to throw inside the query the moment something doesn't parse.
+  driftFindings: text("drift_findings"),
   lastSyncedAt: integer("last_synced_at"),
 });
 

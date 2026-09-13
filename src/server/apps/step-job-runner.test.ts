@@ -13,6 +13,22 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 type Ctx = { log: string[] };
 
+/**
+ * Polls `jobs` until `id`'s row leaves `running`. Needed as of Task 1: `start` no longer
+ * stays pending for the sequence, so a test that wants to inspect the finished row can no
+ * longer just `await start(...)` and read it — mirrors `cloudflare-tunnel.test.ts`'s own
+ * `until` helper (a fixed sleep can only guess at "the sequence has finished"; polling the
+ * actual row is exact regardless of how much CPU this test happens to get scheduled).
+ */
+async function waitForTerminal(db: Db, id: string): Promise<typeof jobs.$inferSelect> {
+  for (let i = 0; i < 200; i++) {
+    const [row] = await db.select().from(jobs).where(eq(jobs.id, id));
+    if (row && row.status !== "running") return row;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`job ${id} never reached a terminal status`);
+}
+
 function step(
   name: string,
   opts: { fail?: boolean; undo?: boolean; undoFails?: boolean } = {},
@@ -99,6 +115,26 @@ describe("StepJobRunner", () => {
     runner = new StepJobRunner({ db, appLock });
   });
 
+  it("returns the job id without waiting for the sequence to finish", async () => {
+    // The binding check for Task 1: with `start` re-awaiting the sequence, this fails —
+    // the row is already terminal by the time `start` resolves, not still `running`.
+    const gated = gatedStep("wait");
+    const { id } = await runner.start(
+      row.id,
+      "cloudflare_expose",
+      [gated.step],
+      { log: [] },
+      userId,
+    );
+
+    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    expect(saved?.status).toBe("running");
+
+    gated.release();
+    const finished = await waitForTerminal(db, id);
+    expect(finished.status).toBe("succeeded");
+  });
+
   it("writes a succeeded job row naming every step, on success", async () => {
     const { id } = await runner.start(
       row.id,
@@ -108,7 +144,7 @@ describe("StepJobRunner", () => {
       userId,
     );
 
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    const saved = await waitForTerminal(db, id);
     expect(saved?.status).toBe("succeeded");
     expect(saved?.kind).toBe("cloudflare_expose");
     expect(saved?.output).toContain("a");
@@ -125,7 +161,7 @@ describe("StepJobRunner", () => {
       userId,
     );
 
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    const saved = await waitForTerminal(db, id);
     expect(saved?.status).toBe("failed");
     expect(saved?.output).toContain("create-dns-record");
     expect(saved?.output).toMatch(/create-dns-record.*failed/i);
@@ -142,7 +178,7 @@ describe("StepJobRunner", () => {
       userId,
     );
 
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    const saved = await waitForTerminal(db, id);
     const output = saved?.output ?? "";
     expect(output).toMatch(/manual cleanup required/i);
     expect(output).toContain("create-tunnel");
@@ -154,12 +190,21 @@ describe("StepJobRunner", () => {
   });
 
   it("holds the app lock for the sequence's duration and releases it after success", async () => {
+    // The binding check for Task 1: releasing the lock as soon as `start` returns
+    // (instead of when the background sequence finishes) fails this — the lock would
+    // already be gone right after `start` resolves, well before `gated.release()`.
     const gated = gatedStep("wait");
-    const promise = runner.start(row.id, "cloudflare_expose", [gated.step], { log: [] }, userId);
+    const { id } = await runner.start(
+      row.id,
+      "cloudflare_expose",
+      [gated.step],
+      { log: [] },
+      userId,
+    );
 
     expect(appLock.heldBy(row.id)).toBe("cloudflare_expose job");
     gated.release();
-    await promise;
+    await waitForTerminal(db, id);
     expect(appLock.heldBy(row.id)).toBeUndefined();
   });
 
@@ -174,7 +219,7 @@ describe("StepJobRunner", () => {
     // Use a step that fails immediately but still exercise the release-on-failure path
     // by asserting the lock is held while the (synchronous-looking) sequence resolves and
     // gone once it has.
-    const promise = runner.start(
+    const { id } = await runner.start(
       row.id,
       "cloudflare_expose",
       [gated.step, failing],
@@ -184,10 +229,8 @@ describe("StepJobRunner", () => {
 
     expect(appLock.heldBy(row.id)).toBe("cloudflare_expose job");
     gated.release();
-    const result = await promise;
+    const saved = await waitForTerminal(db, id);
     expect(appLock.heldBy(row.id)).toBeUndefined();
-
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, result.id));
     expect(saved?.status).toBe("failed");
   });
 
@@ -282,8 +325,63 @@ describe("StepJobRunner", () => {
       { log: [] },
       userId,
     );
-    const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+    const saved = await waitForTerminal(db, id);
     expect(saved?.status).toBe("succeeded");
+  });
+
+  describe("shutdown", () => {
+    it("waits for a real in-flight detached sequence to finish writing its terminal row", async () => {
+      // No test anywhere exercised this class's own `shutdown()` against a real sequence
+      // before Task 1 — `shutdown.test.ts` only ever proves `createShutdown`'s ORDERING
+      // using a fake `stepJobs.shutdown`, decoupled from this class entirely. Blocking
+      // `start` made the gap hard to notice: by the time any caller could reach for
+      // `shutdown()`, `inFlight` was normally already empty because `start` itself had
+      // just finished awaiting the same promise. Once `start` stopped waiting (this task),
+      // a sequence routinely outlives the request that began it, which is exactly the
+      // window `shutdown()` exists to cover — so this is the test that actually pins it.
+      const gated = gatedStep("wait");
+      const { id } = await runner.start(
+        row.id,
+        "cloudflare_expose",
+        [gated.step],
+        { log: [] },
+        userId,
+      );
+
+      let shutdownSettled = false;
+      const shutdownPromise = runner.shutdown(2000).then(() => {
+        shutdownSettled = true;
+      });
+
+      // Give the event loop a real chance to settle `shutdownPromise` if it (wrongly)
+      // resolved immediately, before proving it is genuinely still waiting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(shutdownSettled).toBe(false);
+      const [midFlight] = await db.select().from(jobs).where(eq(jobs.id, id));
+      expect(midFlight?.status).toBe("running");
+
+      gated.release();
+      await shutdownPromise;
+      expect(shutdownSettled).toBe(true);
+
+      const [saved] = await db.select().from(jobs).where(eq(jobs.id, id));
+      expect(saved?.status).toBe("succeeded");
+    });
+
+    it("gives up after timeoutMs rather than waiting forever for a sequence that never finishes", async () => {
+      const gated = gatedStep("wait");
+      await runner.start(row.id, "cloudflare_expose", [gated.step], { log: [] }, userId);
+
+      const started = Date.now();
+      await runner.shutdown(50);
+      expect(Date.now() - started).toBeLessThan(1000);
+
+      gated.release();
+    });
+
+    it("resolves immediately when nothing is in flight", async () => {
+      await expect(runner.shutdown(2000)).resolves.toBeUndefined();
+    });
   });
 
   it("blocks a second start issued in the SAME TICK, not just a serialized one", async () => {

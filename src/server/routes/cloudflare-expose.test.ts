@@ -1,6 +1,8 @@
+import { resolveAccessSettings } from "@server/auth/access-settings";
 import { LOCAL_HOST_ID } from "@server/bootstrap";
 import { MonitorAccessStore } from "@server/cloudflare/monitor-access";
 import { TunnelStore } from "@server/cloudflare/tunnel-store";
+import type { Db } from "@server/db/client";
 import { apps, exposures, jobs, probes } from "@server/db/schema";
 import { buildTestApp, createScopedAdmin, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
@@ -17,6 +19,29 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+/** Polls until `ready`, or fails loudly rather than hanging the suite — mirrors
+ * `cloudflare-tunnel.test.ts`'s own helper of the same name. `POST /api/apps/:id/expose`
+ * no longer waits for its sequence to finish (2F Task 1), so a test that needs the
+ * exposure actually in place can no longer rely on the POST's own response for that. */
+async function until<T>(attempt: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
+  for (let i = 0; i < 200; i++) {
+    const value = await attempt();
+    if (ready(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("condition never became true");
+}
+
+async function waitForJobTerminal(db: Db, jobId: string) {
+  return until(
+    async () => {
+      const [row] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+      return row;
+    },
+    (row) => row !== undefined && row.status !== "running",
+  );
 }
 
 function verifyingFetch(): typeof fetch {
@@ -105,7 +130,7 @@ function exposeFetch(): {
   return { fetch: fetchFn, ingress: () => ingress, dnsRecords, accessApps };
 }
 
-async function withFullSetup() {
+async function withFullSetup(opts: { systemKind?: "self" } = {}) {
   const app = await buildTestApp();
   const { cookie } = await signUpAdmin(app);
   app.deps.fetch = verifyingFetch();
@@ -143,6 +168,7 @@ async function withFullSetup() {
     directory: "jellyfin",
     composeFile: "compose.yaml",
     projectName: "jellyfin",
+    systemKind: opts.systemKind ?? null,
   });
 
   return { app, cookie, appId };
@@ -373,7 +399,7 @@ describe("POST /api/apps/:id/expose", () => {
 
     expect(res.statusCode).toBe(202);
     const { jobId } = res.json() as { jobId: string };
-    const [jobRow] = await app.deps.db.select().from(jobs).where(eq(jobs.id, jobId));
+    const jobRow = await waitForJobTerminal(app.deps.db, jobId);
     expect(jobRow?.status).toBe("succeeded");
     expect(jobRow?.appId).toBe(appId);
 
@@ -400,6 +426,241 @@ describe("POST /api/apps/:id/expose", () => {
       target: "https://jellyfin.example.com",
     });
 
+    await app.close();
+  });
+
+  it("exposing the self app writes its aud and team domain, so 2E's database path resolves (2F Task 2)", async () => {
+    // The assertion the task brief calls "the one that closes the three-times-deferred
+    // gap": `auth/access-settings.ts`'s `resolveAccessSettings` has always been able to
+    // READ these two values from the database — 2E built and tested that — but nothing
+    // ever WROTE them, because nothing ever marked an app `systemKind: "self"` (1I, then
+    // 2B, then 2E all deferred it). This test exposes a REAL self app end to end and
+    // proves `resolveAccessSettings` — the exact function the Access sign-in path calls
+    // at request time — now resolves from the database, with no environment override in
+    // play at all.
+    const { app, cookie, appId } = await withFullSetup({ systemKind: "self" });
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: { ...exposeBody, teamDomain: "my-team" },
+    });
+
+    expect(res.statusCode).toBe(202);
+    const { jobId } = res.json() as { jobId: string };
+    const jobRow = await waitForJobTerminal(app.deps.db, jobId);
+    expect(jobRow?.status).toBe("succeeded");
+
+    const [exposureRow] = await app.deps.db
+      .select()
+      .from(exposures)
+      .where(eq(exposures.appId, appId));
+    expect(exposureRow?.accessAppAud).toBeTruthy();
+
+    await expect(
+      resolveAccessSettings({ db: app.deps.db, config: app.deps.config }),
+    ).resolves.toEqual({
+      teamDomain: "my-team",
+      aud: exposureRow?.accessAppAud,
+    });
+
+    await app.close();
+  });
+
+  it("refuses to expose the self app without a teamDomain — nothing to write, so refuse before touching anything", async () => {
+    const { app, cookie, appId } = await withFullSetup({ systemKind: "self" });
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("team_domain_required");
+    // Nothing started — no job, no lock taken, no Cloudflare call.
+    expect(await app.deps.db.select().from(jobs)).toEqual([]);
+
+    await app.close();
+  });
+
+  it("never writes the team-domain setting when exposing an ordinary (non-self) app", async () => {
+    // The other half of the same gap, stated as a negative: an ordinary app's expose must
+    // never be able to repoint the account-wide Access verification setting, even if a
+    // `teamDomain` somehow ends up on the request body.
+    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: { ...exposeBody, teamDomain: "should-be-ignored" },
+    });
+
+    expect(res.statusCode).toBe(202);
+    const { jobId } = res.json() as { jobId: string };
+    await waitForJobTerminal(app.deps.db, jobId);
+
+    await expect(
+      resolveAccessSettings({ db: app.deps.db, config: app.deps.config }),
+    ).resolves.toBeNull();
+
+    await app.close();
+  });
+});
+
+describe("GET /api/apps/:id/expose", () => {
+  it("requires the read capability — a viewer gets 403", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: viewerCookie } = await createViewer(app, adminCookie);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie: viewerCookie },
+    });
+
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("gives a scoped admin 404 for an app outside their scope, not a normal not-exposed answer", async () => {
+    const { app, cookie: adminCookie, appId } = await withFullSetup();
+    const { cookie: scopedCookie } = await createScopedAdmin(app, adminCookie, { appIds: [] });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie: scopedCookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("404s for a nonexistent app", async () => {
+    const { app, cookie } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/apps/does-not-exist/expose",
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("reports not exposed, with no running job, for an app never exposed", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ exposed: false, runningJobId: null });
+    await app.close();
+  });
+
+  it("reports the exposure's hostname, state and Access application once exposed", async () => {
+    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = exposed;
+
+    const exposeRes = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+    expect(exposeRes.statusCode).toBe(202);
+    const { jobId } = exposeRes.json() as { jobId: string };
+    await waitForJobTerminal(app.deps.db, jobId);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      exposed: boolean;
+      hostname: string;
+      state: string;
+      accessAppId: string | null;
+      accessAppAud: string | null;
+      runningJobId: string | null;
+      driftFindings: unknown[];
+    };
+    expect(body).toEqual({
+      exposed: true,
+      hostname: "jellyfin.example.com",
+      state: "ready",
+      accessAppId: expect.any(String),
+      accessAppAud: expect.any(String),
+      runningJobId: null,
+      driftFindings: [],
+    });
+    await app.close();
+  });
+
+  it("reports the in-flight job's id while an expose sequence is still running, before anything is exposed yet", async () => {
+    // The gap `TunnelStatus.runningJobId` closes for the tunnel provision sequence
+    // (2C Task 4), applied here: a page loaded the instant after `POST .../expose`
+    // returns its `jobId` has no exposure row yet (the first step has not run), but
+    // there IS a sequence in flight this tab needs to notice rather than silently
+    // showing the "not exposed, offer the form again" state.
+    const { app, cookie, appId } = await withFullSetup();
+    let releaseIngress: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseIngress = resolve;
+    });
+    const { fetch: exposed } = exposeFetch();
+    app.deps.fetch = (async (
+      input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ) => {
+      const url = new URL(typeof input === "string" ? input : input.toString());
+      if (url.pathname.endsWith("/configurations") && (init?.method ?? "GET") === "GET") {
+        await gate;
+      }
+      return exposed(input, init);
+    }) as typeof fetch;
+
+    const exposeRes = await app.inject({
+      method: "POST",
+      url: `/api/apps/${appId}/expose`,
+      headers: { cookie },
+      payload: exposeBody,
+    });
+    expect(exposeRes.statusCode).toBe(202);
+    const { jobId } = exposeRes.json() as { jobId: string };
+
+    const res = await until(
+      async () =>
+        app.inject({
+          method: "GET",
+          url: `/api/apps/${appId}/expose`,
+          headers: { cookie },
+        }),
+      (r) => (r.json() as { runningJobId: string | null }).runningJobId !== null,
+    );
+    expect(res.json()).toEqual({ exposed: false, runningJobId: jobId });
+
+    releaseIngress?.();
+    await waitForJobTerminal(app.deps.db, jobId);
     await app.close();
   });
 });
@@ -503,6 +764,11 @@ describe("DELETE /api/apps/:id/expose", () => {
       payload: exposeBody,
     });
     expect(exposeRes.statusCode).toBe(202);
+    const { jobId: exposeJobId } = exposeRes.json() as { jobId: string };
+    // The POST no longer waits for its sequence (2F Task 1) — wait for it to actually
+    // finish before asserting on state the sequence itself creates, or DELETE below races
+    // an exposure that has not been written yet.
+    await waitForJobTerminal(app.deps.db, exposeJobId);
     expect(dnsRecords.has("jellyfin.example.com")).toBe(true);
     expect(accessApps.has("jellyfin.example.com")).toBe(true);
 
@@ -542,6 +808,10 @@ describe("DELETE /api/apps/:id/expose", () => {
       payload: exposeBody,
     });
     expect(exposeRes.statusCode).toBe(202);
+    const { jobId: exposeJobId } = exposeRes.json() as { jobId: string };
+    // Same reasoning as the end-to-end deprovision test above: wait for the expose
+    // sequence to actually finish before making the app "already exposed" for DELETE.
+    await waitForJobTerminal(app.deps.db, exposeJobId);
 
     // Once exposed, make every subsequent Cloudflare call fail — a 400 (`client` fault)
     // rather than a thrown network error, so `createCloudflareClient`'s retry loop does
@@ -561,9 +831,17 @@ describe("DELETE /api/apps/:id/expose", () => {
     });
 
     expect(res.statusCode).toBe(500);
-    const body = res.json() as { error: string; failures: string[] };
+    const body = res.json() as {
+      error: string;
+      failures: Array<{ resource: string; message: string }>;
+    };
     expect(body.error).toBe("deprovision_incomplete");
     expect(body.failures.length).toBeGreaterThan(0);
+    // The reason, not just which resource — see `cloudflare-expose.ts`'s own comment on
+    // why the slug alone used to be worse than useless for the access-app case.
+    expect(typeof body.failures[0]?.resource).toBe("string");
+    expect(typeof body.failures[0]?.message).toBe("string");
+    expect(body.failures[0]?.message.length).toBeGreaterThan(0);
 
     const [exposureRow] = await app.deps.db
       .select()

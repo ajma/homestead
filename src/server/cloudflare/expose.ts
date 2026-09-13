@@ -2,6 +2,7 @@ import type { IngressRule } from "@shared/cloudflare.js";
 import { and, eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import type { Step } from "../apps/step-sequence.js";
+import { clearAccessTeamDomain, recordAccessTeamDomain } from "../auth/access-settings.js";
 import type { Db } from "../db/client.js";
 import { retryOnBusy } from "../db/retry.js";
 import { exposures, probes } from "../db/schema.js";
@@ -117,6 +118,11 @@ export type ExposeCtx = {
    * own `undo` the same way every other adopted-resource flag in this file does — see
    * `create-probe`'s doc comment. */
   probeCreatedByUs?: boolean;
+  /** `true` only when `record-self-access-settings` (2F Task 2, present only when
+   * `ExposeDeps.selfAccessTeamDomain` is set) actually wrote the team-domain setting —
+   * `false` when it found one already recorded and left it alone. Gates that step's own
+   * `undo` the same "never delete what you merely found" way every flag above does. */
+  teamDomainRecorded?: boolean;
 };
 
 export type ExposeDeps = {
@@ -142,12 +148,24 @@ export type ExposeDeps = {
   /** `MonitorAccess.policyId` (`monitor-access.ts`, Task 2) — the one reusable
    * `non_identity` policy shared by every exposed app. */
   monitorPolicyId: string;
+  /**
+   * Set by the caller (`routes/cloudflare-expose.ts`) ONLY when the app being exposed
+   * carries `systemKind: "self"` — 2F Task 2, closing the three-times-deferred gap
+   * `auth/access-settings.ts`'s `readFromDatabase` doc comment describes. `undefined` for
+   * every other app's expose: appending the extra step below for an app that is not
+   * `self` would let exposing an ordinary app repoint the account-wide Access
+   * verification setting, which is exactly the mistake `recordAccessTeamDomain`'s own doc
+   * comment calls out.
+   */
+  selfAccessTeamDomain?: string;
 };
 
 /**
- * The four-step expose sequence (spec §6), for `runSteps`/`StepJobRunner`. Each step is
- * idempotent (adopts an existing resource rather than duplicating it) and records whether
- * IT created what it is now responsible for — the `exposures` row's
+ * The four-step expose sequence (spec §6), for `runSteps`/`StepJobRunner` — five when
+ * exposing the app marked `systemKind: "self"` (2F Task 2 appends `record-self-access-
+ * settings`; see `ExposeDeps.selfAccessTeamDomain`). Each step is idempotent (adopts an
+ * existing resource rather than duplicating it) and records whether IT created what it
+ * is now responsible for — the `exposures` row's
  * `dnsRecordCreatedByUs`/`ingressRuleCreatedByUs`/`accessAppCreatedByUs` columns, designed
  * in Phase 1A, plus `probeId`/`probeCreatedByUs` (added by this fix — see `create-probe`'s
  * doc comment and 2D's whole-branch review, F1). 2C's whole-branch review measured what
@@ -157,7 +175,7 @@ export type ExposeDeps = {
  * id.
  */
 export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
-  return [
+  const steps: Array<Step<ExposeCtx>> = [
     {
       name: "splice-ingress",
       async run(ctx) {
@@ -448,4 +466,31 @@ export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
       },
     },
   ];
+
+  // Present only for the app marked `systemKind: "self"` — see `ExposeDeps
+  // .selfAccessTeamDomain`'s own doc comment for why every other expose omits it
+  // entirely rather than receiving it as `undefined` and no-op-ing internally: an app
+  // that is not self must never even CONTAIN a step capable of touching this account-wide
+  // setting, not merely decline to run it.
+  if (deps.selfAccessTeamDomain !== undefined) {
+    const teamDomain = deps.selfAccessTeamDomain;
+    steps.push({
+      name: "record-self-access-settings",
+      async run(ctx) {
+        // `exposures.accessAppAud` (written by `create-access-app`, above) is already
+        // recorded for every exposed app unconditionally — the only piece 2E's database
+        // path was still missing is this account-wide team domain, and only for `self`.
+        const { wrote } = await recordAccessTeamDomain(deps.db, teamDomain);
+        ctx.teamDomainRecorded = wrote;
+      },
+      async undo(ctx) {
+        // Never delete what this run merely found already configured — the same rule
+        // every other adopted-resource `undo` in this file follows.
+        if (!ctx.teamDomainRecorded) return;
+        await clearAccessTeamDomain(deps.db);
+      },
+    });
+  }
+
+  return steps;
 }

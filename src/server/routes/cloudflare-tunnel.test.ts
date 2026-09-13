@@ -193,7 +193,13 @@ describe("POST /api/cloudflare/tunnel", () => {
     const { jobId } = res.json() as { jobId: string };
     expect(jobId).toBeTruthy();
 
-    const [jobRow] = await app.deps.db.select().from(jobs).where(eq(jobs.id, jobId));
+    const jobRow = await until(
+      async () => {
+        const [row] = await app.deps.db.select().from(jobs).where(eq(jobs.id, jobId));
+        return row;
+      },
+      (row) => row !== undefined && row.status !== "running",
+    );
     expect(jobRow?.status).toBe("succeeded");
     expect(jobRow?.appId).toBeNull();
     // The token must never appear in the persisted job output — that is what a user reads
@@ -251,28 +257,29 @@ describe("POST /api/cloudflare/tunnel", () => {
     await app.close();
   });
 
-  it("writes the audit row before the sequence runs, not once it completes (Important 2)", async () => {
-    // Measured in the whole-branch review: `stepJobs.start` does not return until the
-    // whole sequence — including any rollback — has finished, so an audit call placed
-    // AFTER it (as this route used to do) produces zero audit rows for the entire run. A
-    // crash mid-flight — after `create-tunnel` has already made a real Cloudflare tunnel
-    // — used to leave no record that anyone ever asked. Gate `compose-up`, the last step,
-    // so the sequence is provably still running while this test inspects the audit log.
+  it("writes the audit row while the sequence is still running, not once it completes (Important 2)", async () => {
+    // Through 2C/2D/2E the audit call had to precede `stepJobs.start` entirely: that
+    // runner did not return until the whole sequence — including any rollback — had
+    // finished, so an audit call placed after it (`routes/jobs.ts`'s own convention for
+    // `JobRunner`) would have produced zero audit rows for a run that crashed mid-flight.
+    // 2F Task 1 detached `start` from the sequence it kicks off, so the route now audits
+    // AFTER `start` the normal way — and this proves that is still safe: the response
+    // below already carries a 202 while the (gated) sequence is provably still `running`,
+    // so the audit row exists well before the sequence — let alone a crash during it —
+    // could ever complete.
     const { app, cookie } = await withStoredCredentials();
     app.deps.fetch = tunnelFetch(ACCOUNT_ID);
     app.deps.host.gateCompose();
 
-    const post = app.inject({ method: "POST", url: "/api/cloudflare/tunnel", headers: { cookie } });
-    await until(
-      async () => {
-        const [row] = await app.deps.db
-          .select()
-          .from(jobs)
-          .where(eq(jobs.kind, TUNNEL_PROVISION_KIND));
-        return row?.status ?? null;
-      },
-      (status) => status === "running",
-    );
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/cloudflare/tunnel",
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(202);
+
+    const [row] = await app.deps.db.select().from(jobs).where(eq(jobs.kind, TUNNEL_PROVISION_KIND));
+    expect(row?.status).toBe("running");
 
     const midFlight = await app.deps.db.select().from(auditLog);
     expect(
@@ -280,8 +287,16 @@ describe("POST /api/cloudflare/tunnel", () => {
     ).toHaveLength(1);
 
     app.deps.host.releaseCompose();
-    const res = await post;
-    expect(res.statusCode).toBe(202);
+    await until(
+      async () => {
+        const [finished] = await app.deps.db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.kind, TUNNEL_PROVISION_KIND));
+        return finished?.status ?? null;
+      },
+      (status) => status !== "running",
+    );
 
     await app.close();
   });
@@ -348,10 +363,11 @@ describe("GET /api/cloudflare/tunnel", () => {
 
   it("reports the running job id while the sequence is still in flight, matching the job POST hands back", async () => {
     // The scenario `@web/api/cloudflare`'s `useCloudflareTunnel` exists for: a page
-    // reloaded (or a second admin's tab) while `POST /api/cloudflare/tunnel` — which does
-    // not return until its whole sequence finishes — is still running server-side. This
-    // is the only way such a tab can learn a provision is under way at all, since the
-    // job's `appId` is `null` and invisible to every app-scoped job listing.
+    // reloaded (or a second admin's tab) while the provision sequence `POST
+    // /api/cloudflare/tunnel` started is still running server-side — the POST itself
+    // returns long before that (2F Task 1), but this is still the only way such a SECOND
+    // tab can learn a provision is under way at all, since the job's `appId` is `null`
+    // and invisible to every app-scoped job listing.
     const { app, cookie } = await withStoredCredentials();
     app.deps.fetch = tunnelFetch(ACCOUNT_ID);
     app.deps.host.gateCompose();
@@ -380,6 +396,20 @@ describe("GET /api/cloudflare/tunnel", () => {
     expect(runningJobId).toBeTruthy();
 
     app.deps.host.releaseCompose();
+    // The POST itself already resolved (it does not wait for the sequence — 2F Task 1);
+    // wait for the still-running background sequence to actually reach a terminal status
+    // before asserting the SECOND tab's view of it below, or this races the job's own
+    // terminal-row write.
+    await until(
+      async () => {
+        const [finished] = await app.deps.db
+          .select()
+          .from(jobs)
+          .where(eq(jobs.kind, TUNNEL_PROVISION_KIND));
+        return finished?.status ?? null;
+      },
+      (status) => status !== "running",
+    );
     const postRes = await post;
     expect(postRes.statusCode).toBe(202);
     expect((postRes.json() as { jobId: string }).jobId).toBe(runningJobId);

@@ -1,8 +1,20 @@
+import { readFile } from "node:fs/promises";
 import { apps, jobs } from "@server/db/schema";
-import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
+import { buildTestApp, createViewer, fakeSelfMountinfo, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
 import { describe, expect, it, vi } from "vitest";
+
+// Same technique as `preflight.test.ts`: a native ESM module namespace is not
+// configurable, so `vi.spyOn` cannot override `readFile` in place. `vi.mock` with
+// `importOriginal` replaces the whole binding with a real `vi.fn()` whose default
+// implementation IS the real `readFile`, so nothing here behaves differently unless a
+// test below queues a one-off override — used to feed `self-detect.ts`'s
+// `/proc/self/mountinfo` read a chosen container id without needing a real container.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 
 async function adoptOne(app: Awaited<ReturnType<typeof buildTestApp>>, cookie: string) {
   app.deps.host.files.set("a/compose.yaml", "services: {}\n");
@@ -54,6 +66,175 @@ describe("app inventory API", () => {
     // The project name comes from compose, not from the directory name.
     expect(res.json().adopted[0].projectName).toBe("custom-name");
     await app.close();
+  });
+
+  describe("marking Homestead itself (self-detect.ts)", () => {
+    const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
+    // A full 64-hex container id, the shape `extractSelfContainerId` requires and
+    // `listContainers()` reports — not the short prefix the pre-2F-fix-wave `$HOSTNAME`
+    // approach matched against.
+    const SELF_CONTAINER_ID = `abc123${"0".repeat(58)}`;
+
+    it("marks the directory Homestead itself runs from as systemKind: self, on adoption", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("homestead/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "homestead", services: {} }),
+        stderr: "",
+      });
+      // Default `composeRoot` (`config.ts`) is `/volume2/docker` — see `buildTestApp`.
+      app.deps.host.containers = [
+        {
+          id: SELF_CONTAINER_ID,
+          names: ["homestead"],
+          image: "homestead:latest",
+          state: "running",
+          status: "Up",
+          project: "homestead",
+          service: "homestead",
+          labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
+        },
+      ];
+      vi.mocked(readFile).mockImplementationOnce(async () => fakeSelfMountinfo(SELF_CONTAINER_ID));
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["homestead"] },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const [row] = await app.deps.db
+        .select()
+        .from(apps)
+        .where(eq(apps.id, res.json().adopted[0].id));
+      expect(row?.systemKind).toBe("self");
+      await app.close();
+    });
+
+    it("leaves every other directory unaffected", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("homestead/compose.yaml", "services: {}\n");
+      app.deps.host.files.set("jellyfin/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "x", services: {} }),
+        stderr: "",
+      });
+      app.deps.host.containers = [
+        {
+          id: SELF_CONTAINER_ID,
+          names: ["homestead"],
+          image: "homestead:latest",
+          state: "running",
+          status: "Up",
+          project: "homestead",
+          service: "homestead",
+          labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
+        },
+      ];
+      vi.mocked(readFile).mockImplementationOnce(async () => fakeSelfMountinfo(SELF_CONTAINER_ID));
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["homestead", "jellyfin"] },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const rows = await app.deps.db.select().from(apps);
+      const jellyfin = rows.find((r) => r.directory === "jellyfin");
+      const homestead = rows.find((r) => r.directory === "homestead");
+      expect(homestead?.systemKind).toBe("self");
+      expect(jellyfin?.systemKind).toBeNull();
+      await app.close();
+    });
+
+    it("marks nothing when run outside a container — no mountinfo match, no guess", async () => {
+      // Simulates the honest "cannot tell" case `self-detect.ts` documents (`pnpm dev`,
+      // or any non-container process): `/proc/self/mountinfo` exists but has no
+      // `containers/<id>/...` bind mount for this process. Even a container list that
+      // WOULD otherwise match must not be consulted; detection has to fail closed here,
+      // not merely happen not to find a match.
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("homestead/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "homestead", services: {} }),
+        stderr: "",
+      });
+      app.deps.host.containers = [
+        {
+          id: SELF_CONTAINER_ID,
+          names: ["homestead"],
+          image: "homestead:latest",
+          state: "running",
+          status: "Up",
+          project: "homestead",
+          service: "homestead",
+          labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
+        },
+      ];
+      vi.mocked(readFile).mockImplementationOnce(async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["homestead"] },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const [row] = await app.deps.db
+        .select()
+        .from(apps)
+        .where(eq(apps.id, res.json().adopted[0].id));
+      expect(row?.systemKind).toBeNull();
+      await app.close();
+    });
+
+    it("adopts normally, marking nothing, when the Docker socket is unreachable (F4)", async () => {
+      // Phase 2F whole-branch review, F4: `detectSelfDirectory` used to let
+      // `listContainers()` rejecting propagate uncaught, 500ing the whole adopt request.
+      // It now catches internally and returns `null` — "cannot tell", never a guess and
+      // never a 500 — so a transient daemon hiccup during adoption degrades to "nothing
+      // marked self" rather than failing every directory in the request.
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("homestead/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "homestead", services: {} }),
+        stderr: "",
+      });
+      app.deps.host.listContainers = async () => {
+        throw new Error("connect ENOENT /var/run/docker.sock");
+      };
+      vi.mocked(readFile).mockImplementationOnce(async () => fakeSelfMountinfo(SELF_CONTAINER_ID));
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["homestead"] },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const [row] = await app.deps.db
+        .select()
+        .from(apps)
+        .where(eq(apps.id, res.json().adopted[0].id));
+      expect(row?.systemKind).toBeNull();
+      await app.close();
+    });
   });
 
   it("pre-fills iconRef with a confident slug match on the directory name", async () => {
@@ -294,6 +475,54 @@ describe("app inventory API", () => {
     });
   }
 
+  it("refuses to delete Homestead marked self by REAL detection, not a seeded row", async () => {
+    // Same reasoning as `jobs.test.ts`'s equivalent: every test above seeds `systemKind`
+    // directly, which proves the GUARD but not that anything in production ever actually
+    // sets the value it guards on. This runs the real `self-detect.ts` pipeline through
+    // `POST /api/apps/adopt` instead.
+    const WORKING_DIR_LABEL = "com.docker.compose.project.working_dir";
+    const selfContainerId = `abc123${"0".repeat(58)}`;
+    const app = await buildTestApp();
+    const { cookie } = await signUpAdmin(app);
+    app.deps.host.files.set("homestead/compose.yaml", "services: {}\n");
+    app.deps.host.composeResults.set("config --format json", {
+      exitCode: 0,
+      stdout: JSON.stringify({ name: "homestead", services: {} }),
+      stderr: "",
+    });
+    app.deps.host.containers = [
+      {
+        id: selfContainerId,
+        names: ["homestead"],
+        image: "homestead:latest",
+        state: "running",
+        status: "Up",
+        project: "homestead",
+        service: "homestead",
+        labels: { [WORKING_DIR_LABEL]: "/volume2/docker/homestead" },
+      },
+    ];
+    vi.mocked(readFile).mockImplementationOnce(async () => fakeSelfMountinfo(selfContainerId));
+    const adopted = await app.inject({
+      method: "POST",
+      url: "/api/apps/adopt",
+      headers: { cookie },
+      payload: { directories: ["homestead"] },
+    });
+    const id = adopted.json().adopted[0].id;
+
+    const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
+    expect(row?.systemKind).toBe("self");
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/api/apps/${id}`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(409);
+    await app.close();
+  });
+
   it("returns 404 for an unknown app id", async () => {
     const app = await buildTestApp();
     const { cookie } = await signUpAdmin(app);
@@ -444,6 +673,113 @@ describe("app inventory API", () => {
     });
     expect(res.statusCode).toBe(400);
     await app.close();
+  });
+
+  describe("the explicit systemKind: self override", () => {
+    it("lets an admin mark an app self by hand — the override a wrong or missing detection needs", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+        payload: { systemKind: "self" },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
+      expect(row?.systemKind).toBe("self");
+      await app.close();
+    });
+
+    it("lets an admin clear a wrong self marking — the false-positive recovery path", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db.update(apps).set({ systemKind: "self" }).where(eq(apps.id, id));
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+        payload: { systemKind: null },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
+      expect(row?.systemKind).toBeNull();
+      await app.close();
+    });
+
+    it("refuses to assign self while another app already holds it", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("a/compose.yaml", "services: {}\n");
+      app.deps.host.files.set("b/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({ name: "x", services: {} }),
+        stderr: "",
+      });
+      const adopted = await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["a", "b"] },
+      });
+      const [firstId, secondId] = adopted.json().adopted.map((a: { id: string }) => a.id);
+      await app.deps.db.update(apps).set({ systemKind: "self" }).where(eq(apps.id, firstId));
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${secondId}`,
+        headers: { cookie },
+        payload: { systemKind: "self" },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("self_already_assigned");
+
+      const [firstRow] = await app.deps.db.select().from(apps).where(eq(apps.id, firstId));
+      expect(firstRow?.systemKind).toBe("self");
+      await app.close();
+    });
+
+    it("never lets this override touch a cloudflared app, in either direction", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db.update(apps).set({ systemKind: "cloudflared" }).where(eq(apps.id, id));
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+        payload: { systemKind: null },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe("system_app");
+
+      const [row] = await app.deps.db.select().from(apps).where(eq(apps.id, id));
+      expect(row?.systemKind).toBe("cloudflared");
+      await app.close();
+    });
+
+    it('rejects "cloudflared" outright — this override only ever assigns self', async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+
+      const res = await app.inject({
+        method: "PATCH",
+        url: `/api/apps/${id}`,
+        headers: { cookie },
+        payload: { systemKind: "cloudflared" },
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
   });
 
   it("lists every app with a single call to Docker", async () => {

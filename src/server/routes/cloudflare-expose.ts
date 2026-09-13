@@ -1,4 +1,5 @@
-import { eq } from "drizzle-orm";
+import type { AppExposureStatus } from "@shared/cloudflare.js";
+import { and, eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { AppBusyError } from "../apps/app-lock.js";
@@ -9,8 +10,10 @@ import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
 import { deprovision } from "../cloudflare/deprovision.js";
 import { exposeSteps } from "../cloudflare/expose.js";
 import { MonitorAccessStore } from "../cloudflare/monitor-access.js";
+import { parseDriftFindings } from "../cloudflare/reconcile.js";
 import { TunnelStore } from "../cloudflare/tunnel-store.js";
-import { exposures } from "../db/schema.js";
+import type { Db } from "../db/client.js";
+import { exposures, jobs } from "../db/schema.js";
 import { loadApp } from "./apps.js";
 
 /** The `jobs.kind` this route records under. Never in `JOB_KINDS` (`job-runner.ts`) —
@@ -46,13 +49,78 @@ const exposeBody = z.object({
    * not create or manage this policy; it is referenced by id, the same way the shared
    * monitor policy is (see `expose.ts`'s `ExposeDeps.humanPolicyId`). */
   policyId: z.string().trim().min(1),
+  /**
+   * Required ONLY when the app being exposed is `systemKind: "self"` — checked below,
+   * not in this schema, since that depends on a database row the schema cannot see. The
+   * account's Cloudflare Zero Trust team domain has no API this project's existing
+   * credentials are known to reach (unlike everything else this route already resolves
+   * — zones, the tunnel, the monitor policy) and no other place in this codebase
+   * captures it (`grep`-verified: `HOMESTEAD_ACCESS_TEAM_DOMAIN` is the only other
+   * source), so the admin — who necessarily already knows it, the same way they already
+   * know the human `policyId` above — supplies it here, once, at the moment 2E's
+   * database path actually needs it: when Homestead exposes itself.
+   */
+  teamDomain: z.string().trim().min(1).optional(),
 });
+
+/** This app's own currently-running expose job, if any — mirrors
+ * `cloudflare-tunnel.ts`'s `runningProvisionJobId`, scoped to one app instead of system-
+ * wide since (unlike the tunnel provision sequence, which creates the app it eventually
+ * registers) an expose job always has a real `appId` from the moment `stepJobs.start`
+ * inserts its row. Read fresh on every `GET`, not cached: this is exactly the fact a
+ * reloaded tab (or a second admin's tab) has no other way to learn. */
+async function runningExposeJobId(db: Db, appId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(eq(jobs.appId, appId), eq(jobs.kind, EXPOSE_KIND), eq(jobs.status, "running")));
+  return row?.id ?? null;
+}
 
 export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void> {
   const { db, secrets, stepJobs, tunnelConfigLock } = app.deps;
   const credentialStore = new CloudflareCredentialStore(db, secrets);
   const tunnelStore = new TunnelStore(db, secrets);
   const monitorStore = new MonitorAccessStore(db, secrets);
+
+  /**
+   * Read-only status of this one app's exposure — 2F Task 3's only consumer, and the one
+   * of "eleven Cloudflare routes" the exposure tab needs that nothing before it returned:
+   * every other route in this file only ever starts or tears down an exposure, never
+   * reports what one currently looks like. Gated on `cf:read` like every other Cloudflare
+   * status read in this codebase, and scoped through `loadApp` exactly like the POST and
+   * DELETE routes below — a viewer, or an admin scoped away from this app, gets the same
+   * 404 either of those already gives, never a 403 that would confirm the app exists.
+   */
+  app.get("/api/apps/:id/expose", async (request, reply) => {
+    const ctx = requireCapability(request, "cf:read");
+    const { id } = z.object({ id: z.string() }).parse(request.params);
+
+    const appRow = await loadApp(db, ctx, id);
+    if (!appRow) return reply.code(404).send({ error: "not_found" });
+
+    const [[exposure], runningJobId] = await Promise.all([
+      db.select().from(exposures).where(eq(exposures.appId, id)),
+      runningExposeJobId(db, id),
+    ]);
+
+    if (!exposure) {
+      return { exposed: false, runningJobId } satisfies AppExposureStatus;
+    }
+    return {
+      exposed: true,
+      hostname: exposure.hostname,
+      state: exposure.state,
+      accessAppId: exposure.accessAppId,
+      accessAppAud: exposure.accessAppAud,
+      runningJobId,
+      // 2F Task 6: `[]` whenever `state !== "drifted"` in practice (`reconcileExposures`
+      // clears `driftFindings` back to `null` the moment a re-check finds nothing wrong —
+      // see its own doc comment), but read through `parseDriftFindings` regardless rather
+      // than trusted raw, the same defensive-JSON-column treatment `reconcile.ts` documents.
+      driftFindings: parseDriftFindings(exposure.driftFindings),
+    } satisfies AppExposureStatus;
+  });
 
   app.post("/api/apps/:id/expose", async (request, reply) => {
     const ctx = requireCapability(request, "cf:write");
@@ -68,6 +136,13 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
     const [existingExposure] = await db.select().from(exposures).where(eq(exposures.appId, id));
     if (existingExposure) {
       return reply.code(409).send({ error: "already_exposed" });
+    }
+
+    // 2F Task 2: the one case `teamDomain` is required — see `exposeBody`'s own comment
+    // on why this route asks for it here rather than resolving it some other way.
+    const isSelf = appRow.systemKind === "self";
+    if (isSelf && body.teamDomain === undefined) {
+      return reply.code(422).send({ error: "team_domain_required" });
     }
 
     // `exposures.hostname` is `.unique()` (schema.ts) same as `appId` above, but was never
@@ -117,17 +192,9 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       ingressService: body.ingressService,
       humanPolicyId: body.policyId,
       monitorPolicyId: monitorAccess.policyId,
-    });
-
-    // Audited BEFORE `stepJobs.start`, not after — same reasoning as
-    // `cloudflare-tunnel.ts`'s POST route: `StepJobRunner.start` does not return until the
-    // WHOLE sequence (including any rollback) has finished, so an audit call placed after
-    // it would produce zero audit rows for a run that crashes mid-sequence.
-    await audit(db, ctx, {
-      action: "cloudflare.expose_started",
-      targetType: "app",
-      targetId: id,
-      detail: { hostname: body.hostname },
+      // `undefined` for every non-self app — see `ExposeDeps.selfAccessTeamDomain`'s own
+      // doc comment for why that must be an absent field, not merely an unused one.
+      selfAccessTeamDomain: isSelf ? body.teamDomain : undefined,
     });
 
     let jobId: string;
@@ -136,12 +203,27 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
     } catch (error) {
       // This app already has another step job (or compose job — `stepJobs` and `jobs`
       // share one `AppLock`) in flight. A double-click or a race, not a server bug — same
-      // mapping `cloudflare-tunnel.ts`'s POST route gives `AppBusyError`.
+      // mapping `cloudflare-tunnel.ts`'s POST route gives `AppBusyError`. Nothing is
+      // audited for this attempt, matching `routes/jobs.ts`'s convention for
+      // `JobBusyError`: the sequence never actually started.
       if (error instanceof AppBusyError) {
         return reply.code(409).send({ error: "app_busy" });
       }
       throw error;
     }
+
+    // Audited AFTER `stepJobs.start`, matching `routes/jobs.ts`'s convention — not the
+    // workaround this route needed through 2D/2E. `StepJobRunner.start` used to block for
+    // the WHOLE sequence, so an audit call placed after it would have produced zero audit
+    // rows for a run that crashed mid-sequence; 2F Task 1 detached `start` from the
+    // sequence it kicks off, so it now returns as soon as the job row is inserted, and
+    // this call lands just as promptly as the pre-2D workaround did.
+    await audit(db, ctx, {
+      action: "cloudflare.expose_started",
+      targetType: "app",
+      targetId: id,
+      detail: { hostname: body.hostname },
+    });
 
     return reply.code(202).send({ jobId });
   });
@@ -203,7 +285,18 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
         // flipped, so calling this same endpoint again resumes exactly where it left off.
         return reply.code(500).send({
           error: "deprovision_incomplete",
-          failures: outcome.failures.map((f) => f.resource),
+          // The resource slug AND the message `deprovision.ts` built for it — 2F Task 3's
+          // change. The slug alone (what this used to send) told an admin WHICH of four
+          // resources failed but never WHY, which is exactly backwards for the
+          // access-app case: that message is the only place an admin learns the hostname
+          // is still fully routed and unauthenticated, and what to do about it. `message`
+          // is `String(error)` for the rare non-`Error` throw, matching every other
+          // "read a caught error for display" spot in this codebase (e.g.
+          // `describeCloudflareError` on the client).
+          failures: outcome.failures.map((f) => ({
+            resource: f.resource,
+            message: f.error instanceof Error ? f.error.message : String(f.error),
+          })),
         });
       }
 

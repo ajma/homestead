@@ -151,6 +151,35 @@ export class MonitorAccessStore {
 }
 
 /**
+ * Keyed by store identity, not by anything about a single call — this is the same
+ * in-flight-promise-cache shape `runPreflightOnce` uses in `routes/setup.ts` to collapse
+ * concurrent host-check clicks onto one running container, applied here for the same
+ * reason: `await deps.store.get()` below is a real gap between "check" and "create", and
+ * two `ensureMonitorAccess` calls that land in that gap both see `null` and would
+ * otherwise both create a real, billed Cloudflare service token (the second overwriting
+ * the first in the store, orphaning it in the account with no local record it exists).
+ *
+ * A `WeakMap` keyed on the store instance rather than a single module-level promise: two
+ * calls sharing the same `MonitorAccessStore` (the only case that can actually collide,
+ * since `cloudflareRoutes` constructs exactly one per process) share one attempt, while
+ * two independent stores — as in separate test cases, each against its own fresh
+ * `:memory:` db — never see each other's in-flight promise. The entry is removed once the
+ * attempt settles, success or failure, so a later, genuinely new call is never wedged on
+ * one that already finished (or failed) — the same cleanup `runPreflightOnce` does in its
+ * own `.finally`.
+ *
+ * `JobRunner.start` solves an adjacent problem (two `start` calls in one tick both
+ * spawning `docker compose up`) with a *synchronous* mutex checked before any await,
+ * because it must decide synchronously whether to run a whole side-effecting job at all.
+ * That shape doesn't fit here: there is nothing to check synchronously before the very
+ * first `await deps.store.get()`, which is exactly where the race lives. Caching the
+ * in-flight *promise* — so every late arrival gets the same eventual result rather than
+ * being refused outright — is the closer fit, the same reason `runPreflightOnce` was
+ * chosen over a mutex for its own concurrent-clicks problem.
+ */
+const inFlight = new WeakMap<MonitorAccessStore, Promise<MonitorAccess>>();
+
+/**
  * Creates the one shared service token and reusable policy on first call; every call
  * after that is a no-op that returns the already-recorded `MonitorAccess` — §6 requires
  * exactly one token and one policy for every app, so a second creation is not "safe to
@@ -182,6 +211,25 @@ export async function ensureMonitorAccess(deps: {
   const existing = await deps.store.get();
   if (existing) return existing;
 
+  // Everything from here to `inFlight.set` is synchronous — no `await` in between — so
+  // two calls that both observed `existing === null` above cannot both observe an empty
+  // map here. Whichever call's continuation runs first wins the map and starts the real
+  // work; the other finds `pending` already set and shares its result. See the doc
+  // comment on `inFlight` above for why this is keyed on the store rather than global.
+  const pending = inFlight.get(deps.store);
+  if (pending) return pending;
+
+  const attempt = createMonitorAccess(deps).finally(() => {
+    inFlight.delete(deps.store);
+  });
+  inFlight.set(deps.store, attempt);
+  return attempt;
+}
+
+async function createMonitorAccess(deps: {
+  store: MonitorAccessStore;
+  client: CloudflareClient;
+}): Promise<MonitorAccess> {
   const token = await deps.client.createServiceToken(MONITOR_TOKEN_NAME);
 
   let policy: { id: string };
