@@ -4,7 +4,13 @@ import { adminAppKey, adminAppsKey } from "@web/api/admin";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { IconPicker } from "@web/components/IconPicker";
-import { FORM_CONTROL_MAX_WIDTH, FORM_LABEL, FORM_ROW } from "@web/lib/density";
+import {
+  CARD_PADDING,
+  FORM_CONTROL_MAX_WIDTH,
+  FORM_LABEL,
+  FORM_ROW,
+  SECTION_GAP,
+} from "@web/lib/density";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
@@ -112,6 +118,11 @@ export function OverviewTab() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Collapsed by default: the self-marking checkbox and the delete flow are both rare,
+  // one-off actions rather than things edited on every visit to this tab, and the delete
+  // button in particular is worth an extra click to reach so a stray tap doesn't land on
+  // it as the page loads.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const patch = buildPatch(app, form);
   const dirty = Object.keys(patch).length > 0;
@@ -240,26 +251,6 @@ export function OverviewTab() {
           <span className="font-medium text-slate-900 dark:text-slate-100">Show on launcher</span>
         </label>
 
-        {app.systemKind !== "cloudflared" && (
-          <div className="flex flex-col gap-1">
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={form.self}
-                onChange={(event) => setForm((prev) => ({ ...prev, self: event.target.checked }))}
-              />
-              <span className="font-medium text-slate-900 dark:text-slate-100">
-                This is Homestead itself
-              </span>
-            </label>
-            <p className="text-xs text-slate-500">
-              Homestead tries to detect this on its own when it adopts the directory it runs from.
-              Set it by hand if detection missed it, or clear it if it marked the wrong app — only
-              one app can be marked this way at a time.
-            </p>
-          </div>
-        )}
-
         {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
 
         <div>
@@ -295,22 +286,63 @@ export function OverviewTab() {
         </div>
       </dl>
 
-      <div className="rounded-2xl border border-rose-200 p-4 dark:border-rose-900">
-        <h2 className="text-sm font-semibold text-rose-700 dark:text-rose-400">Danger zone</h2>
-        <p className="mt-1 text-xs text-slate-500">
-          Forgetting an app removes it from Homestead only — its files and containers are untouched.
-        </p>
-        {deleteError && (
-          <p className="mt-2 text-sm text-rose-600 dark:text-rose-400">{deleteError}</p>
-        )}
+      <div className="rounded-2xl border border-slate-200 dark:border-slate-800">
         <button
           type="button"
-          onClick={() => setConfirmingDelete(true)}
-          disabled={deleting}
-          className="mt-3 rounded-lg border border-rose-300 px-3 py-2 text-sm text-rose-700 disabled:opacity-50 dark:border-rose-800 dark:text-rose-400"
+          onClick={() => setAdvancedOpen((prev) => !prev)}
+          aria-expanded={advancedOpen}
+          className={`w-full text-left text-sm font-medium text-slate-900 dark:text-slate-100 ${CARD_PADDING}`}
         >
-          Delete app
+          Advanced
         </button>
+        {advancedOpen && (
+          <div
+            className={`flex flex-col border-t border-slate-200 dark:border-slate-800 ${CARD_PADDING} ${SECTION_GAP}`}
+          >
+            {app.systemKind !== "cloudflared" && (
+              <div className="flex flex-col gap-1">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={form.self}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, self: event.target.checked }))
+                    }
+                  />
+                  <span className="font-medium text-slate-900 dark:text-slate-100">
+                    This is Homestead itself
+                  </span>
+                </label>
+                <p className="text-xs text-slate-500">
+                  Homestead tries to detect this on its own when it adopts the directory it runs
+                  from. Set it by hand if detection missed it, or clear it if it marked the wrong
+                  app — only one app can be marked this way at a time.
+                </p>
+              </div>
+            )}
+
+            <div className="rounded-2xl border border-rose-200 p-4 dark:border-rose-900">
+              <h2 className="text-sm font-semibold text-rose-700 dark:text-rose-400">
+                Danger zone
+              </h2>
+              <p className="mt-1 text-xs text-slate-500">
+                Forgetting an app removes it from Homestead only — its files and containers are
+                untouched.
+              </p>
+              {deleteError && (
+                <p className="mt-2 text-sm text-rose-600 dark:text-rose-400">{deleteError}</p>
+              )}
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                disabled={deleting}
+                className="mt-3 rounded-lg border border-rose-300 px-3 py-2 text-sm text-rose-700 disabled:opacity-50 dark:border-rose-800 dark:text-rose-400"
+              >
+                Delete app
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {confirmingDelete && (
