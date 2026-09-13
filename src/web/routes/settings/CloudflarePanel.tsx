@@ -93,12 +93,13 @@ export function CloudflarePanel() {
   const [lastProvisionFailed, setLastProvisionFailed] = useState(false);
 
   // Picks up a job already running when this panel mounts — someone clicked Provision
-  // and reloaded the page (the sequence keeps running server-side regardless: `POST
-  // /api/cloudflare/tunnel` does not return until it finishes, so a reload only orphans
-  // the browser's knowledge of it, not the sequence itself), or another admin's tab
-  // started one. `!jobRunning` guard: never stomps a job this panel itself just started
-  // or is already watching. Keyed on the id alone, matching `useAppActions`' own version
-  // of this effect (`runningJobId`/`activeJobId`).
+  // and reloaded the page (the sequence keeps running server-side regardless of what the
+  // browser does: `POST /api/cloudflare/tunnel` answers as soon as the job row exists and
+  // lets the sequence run on in the background — 2F Task 1 — so a reload only orphans the
+  // browser's knowledge of it, not the sequence itself), or another admin's tab started
+  // one. `!jobRunning` guard: never stomps a job this panel itself just started or is
+  // already watching. Keyed on the id alone, matching `useAppActions`' own version of this
+  // effect (`runningJobId`/`activeJobId`).
   const knownRunningJobId = tunnelStatus.data?.runningJobId ?? null;
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally keyed on knownRunningJobId only
   useEffect(() => {

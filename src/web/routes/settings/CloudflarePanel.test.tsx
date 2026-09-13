@@ -324,20 +324,20 @@ describe("CloudflarePanel", () => {
       ).toBe(false);
     });
 
-    it("disables the button immediately, then streams the job's output once the POST resolves — the initiating tab has no live view while the sequence is actually running (Minor 1)", async () => {
-      // Renamed, not the wiring: `watchedJobId` is set only from the POST's resolved body
-      // (`handleProvision` in `CloudflarePanel.tsx`), and the POST does not resolve until
-      // `StepJobRunner.start` finishes the WHOLE sequence — see the whole-branch review's
-      // ruling on why that blocking design stays for this phase (`cloudflare-tunnel.ts`'s
-      // comment on the audit-ordering fix explains the same thing). So `JobOutput` here
-      // only ever mounts against an ALREADY-TERMINAL job for the tab that clicked the
-      // button; this test's own `resolvePost?.()` below happens before any assertion
-      // about the stream, which is exactly why the old name ("...streams the job's output
-      // while a provision job runs") did not describe what the wiring can produce. A
-      // reloaded page or a second admin's tab genuinely does get live output, via
-      // `runningJobId` — see "adopts a provision job already running when the panel
-      // mounts" below. Fixing the behaviour itself is 2D's job, once `stepJobs.start` is
-      // detached from awaiting the full sequence.
+    it("disables the button immediately, then streams the job's output while the provision job runs (Minor 1)", async () => {
+      // Restored to its original name (2F Task 1): through 2C/2D/2E it was renamed to
+      // "...the initiating tab has no live view while the sequence is actually running"
+      // because `POST /api/cloudflare/tunnel` did not resolve until `StepJobRunner.start`
+      // had finished the WHOLE sequence — `watchedJobId` (`handleProvision` in
+      // `CloudflarePanel.tsx`) is set only from the POST's resolved body, so `JobOutput`
+      // could only ever mount against an ALREADY-TERMINAL job for the tab that clicked the
+      // button; this test's own `resolvePost?.()` below happening before any assertion
+      // about the stream was exactly why the old name did not describe what the wiring
+      // could produce. Task 1 detached `start` from the sequence it kicks off, so the
+      // route now answers as soon as the job row is inserted — the mocked timing this test
+      // already exercised (resolve the POST, then watch `JobOutput` stream real progress
+      // against a job that is still running) is now what actually happens end to end, not
+      // just what the mock allowed.
       let resolvePost: (() => void) | undefined;
       const gate = new Promise<void>((resolve) => {
         resolvePost = resolve;

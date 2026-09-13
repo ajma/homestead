@@ -119,29 +119,33 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       monitorPolicyId: monitorAccess.policyId,
     });
 
-    // Audited BEFORE `stepJobs.start`, not after — same reasoning as
-    // `cloudflare-tunnel.ts`'s POST route: `StepJobRunner.start` does not return until the
-    // WHOLE sequence (including any rollback) has finished, so an audit call placed after
-    // it would produce zero audit rows for a run that crashes mid-sequence.
-    await audit(db, ctx, {
-      action: "cloudflare.expose_started",
-      targetType: "app",
-      targetId: id,
-      detail: { hostname: body.hostname },
-    });
-
     let jobId: string;
     try {
       ({ id: jobId } = await stepJobs.start(id, EXPOSE_KIND, steps, {}, ctx.userId));
     } catch (error) {
       // This app already has another step job (or compose job — `stepJobs` and `jobs`
       // share one `AppLock`) in flight. A double-click or a race, not a server bug — same
-      // mapping `cloudflare-tunnel.ts`'s POST route gives `AppBusyError`.
+      // mapping `cloudflare-tunnel.ts`'s POST route gives `AppBusyError`. Nothing is
+      // audited for this attempt, matching `routes/jobs.ts`'s convention for
+      // `JobBusyError`: the sequence never actually started.
       if (error instanceof AppBusyError) {
         return reply.code(409).send({ error: "app_busy" });
       }
       throw error;
     }
+
+    // Audited AFTER `stepJobs.start`, matching `routes/jobs.ts`'s convention — not the
+    // workaround this route needed through 2D/2E. `StepJobRunner.start` used to block for
+    // the WHOLE sequence, so an audit call placed after it would have produced zero audit
+    // rows for a run that crashed mid-sequence; 2F Task 1 detached `start` from the
+    // sequence it kicks off, so it now returns as soon as the job row is inserted, and
+    // this call lands just as promptly as the pre-2D workaround did.
+    await audit(db, ctx, {
+      action: "cloudflare.expose_started",
+      targetType: "app",
+      targetId: id,
+      detail: { hostname: body.hostname },
+    });
 
     return reply.code(202).send({ jobId });
   });

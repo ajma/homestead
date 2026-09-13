@@ -1,6 +1,7 @@
 import { LOCAL_HOST_ID } from "@server/bootstrap";
 import { MonitorAccessStore } from "@server/cloudflare/monitor-access";
 import { TunnelStore } from "@server/cloudflare/tunnel-store";
+import type { Db } from "@server/db/client";
 import { apps, exposures, jobs, probes } from "@server/db/schema";
 import { buildTestApp, createScopedAdmin, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
@@ -17,6 +18,29 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+/** Polls until `ready`, or fails loudly rather than hanging the suite — mirrors
+ * `cloudflare-tunnel.test.ts`'s own helper of the same name. `POST /api/apps/:id/expose`
+ * no longer waits for its sequence to finish (2F Task 1), so a test that needs the
+ * exposure actually in place can no longer rely on the POST's own response for that. */
+async function until<T>(attempt: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
+  for (let i = 0; i < 200; i++) {
+    const value = await attempt();
+    if (ready(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("condition never became true");
+}
+
+async function waitForJobTerminal(db: Db, jobId: string) {
+  return until(
+    async () => {
+      const [row] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+      return row;
+    },
+    (row) => row !== undefined && row.status !== "running",
+  );
 }
 
 function verifyingFetch(): typeof fetch {
@@ -373,7 +397,7 @@ describe("POST /api/apps/:id/expose", () => {
 
     expect(res.statusCode).toBe(202);
     const { jobId } = res.json() as { jobId: string };
-    const [jobRow] = await app.deps.db.select().from(jobs).where(eq(jobs.id, jobId));
+    const jobRow = await waitForJobTerminal(app.deps.db, jobId);
     expect(jobRow?.status).toBe("succeeded");
     expect(jobRow?.appId).toBe(appId);
 
@@ -503,6 +527,11 @@ describe("DELETE /api/apps/:id/expose", () => {
       payload: exposeBody,
     });
     expect(exposeRes.statusCode).toBe(202);
+    const { jobId: exposeJobId } = exposeRes.json() as { jobId: string };
+    // The POST no longer waits for its sequence (2F Task 1) — wait for it to actually
+    // finish before asserting on state the sequence itself creates, or DELETE below races
+    // an exposure that has not been written yet.
+    await waitForJobTerminal(app.deps.db, exposeJobId);
     expect(dnsRecords.has("jellyfin.example.com")).toBe(true);
     expect(accessApps.has("jellyfin.example.com")).toBe(true);
 
@@ -542,6 +571,10 @@ describe("DELETE /api/apps/:id/expose", () => {
       payload: exposeBody,
     });
     expect(exposeRes.statusCode).toBe(202);
+    const { jobId: exposeJobId } = exposeRes.json() as { jobId: string };
+    // Same reasoning as the end-to-end deprovision test above: wait for the expose
+    // sequence to actually finish before making the app "already exposed" for DELETE.
+    await waitForJobTerminal(app.deps.db, exposeJobId);
 
     // Once exposed, make every subsequent Cloudflare call fail — a 400 (`client` fault)
     // rather than a thrown network error, so `createCloudflareClient`'s retry loop does
