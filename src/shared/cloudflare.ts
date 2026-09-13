@@ -112,10 +112,19 @@ export type MonitorAccessStatus =
  * cannot accidentally read `teamDomain`/`aud` off a status that has none. Reflects
  * `resolveAccessSettings` (2E Task 2) exactly: `null` there is `{ configured: false }`
  * here, never a half-filled object.
+ *
+ * `source` on the `true` branch — added by 2F Task 4 — is NOT part of
+ * `resolveAccessSettings`'s own return value (that function only ever resolves the
+ * settings themselves, never why it picked them). The route recomputes it locally from
+ * the same precedence `resolveAccessSettings` documents (environment wins only when it
+ * supplies both values, database otherwise) because Settings has to say WHERE a value
+ * came from, not just that one exists: an admin staring at a team domain they never
+ * typed into Homestead, with no way to tell whether it came from `HOMESTEAD_ACCESS_*` or
+ * from Homestead's own self-exposure, cannot know which one to go change.
  */
 export type AccessConfigStatus =
   | { configured: false }
-  | { configured: true; teamDomain: string; aud: string };
+  | { configured: true; teamDomain: string; aud: string; source: "environment" | "database" };
 
 /**
  * `GET /api/apps/:id/expose`'s shape — 2F Task 3's read model over the `exposures` row

@@ -1,8 +1,10 @@
 import {
+  type AccessConfigStatus,
   type AppExposureStatus,
   type CloudflareFault,
   type CloudflareStatus,
   type CloudflareZone,
+  type MonitorAccessStatus,
   TUNNEL_PROVISION_TIMEOUT_MS,
   type TunnelStatus,
 } from "@shared/cloudflare.js";
@@ -380,5 +382,85 @@ export function useDeprovisionApp(appId: string) {
   return useMutation({
     mutationFn: () => apiFetch<{ ok: true }>(`/api/apps/${appId}/expose`, { method: "DELETE" }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: appExposureKey(appId) }),
+  });
+}
+
+/** Own leaf under `["cloudflare", ...]`, same reasoning as every other key in this file:
+ * the monitor token's status is refetched on its own triggers (a rotate, an ensure) and
+ * must not share an `invalidateQueries` blast radius with credentials, zones or the
+ * tunnel. */
+export const cloudflareMonitorKey = ["cloudflare", "monitor", "status"] as const;
+
+/** `GET /api/cloudflare/monitor` — never carries the secret, see `MonitorAccessStatus`'s
+ * own doc comment in `@shared/cloudflare.js`. Unconditional, like `useCloudflareTunnel`:
+ * the monitor token can exist independently of whether credentials are currently
+ * configured (an admin could remove credentials after setting it up), and Settings needs
+ * to say so either way. */
+export function useMonitorAccess() {
+  return useQuery({
+    queryKey: cloudflareMonitorKey,
+    queryFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor"),
+  });
+}
+
+/** `POST /api/cloudflare/monitor` — creates the one shared token and policy, or returns
+ * the existing ones unchanged (`ensureMonitorAccess`'s own idempotency). `useMutation`,
+ * not a plain function: nothing in its request body or response is a secret (the
+ * response is `MonitorAccessStatus`, which never carries one), so there is nothing here
+ * for `useMutation`'s cache to leak the way `useSaveCloudflareCredentials` avoids. */
+export function useEnsureMonitorAccess() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor", { method: "POST" }),
+    onSuccess: (status) => queryClient.setQueryData(cloudflareMonitorKey, status),
+  });
+}
+
+/** `POST /api/cloudflare/monitor/rotate` — same token id and policy id, a new secret.
+ * `useMutation`, for `ConfirmDialog` to drive directly via `mutateAsync`: the confirm
+ * click already goes through that dialog's own once-only guard (`pendingRef`), the same
+ * reasoning `useDeprovisionApp` and `useDeleteCloudflareCredentials` rely on. */
+export function useRotateMonitorSecret() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<MonitorAccessStatus>("/api/cloudflare/monitor/rotate", { method: "POST" }),
+    onSuccess: (status) => queryClient.setQueryData(cloudflareMonitorKey, status),
+  });
+}
+
+/** `POST /api/cloudflare/monitor` and `.../rotate` share one error shape: `{ error: <code>
+ * }` for a 409 (`not_configured`, `monitor_not_configured`), `{ error: "cloudflare_error",
+ * fault }` for a 502 — the same `CloudflareFault` shape `describeCloudflareError` already
+ * reads, reused here rather than duplicated. */
+const MONITOR_ERROR_MESSAGES: Record<string, string> = {
+  not_configured: "Add Cloudflare credentials above before setting up the monitor token.",
+  monitor_not_configured: "Set up the monitor token before it can be rotated.",
+};
+
+/** Mirrors `describeCloudflareError` above, over the monitor routes' own error codes
+ * layered on top of the same `CloudflareFault` shape. */
+export function describeMonitorError(error: unknown, fallback: string): string {
+  const fault = cloudflareFaultOf(error);
+  if (fault) return FAULT_MESSAGES[fault];
+  const code = tunnelErrorCode(error);
+  const message = code === null ? undefined : MONITOR_ERROR_MESSAGES[code];
+  if (message !== undefined) return message;
+  if (error instanceof ApiTimeoutError) return TIMEOUT_MESSAGE;
+  if (!(error instanceof ApiError)) {
+    return "Could not reach the server. Check the network and try again.";
+  }
+  return fallback;
+}
+
+/** Own leaf under `["cloudflare", ...]`, same reasoning as every key above. */
+export const cloudflareAccessKey = ["cloudflare", "access", "status"] as const;
+
+/** `GET /api/cloudflare/access` — read-only, resolved from the database, the environment,
+ * or neither (`AccessConfigStatus`'s own doc comment in `@shared/cloudflare.js`). */
+export function useAccessConfig() {
+  return useQuery({
+    queryKey: cloudflareAccessKey,
+    queryFn: () => apiFetch<AccessConfigStatus>("/api/cloudflare/access"),
   });
 }

@@ -1,9 +1,19 @@
 // @vitest-environment jsdom
-import type { CloudflareStatus, CloudflareZone, TunnelStatus } from "@shared/cloudflare.js";
+import type {
+  AccessConfigStatus,
+  CloudflareStatus,
+  CloudflareZone,
+  MonitorAccessStatus,
+  TunnelStatus,
+} from "@shared/cloudflare.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { cloudflareStatusKey } from "@web/api/cloudflare";
-import { CloudflarePanel } from "@web/routes/settings/CloudflarePanel";
+import {
+  CloudflarePanel,
+  isMonitorExpiringSoon,
+  MONITOR_EXPIRY_WARNING_MS,
+} from "@web/routes/settings/CloudflarePanel";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -61,6 +71,8 @@ const CONFIGURED: CloudflareStatus = {
 const ZONES: CloudflareZone[] = [{ id: "z1", name: "example.com" }];
 const TOKEN = "cfat_totally-a-real-token-value";
 const NOT_PROVISIONED: TunnelStatus = { provisioned: false, runningJobId: null };
+const MONITOR_NOT_CONFIGURED: MonitorAccessStatus = { configured: false };
+const ACCESS_NOT_CONFIGURED: AccessConfigStatus = { configured: false };
 
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -100,9 +112,15 @@ function stubFetch(opts: {
   zones?: CloudflareZone[];
   tunnel?: TunnelStatus;
   provisionPost?: () => Response | Promise<Response>;
+  monitor?: MonitorAccessStatus;
+  monitorPost?: () => Response | Promise<Response>;
+  monitorRotatePost?: () => Response | Promise<Response>;
+  access?: AccessConfigStatus;
 }) {
   let configured = opts.initiallyConfigured ?? false;
   const tunnel = opts.tunnel ?? NOT_PROVISIONED;
+  let monitor = opts.monitor ?? MONITOR_NOT_CONFIGURED;
+  const access = opts.access ?? ACCESS_NOT_CONFIGURED;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -128,6 +146,29 @@ function stubFetch(opts: {
     if (url === "/api/cloudflare/tunnel" && method === "POST") {
       if (opts.provisionPost) return opts.provisionPost();
       return json(202, { jobId: "job-1" });
+    }
+    if (url === "/api/cloudflare/monitor" && method === "GET") {
+      return json(200, monitor);
+    }
+    if (url === "/api/cloudflare/monitor" && method === "POST") {
+      if (opts.monitorPost) return opts.monitorPost();
+      monitor = {
+        configured: true,
+        clientId: "monitor-client-1",
+        policyId: "monitor-policy-1",
+        expiresAt: null,
+      };
+      return json(200, monitor);
+    }
+    if (url === "/api/cloudflare/monitor/rotate" && method === "POST") {
+      if (opts.monitorRotatePost) return opts.monitorRotatePost();
+      if (monitor.configured) {
+        monitor = { ...monitor, clientId: "monitor-client-2" };
+      }
+      return json(200, monitor);
+    }
+    if (url === "/api/cloudflare/access" && method === "GET") {
+      return json(200, access);
     }
     throw new Error(`unhandled request: ${method} ${url}`);
   });
@@ -284,6 +325,12 @@ describe("CloudflarePanel", () => {
       if (url === "/api/cloudflare/tunnel" && method === "GET") {
         return json(200, NOT_PROVISIONED);
       }
+      if (url === "/api/cloudflare/monitor" && method === "GET") {
+        return json(200, MONITOR_NOT_CONFIGURED);
+      }
+      if (url === "/api/cloudflare/access" && method === "GET") {
+        return json(200, ACCESS_NOT_CONFIGURED);
+      }
       throw new Error(`unhandled request: ${method} ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -308,7 +355,11 @@ describe("CloudflarePanel", () => {
       stubFetch({ initiallyConfigured: false, tunnel: NOT_PROVISIONED });
       mount();
 
-      await waitFor(() => expect(screen.getByText(/Add Cloudflare credentials/)).toBeTruthy());
+      await waitFor(() =>
+        expect(
+          screen.getByText(/Add Cloudflare credentials above before provisioning a tunnel/),
+        ).toBeTruthy(),
+      );
       expect(screen.queryByRole("button", { name: /Provision/ })).toBeNull();
     });
 
@@ -466,6 +517,180 @@ describe("CloudflarePanel", () => {
       // Not offered a second time — clicking it now would only race the one already
       // running.
       expect(screen.queryByRole("button", { name: "Provision tunnel" })).toBeNull();
+    });
+  });
+
+  describe("isMonitorExpiringSoon", () => {
+    // §6: a year after setup every external probe would begin failing simultaneously
+    // with nothing actually broken — the whole point of a threshold is that it fires
+    // BEFORE that day, not on it. Both sides of the boundary, pinned exactly, no fake
+    // timers: `nowMs` is a plain parameter.
+    const now = 1_800_000_000_000;
+
+    it("does not warn when more than the threshold remains", () => {
+      expect(isMonitorExpiringSoon(now + MONITOR_EXPIRY_WARNING_MS + 1, now)).toBe(false);
+    });
+
+    it("warns once exactly the threshold remains", () => {
+      expect(isMonitorExpiringSoon(now + MONITOR_EXPIRY_WARNING_MS, now)).toBe(true);
+    });
+
+    it("warns once just under the threshold remains", () => {
+      expect(isMonitorExpiringSoon(now + MONITOR_EXPIRY_WARNING_MS - 1, now)).toBe(true);
+    });
+
+    it("warns once already expired", () => {
+      expect(isMonitorExpiringSoon(now - 1, now)).toBe(true);
+    });
+
+    it("never warns when there is no expiry at all", () => {
+      expect(isMonitorExpiringSoon(null, now)).toBe(false);
+    });
+  });
+
+  describe("the Monitor service token section", () => {
+    it("says credentials are needed first, and offers no setup button, without them", async () => {
+      stubFetch({ initiallyConfigured: false });
+      mount();
+
+      await waitFor(() =>
+        expect(screen.getByText(/Add Cloudflare credentials above before setting up/)).toBeTruthy(),
+      );
+      expect(screen.queryByRole("button", { name: /Set up monitor token/ })).toBeNull();
+    });
+
+    it("offers to set it up once credentials exist and it is not configured yet", async () => {
+      stubFetch({ initiallyConfigured: true });
+      mount();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Set up monitor token" })).toBeTruthy(),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Set up monitor token" }));
+
+      await waitFor(() => expect(screen.getByText("monitor-client-1")).toBeTruthy());
+      expect(screen.queryByRole("button", { name: "Set up monitor token" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Rotate secret" })).toBeTruthy();
+    });
+
+    it("shows the expiry and no warning when it is far away", async () => {
+      const farFuture = Date.now() + MONITOR_EXPIRY_WARNING_MS * 10;
+      stubFetch({
+        initiallyConfigured: true,
+        monitor: {
+          configured: true,
+          clientId: "monitor-client-1",
+          policyId: "monitor-policy-1",
+          expiresAt: farFuture,
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("monitor-client-1")).toBeTruthy());
+      expect(screen.queryByText(/will start failing at once/)).toBeNull();
+    });
+
+    it("warns ahead of an expiry inside the threshold", async () => {
+      const soon = Date.now() + MONITOR_EXPIRY_WARNING_MS - 60_000;
+      stubFetch({
+        initiallyConfigured: true,
+        monitor: {
+          configured: true,
+          clientId: "monitor-client-1",
+          policyId: "monitor-policy-1",
+          expiresAt: soon,
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/will start failing at once/)).toBeTruthy());
+    });
+
+    it("rotates through ConfirmDialog and shows the new expiry afterwards", async () => {
+      const originalExpiry = Date.now() + MONITOR_EXPIRY_WARNING_MS * 2;
+      const rotatedExpiry = originalExpiry + 86_400_000;
+      stubFetch({
+        initiallyConfigured: true,
+        monitor: {
+          configured: true,
+          clientId: "monitor-client-1",
+          policyId: "monitor-policy-1",
+          expiresAt: originalExpiry,
+        },
+        monitorRotatePost: () =>
+          json(200, {
+            configured: true,
+            clientId: "monitor-client-2",
+            policyId: "monitor-policy-1",
+            expiresAt: rotatedExpiry,
+          }),
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("monitor-client-1")).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "Rotate secret" }));
+
+      const dialog = screen.getByRole("dialog");
+      expect(dialog).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Rotate" }));
+
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await waitFor(() => expect(screen.getByText("monitor-client-2")).toBeTruthy());
+    });
+
+    it("never renders the monitor secret, the API token, or the tunnel token anywhere in the DOM", async () => {
+      stubFetch({
+        initiallyConfigured: true,
+        monitor: {
+          configured: true,
+          clientId: "monitor-client-1",
+          policyId: "monitor-policy-1",
+          expiresAt: Date.now() + MONITOR_EXPIRY_WARNING_MS * 10,
+        },
+        tunnel: { provisioned: true, name: "homestead", appId: "app-cf-1", runningJobId: null },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("monitor-client-1")).toBeTruthy());
+      await waitFor(() => expect(screen.getByText("homestead")).toBeTruthy());
+      // `MonitorAccessStatus`, `CloudflareStatus` and `TunnelStatus` structurally never
+      // carry a secret field at all (see each type's own doc comment) — asserted here
+      // directly against the rendered DOM, not assumed from the type alone. Only the
+      // hint (`wxyz`, from `CONFIGURED` above) may appear; the full token must not.
+      expect(document.body.textContent).not.toContain(TOKEN);
+      expect(document.body.textContent).not.toContain("tunnel-token");
+    });
+  });
+
+  describe("the Access sign-in section", () => {
+    it("says sign-in is inert when nothing is configured", async () => {
+      stubFetch({ initiallyConfigured: false, access: { configured: false } });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/is inert/)).toBeTruthy());
+    });
+
+    it("says the database when Access resolves from Homestead's own exposure", async () => {
+      stubFetch({
+        initiallyConfigured: false,
+        access: { configured: true, teamDomain: "acme", aud: "aud-1", source: "database" },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("acme")).toBeTruthy());
+      expect(screen.getByText(/database/)).toBeTruthy();
+    });
+
+    it("says the environment when Access resolves from HOMESTEAD_ACCESS_*", async () => {
+      stubFetch({
+        initiallyConfigured: false,
+        access: { configured: true, teamDomain: "acme", aud: "aud-1", source: "environment" },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText("acme")).toBeTruthy());
+      expect(screen.getByText(/environment/)).toBeTruthy();
     });
   });
 });

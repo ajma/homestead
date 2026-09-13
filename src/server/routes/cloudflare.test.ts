@@ -569,6 +569,54 @@ describe("cloudflare routes", () => {
         configured: true,
         teamDomain: "db-team",
         aud: "db-aud-value",
+        source: "database",
+      });
+      await app.close();
+    });
+
+    it("says the environment when both HOMESTEAD_ACCESS_* variables are set, even with a self app in the database too", async () => {
+      // `resolveAccessSettings`'s own precedence: the environment wins ONLY when it
+      // supplies BOTH values, and never blends with the database. This proves the
+      // route's own `source` field agrees with that precedence rather than reporting
+      // "database" just because a self app happens to exist.
+      const { app, cookie } = await withAdmin();
+      app.deps.config = {
+        ...app.deps.config,
+        accessTeamDomain: "env-team",
+        accessAud: "env-aud",
+      };
+      const appId = ulid();
+      await app.deps.db.insert(apps).values({
+        id: appId,
+        hostId: LOCAL_HOST_ID,
+        slug: "homestead",
+        displayName: "Homestead",
+        directory: "homestead",
+        composeFile: "compose.yaml",
+        projectName: "homestead",
+        systemKind: "self",
+      });
+      await app.deps.db.insert(exposures).values({
+        id: ulid(),
+        appId,
+        hostname: "homestead.example.com",
+        ingressService: "http://localhost:3000",
+        accessAppAud: "db-aud-value",
+      });
+      await app.deps.db
+        .insert(settings)
+        .values({ key: ACCESS_TEAM_DOMAIN_SETTING_KEY, value: "db-team" });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/access",
+        headers: { cookie },
+      });
+      expect(res.json()).toEqual({
+        configured: true,
+        teamDomain: "env-team",
+        aud: "env-aud",
+        source: "environment",
       });
       await app.close();
     });

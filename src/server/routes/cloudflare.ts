@@ -6,7 +6,7 @@ import type {
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { audit } from "../audit.js";
-import { resolveAccessSettings } from "../auth/access-settings.js";
+import { isPresent, resolveAccessSettings } from "../auth/access-settings.js";
 import { requireCapability } from "../auth/context.js";
 import { createCloudflareClient } from "../cloudflare/client.js";
 import { CloudflareCredentialStore } from "../cloudflare/credentials.js";
@@ -243,10 +243,18 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/cloudflare/access", async (request) => {
     requireCapability(request, "cf:read");
     const resolved = await resolveAccessSettings({ db, config: app.deps.config });
-    return (
-      resolved
-        ? { configured: true, teamDomain: resolved.teamDomain, aud: resolved.aud }
-        : { configured: false }
-    ) satisfies AccessConfigStatus;
+    if (!resolved) return { configured: false } satisfies AccessConfigStatus;
+    // Recomputes which source won, using the exact precedence `resolveAccessSettings`
+    // documents (environment wins ONLY when it supplies both values) — see
+    // `AccessConfigStatus.source`'s own doc comment for why this lives here rather than
+    // in that function's return value.
+    const envConfigured =
+      isPresent(app.deps.config.accessTeamDomain) && isPresent(app.deps.config.accessAud);
+    return {
+      configured: true,
+      teamDomain: resolved.teamDomain,
+      aud: resolved.aud,
+      source: envConfigured ? "environment" : "database",
+    } satisfies AccessConfigStatus;
   });
 }

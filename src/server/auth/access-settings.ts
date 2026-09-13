@@ -23,8 +23,12 @@ export type AccessSettings = { teamDomain: string; aud: string } | null;
  */
 export const ACCESS_TEAM_DOMAIN_SETTING_KEY = "cloudflare.access.team_domain";
 
-/** `""` is not a value — see the module doc comment on `resolveAccessSettings`. */
-function isPresent(value: string | null | undefined): value is string {
+/** `""` is not a value — see the module doc comment on `resolveAccessSettings`.
+ * Exported for `routes/cloudflare.ts` alone: `GET /api/cloudflare/access` (2F Task 4)
+ * has to tell an admin WHICH source `resolveAccessSettings` resolved from, and re-runs
+ * this exact "is the environment complete" check to do it rather than duplicating a
+ * second, drifting copy of the emptiness rule. */
+export function isPresent(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== "";
 }
 

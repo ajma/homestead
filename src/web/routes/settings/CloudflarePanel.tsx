@@ -1,11 +1,16 @@
 import {
   describeCloudflareError,
+  describeMonitorError,
   describeTunnelError,
+  useAccessConfig,
   useCloudflareStatus,
   useCloudflareTunnel,
   useCloudflareZones,
   useDeleteCloudflareCredentials,
+  useEnsureMonitorAccess,
+  useMonitorAccess,
   useProvisionTunnel,
+  useRotateMonitorSecret,
   useSaveCloudflareCredentials,
 } from "@web/api/cloudflare";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
@@ -17,6 +22,30 @@ const VERIFIED_AT_FORMATTER = new Intl.DateTimeFormat("en-US", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+
+/** `expiresAt` is epoch MILLISECONDS (`MonitorAccess`'s own doc comment,
+ * `monitor-access.ts`) — unlike almost every other timestamp in this codebase, which is
+ * epoch seconds (`adoptedAt`, `verifiedAt` above). No `* 1000` here, deliberately. */
+const EXPIRES_AT_FORMATTER = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
+
+/**
+ * §6: "a year after setup every external probe would begin failing simultaneously with
+ * nothing actually broken" — a token expiring is not a fault to react to after the fact,
+ * it is a date to warn ahead of. 30 days: long enough that a NAS admin who checks
+ * Settings only occasionally still has a real window to rotate before every probe starts
+ * failing at once, short enough that the warning does not sit there for most of the
+ * token's year-long life reading as background noise.
+ */
+export const MONITOR_EXPIRY_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** `expiresAt === null` (Cloudflare returned no expiry) never warns — there is no date to
+ * warn ahead of. `nowMs` is a parameter, not `Date.now()` read internally, so this stays
+ * a pure function a test can pin exactly on either side of the boundary rather than
+ * fighting a real clock or fake timers. */
+export function isMonitorExpiringSoon(expiresAt: number | null, nowMs: number): boolean {
+  if (expiresAt === null) return false;
+  return expiresAt - nowMs <= MONITOR_EXPIRY_WARNING_MS;
+}
 
 /**
  * Task 3 of Phase 2A: the panel that lets an admin actually use the credential store and
@@ -49,6 +78,13 @@ const VERIFIED_AT_FORMATTER = new Intl.DateTimeFormat("en-US", {
  * tunnel's existence and the credentials' presence are separate facts: a tunnel can
  * outlive the credentials that provisioned it, and "no credentials" is itself one of the
  * tunnel section's own states, not a reason to hide it entirely.
+ *
+ * **2F Task 4 adds the Monitor service token and Access sign-in sections below that.**
+ * Both are read-only facts about the account this token authenticates to Cloudflare with,
+ * the same "independent of the credentials branch" reasoning the Tunnel section already
+ * follows: the monitor token and the resolved Access settings can each outlive (or
+ * predate, for Access resolved from the environment) whatever this panel's credentials
+ * form currently shows.
  */
 export function CloudflarePanel() {
   const status = useCloudflareStatus();
@@ -60,6 +96,12 @@ export function CloudflarePanel() {
   const tunnelStatus = useCloudflareTunnel();
   const provisionTunnel = useProvisionTunnel();
 
+  const monitorStatus = useMonitorAccess();
+  const ensureMonitor = useEnsureMonitorAccess();
+  const rotateMonitor = useRotateMonitorSecret();
+
+  const accessStatus = useAccessConfig();
+
   const [accountId, setAccountId] = useState("");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +111,12 @@ export function CloudflarePanel() {
   // form in this codebase.
   const [saving, setSaving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+
+  // Same reasoning as `saving` above, applied to "create the monitor token": set
+  // synchronously in the click handler, not read off `ensureMonitor.isPending`.
+  const [settingUpMonitor, setSettingUpMonitor] = useState(false);
+  const [monitorSetupError, setMonitorSetupError] = useState<string | null>(null);
+  const [confirmingRotate, setConfirmingRotate] = useState(false);
 
   // The job whose output this panel is showing (or last showed) for the provision
   // sequence — set either by `handleProvision` the moment this tab's own POST resolves,
@@ -155,6 +203,27 @@ export function CloudflarePanel() {
       (provisionErr: unknown) => {
         setStarting(false);
         setProvisionError(describeTunnelError(provisionErr, "Could not start provisioning."));
+      },
+    );
+  }
+
+  /**
+   * `POST /api/cloudflare/monitor` — creates the one shared token and policy. Not gated
+   * behind `ConfirmDialog`: unlike Rotate (which replaces a working secret every probe
+   * currently uses), this either creates something that did not exist or is a no-op
+   * against what's already there (`ensureMonitorAccess`'s own idempotency) — there is
+   * nothing to confirm away from.
+   */
+  function handleSetUpMonitor() {
+    setMonitorSetupError(null);
+    setSettingUpMonitor(true);
+    ensureMonitor.mutateAsync().then(
+      () => setSettingUpMonitor(false),
+      (setupError: unknown) => {
+        setSettingUpMonitor(false);
+        setMonitorSetupError(
+          describeMonitorError(setupError, "Could not set up the monitor token."),
+        );
       },
     );
   }
@@ -386,6 +455,139 @@ export function CloudflarePanel() {
             {watchedJobId !== null && <JobOutput jobId={watchedJobId} onDone={handleJobDone} />}
           </>
         )}
+      </div>
+
+      {/* 2F Task 4: the one shared service token every exposed app's `http_external`
+          probe authenticates with (§6). Independent of the credentials branch above and
+          of the Tunnel section, the same reasoning both already document — this token
+          can exist, or need rotating, regardless of what either currently shows. */}
+      <div className="space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800">
+        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+          Monitor service token
+        </h3>
+        <p className="text-xs text-slate-500">
+          The one shared token every exposed app's external probe authenticates with. Never shown
+          again once created — only its client id.
+        </p>
+
+        {monitorStatus.isPending && <p className="text-sm text-slate-500">Loading…</p>}
+        {monitorStatus.isError && (
+          <p role="alert" className="text-sm text-red-600">
+            Could not load the monitor token's status.
+          </p>
+        )}
+
+        {monitorStatus.data &&
+          (monitorStatus.data.configured ? (
+            <div className="space-y-2">
+              <dl className="text-sm text-slate-700 dark:text-slate-300">
+                <div className="flex gap-2">
+                  <dt className="font-medium">Client ID</dt>
+                  <dd>{monitorStatus.data.clientId}</dd>
+                </div>
+                <div className="flex gap-2">
+                  <dt className="font-medium">Expires</dt>
+                  <dd>
+                    {monitorStatus.data.expiresAt === null
+                      ? "Never"
+                      : EXPIRES_AT_FORMATTER.format(new Date(monitorStatus.data.expiresAt))}
+                  </dd>
+                </div>
+              </dl>
+
+              {/* §6's own scenario, stated plainly, and appearing `MONITOR_EXPIRY_WARNING_MS`
+                  ahead of the date itself — a warning that only shows up the day every probe
+                  starts failing at once is not a warning. */}
+              {isMonitorExpiringSoon(monitorStatus.data.expiresAt, Date.now()) && (
+                <p
+                  role="alert"
+                  className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                >
+                  This token expires{" "}
+                  {EXPIRES_AT_FORMATTER.format(new Date(monitorStatus.data.expiresAt as number))} —
+                  every exposed app's external probe will start failing at once when it does. Rotate
+                  it before then.
+                </p>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setConfirmingRotate(true)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800"
+              >
+                Rotate secret
+              </button>
+            </div>
+          ) : configured ? (
+            <>
+              <button
+                type="button"
+                onClick={handleSetUpMonitor}
+                disabled={settingUpMonitor}
+                className="rounded-lg bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
+              >
+                {settingUpMonitor ? "Setting up…" : "Set up monitor token"}
+              </button>
+              {monitorSetupError && (
+                <p role="alert" className="text-sm text-red-600">
+                  {monitorSetupError}
+                </p>
+              )}
+            </>
+          ) : (
+            // Same "hidden, not disabled" call as the Tunnel section's own Provision
+            // button: setting this up without credentials cannot succeed.
+            <p className="text-sm text-slate-500">
+              Add Cloudflare credentials above before setting up the monitor token.
+            </p>
+          ))}
+
+        {confirmingRotate && (
+          <ConfirmDialog
+            title="Rotate monitor secret"
+            message="Rotate the shared monitor service token's secret? Every exposed app's probe
+              picks up the new one on its next check."
+            confirmLabel="Rotate"
+            onConfirm={async () => {
+              await rotateMonitor.mutateAsync();
+            }}
+            onClose={() => setConfirmingRotate(false)}
+            formatError={(err) => describeMonitorError(err, "Could not rotate the monitor token.")}
+          />
+        )}
+      </div>
+
+      {/* 2F Task 4: whether Homestead is currently verifying `Cf-Access-Jwt-Assertion`
+          headers at all, and if so, against what — resolved from the database, from the
+          environment, or neither. "Neither" (`configured: false`) is called out
+          explicitly as inert rather than left to read like a misconfiguration: it is the
+          normal state for an instance nobody has exposed through Cloudflare yet. */}
+      <div className="space-y-3 border-t border-slate-200 pt-4 dark:border-slate-800">
+        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Access sign-in</h3>
+
+        {accessStatus.isPending && <p className="text-sm text-slate-500">Loading…</p>}
+        {accessStatus.isError && (
+          <p role="alert" className="text-sm text-red-600">
+            Could not load Access sign-in status.
+          </p>
+        )}
+
+        {accessStatus.data &&
+          (accessStatus.data.configured ? (
+            <p className="text-sm text-slate-700 dark:text-slate-300">
+              Verifying sign-in against team domain{" "}
+              <span className="font-medium">{accessStatus.data.teamDomain}</span>, resolved from the{" "}
+              {accessStatus.data.source === "environment"
+                ? "environment (HOMESTEAD_ACCESS_TEAM_DOMAIN / HOMESTEAD_ACCESS_AUD)"
+                : "database (this app's own Cloudflare exposure)"}
+              .
+            </p>
+          ) : (
+            <p className="text-sm text-slate-500">
+              Access sign-in is inert: Homestead is not verifying any Access header right now. This
+              is expected unless Homestead itself has been exposed through Cloudflare.
+            </p>
+          ))}
       </div>
     </div>
   );
