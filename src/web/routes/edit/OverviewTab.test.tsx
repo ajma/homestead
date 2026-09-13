@@ -361,6 +361,21 @@ describe("OverviewTab", () => {
     expect(html.indexOf("This is Homestead itself")).toBeLessThan(html.indexOf("Danger zone"));
   });
 
+  it("rotates the Advanced chevron via a Tailwind class when collapsed vs. expanded", () => {
+    // jsdom has no layout engine, so a rendered angle can't be asserted — pinned as the
+    // class string that encodes the state instead, the same way `ConfigTab.test.tsx`
+    // asserts its own breakpoint switch rather than measured geometry.
+    mount();
+    const toggle = screen.getByRole("button", { name: "Advanced" });
+    const chevron = toggle.querySelector("svg");
+    expect(chevron?.getAttribute("aria-hidden")).toBe("true");
+    expect(chevron?.getAttribute("class")).not.toContain("rotate-180");
+
+    openAdvanced();
+
+    expect(chevron?.getAttribute("class")).toContain("rotate-180");
+  });
+
   it("puts the label beside the control at lg: and up, stacked below it", () => {
     // jsdom has no layout engine — pinned as the class strings that encode the decision,
     // the same way `ConfigTab.test.tsx` asserts its own breakpoint switch.
