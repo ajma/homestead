@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { adminAppKey } from "@web/api/admin";
 import { EditApp } from "@web/routes/EditApp";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 const app: AdminApp = {
@@ -40,6 +40,15 @@ const app: AdminApp = {
  * `fetch` is still stubbed underneath so a test can also drive the not-found path for
  * real.
  */
+/** Renders the current pathname into the DOM so a test can assert where a click actually
+ * landed, the way `window.location` does for the real `createBrowserRouter` in
+ * `App.test.tsx` — this file uses a plain `<MemoryRouter>`, which has no `window.location`
+ * of its own to read. */
+function LocationDisplay() {
+  const location = useLocation();
+  return <div data-testid="location">{location.pathname}</div>;
+}
+
 function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const slug = path.split("/")[2] ?? "";
@@ -47,8 +56,17 @@ function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app)
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
+        <LocationDisplay />
+        {/*
+         * `/apps/:slug`, not `/apps/:slug/*` — matches the real parent route in `App.tsx`
+         * post-fix. The `/*` used to make this a splat route, which is what made a
+         * *relative* `<NavLink to="exposure">` (etc.) rendered by `EditApp` resolve
+         * against the parent's matched pathname *including* whatever tab was already
+         * open, instead of against the app root — see the "moving between tabs" describe
+         * block below, and `App.tsx`'s own fix comment, for the mechanism.
+         */}
         <Routes>
-          <Route path="/apps/:slug/*" element={<EditApp />}>
+          <Route path="/apps/:slug" element={<EditApp />}>
             <Route path="overview" element={<p>OVERVIEW</p>} />
             <Route path="containers" element={<p>CONTAINERS</p>} />
             <Route path="logs" element={<p>LOGS</p>} />
@@ -62,6 +80,7 @@ function mount(path = "/apps/jellyfin/overview", seedApp: AdminApp | null = app)
              */}
             <Route path="compose" element={<p>COMPOSE</p>} />
             <Route path="env" element={<p>ENV</p>} />
+            <Route path="exposure" element={<p>EXPOSURE</p>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -172,6 +191,57 @@ describe("EditApp", () => {
       ".env",
       "Exposure",
     ]);
+  });
+
+  describe("moving between tabs by clicking, not just visiting a tab's URL directly", () => {
+    // Every test above this one proves a tab renders once `mount(path)` has already put
+    // the URL there directly — none of them click the `<NavLink>` that a real user
+    // clicks to get from one tab to another. That gap is exactly why the reported bug
+    // ("clicking Exposure from Overview lands on .../overview/exposure") slipped past
+    // this file: `EditApp`'s tabs sit under a splat parent route in `App.tsx`
+    // (`/apps/:slug/*`, before the fix this branch makes), and a *relative*
+    // `<NavLink to="exposure">` rendered there resolves against the parent's matched
+    // pathname *including* the splat capture, not the route pattern — so once any tab
+    // is open, every relative tab link on the page is affected the same way, not only
+    // Exposure's. This exercises every ordered pair of tabs to prove that breadth,
+    // rather than re-testing only the one pair the report named.
+    const TAB_LABEL: Record<string, string> = {
+      overview: "Overview",
+      containers: "Containers",
+      logs: "Logs",
+      probes: "Probes",
+      compose: "Compose",
+      env: ".env",
+      exposure: "Exposure",
+    };
+
+    function clickTo(from: string, to: string) {
+      it(`clicking ${TAB_LABEL[to]} from ${TAB_LABEL[from]} lands on /apps/jellyfin/${to}`, () => {
+        stubFetch(app);
+        mount(`/apps/jellyfin/${from}`);
+        fireEvent.click(screen.getByRole("link", { name: TAB_LABEL[to] }));
+        expect(screen.getByTestId("location").textContent).toBe(`/apps/jellyfin/${to}`);
+      });
+    }
+
+    // The exact pair the bug report named.
+    clickTo("overview", "exposure");
+    // Every other destination from the same starting tab as the report — proving the
+    // break (and the fix) is not specific to Exposure.
+    clickTo("overview", "containers");
+    clickTo("overview", "logs");
+    clickTo("overview", "probes");
+    clickTo("overview", "compose");
+    clickTo("overview", "env");
+    // The reverse direction, and starting tabs other than the one the report named —
+    // proving the splat capture is nonempty (and so the bug bites) from any tab, not
+    // only `overview`.
+    clickTo("exposure", "overview");
+    clickTo("containers", "logs");
+    clickTo("logs", "probes");
+    clickTo("probes", "compose");
+    clickTo("compose", "env");
+    clickTo("env", "exposure");
   });
 
   it("says so plainly when the slug matches no app", async () => {

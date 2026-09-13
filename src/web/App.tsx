@@ -22,6 +22,7 @@ import {
   Navigate,
   Route,
   RouterProvider,
+  useParams,
 } from "react-router-dom";
 
 // CodeMirror, its schema-driven completions and both lint layers are the largest thing
@@ -74,6 +75,22 @@ function LazyTab({ loader }: { loader: () => Promise<{ default: ComponentType }>
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
 });
+
+/**
+ * The `/apps/:slug/*` catch-all child's element — deliberately an absolute `to`, not a
+ * relative `to="overview"`. That child's own route `path` ends in `*`, so it is itself a
+ * splat match, and a *relative* `<Navigate>` rendered there would hit the exact bug this
+ * file's edit-tab links just got fixed for: it would resolve against this match's own
+ * matched pathname (which includes whatever unknown segment got here, e.g. "nonsense"),
+ * landing on `/apps/:slug/nonsense/overview` rather than `/apps/:slug/overview` — and
+ * since THAT still doesn't match any child route, it would fall through to this same
+ * catch-all again, one "overview" longer each time. Reading `:slug` and building the
+ * absolute path by hand sidesteps relative resolution entirely.
+ */
+function RedirectToOverview() {
+  const { slug = "" } = useParams<{ slug: string }>();
+  return <Navigate to={`/apps/${slug}/overview`} replace />;
+}
 
 function Routed() {
   const { data: me, isPending } = useSession();
@@ -138,10 +155,7 @@ function Routed() {
           <Route element={<AppLayout me={me} />}>
             <Route path="/" element={<Launcher />} />
             <Route path="/apps" element={isAdmin ? <AdminApps /> : <Navigate to="/" replace />} />
-            <Route
-              path="/apps/:slug/*"
-              element={isAdmin ? <EditApp /> : <Navigate to="/" replace />}
-            >
+            <Route path="/apps/:slug" element={isAdmin ? <EditApp /> : <Navigate to="/" replace />}>
               <Route index element={<Navigate to="overview" replace />} />
               <Route path="overview" element={<OverviewTab />} />
               <Route path="containers" element={<ContainersTab />} />
@@ -150,6 +164,20 @@ function Routed() {
               <Route path="compose" element={<LazyTab loader={loadComposeTab} />} />
               <Route path="env" element={<LazyTab loader={loadEnvTab} />} />
               <Route path="exposure" element={<ExposureTab />} />
+              {/* Was the `/*` on the parent path above, which existed so that an unknown
+                  trailing segment (a stale bookmark, a typo) still matched this route
+                  instead of falling through to the top-level catch-all a few lines down
+                  and bouncing the whole app to `/`. Dropping `/*` fixed the real bug —
+                  every relative tab `<Link>`/`<NavLink>` in `EditApp.tsx` was resolving
+                  against the splat's *matched pathname*, which includes whatever tab was
+                  already open, so `to="exposure"` from `/apps/:slug/overview` produced
+                  `/apps/:slug/overview/exposure` instead of `/apps/:slug/exposure` — but
+                  it also removed the splat's one genuine job. This restores that job
+                  without the splat: same graceful landing (the app's own overview, not a
+                  trip back to the launcher), now via an ordinary child route. See
+                  `RedirectToOverview`'s own doc comment for why its element is not just
+                  another `<Navigate to="overview" replace />`. */}
+              <Route path="*" element={<RedirectToOverview />} />
             </Route>
             <Route
               path="/settings/*"
