@@ -215,6 +215,33 @@ describe("checkExposureDrift", () => {
     expectNoWrites(client);
   });
 
+  it("flags a replaced Access application — new id and aud at the same hostname (F3)", async () => {
+    // Phase 2F whole-branch review, F3: the check used to be `findAccessApp(hostname)
+    // === null`, so an admin deleting the Access app and creating a new one at the same
+    // hostname — a new id, a new aud, found by the SAME hostname lookup — reported clean.
+    // Measured: this is the drift §6 itself calls "the finding that matters most", and it
+    // was the one silently missed.
+    const db = await seedDb();
+    const appId = await seedApp(db, "jellyfin");
+    const exposure = await seedExposure(db, appId, {
+      accessAppId: "access-1",
+      accessAppAud: "aud-1",
+    });
+    const client = fakeClient({
+      findAccessApp: vi.fn(async () => ({ id: "access-REPLACED", aud: "aud-DIFFERENT" })),
+    });
+
+    const findings = await checkExposureDrift(client, exposure);
+
+    expect(findings).toEqual([
+      {
+        kind: "access_app_replaced",
+        message: expect.stringContaining("sign-in checks against it will fail"),
+      },
+    ]);
+    expectNoWrites(client);
+  });
+
   it("reports every applicable finding at once, not just the first", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
@@ -254,7 +281,7 @@ describe("checkExposureDrift", () => {
 });
 
 describe("reconcileExposures", () => {
-  it("records drift onto the exposure row: state flips to drifted, lastError carries the findings", async () => {
+  it("records drift onto the exposure row: state flips to drifted, driftFindings carries the findings, lastError untouched", async () => {
     const db = await seedDb();
     const appId = await seedApp(db, "jellyfin");
     const exposure = await seedExposure(db, appId);
@@ -273,10 +300,13 @@ describe("reconcileExposures", () => {
 
     const [row] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
     expect(row?.state).toBe("drifted");
-    expect(parseDriftFindings(row?.lastError ?? null)).toEqual([
+    expect(parseDriftFindings(row?.driftFindings ?? null)).toEqual([
       { kind: "dns_record_missing", message: expect.any(String) },
     ]);
     expect(row?.lastSyncedAt).not.toBeNull();
+    // Phase 2F whole-branch review, "the lastError ruling": drift findings live in their
+    // own column now, not the one reserved for a provision failure's own error message.
+    expect(row?.lastError).toBeNull();
   });
 
   it("clears drift and returns to ready once Cloudflare state is fixed", async () => {
@@ -284,7 +314,7 @@ describe("reconcileExposures", () => {
     const appId = await seedApp(db, "jellyfin");
     const exposure = await seedExposure(db, appId, {
       state: "drifted",
-      lastError: JSON.stringify([{ kind: "dns_record_missing", message: "was missing" }]),
+      driftFindings: JSON.stringify([{ kind: "dns_record_missing", message: "was missing" }]),
     });
     const client = fakeClient();
 
@@ -292,7 +322,7 @@ describe("reconcileExposures", () => {
 
     const [row] = await db.select().from(exposures).where(eq(exposures.id, exposure.id));
     expect(row?.state).toBe("ready");
-    expect(row?.lastError).toBeNull();
+    expect(row?.driftFindings).toBeNull();
   });
 
   it("never calls any Cloudflare write method", async () => {

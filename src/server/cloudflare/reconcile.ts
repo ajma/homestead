@@ -73,12 +73,29 @@ export async function checkExposureDrift(
   // (`expose.ts`) runs unconditionally, so a `ready` or previously-`drifted` exposure with
   // no `accessAppId` at all would itself be a data inconsistency this check cannot
   // meaningfully report — nothing here invents a finding for it.
+  //
+  // `findAccessApp` matches by HOSTNAME, not by the id this exposure recorded — so an
+  // admin deleting the Access application in the dashboard and creating a new one at the
+  // same hostname (the most likely way anyone "fixes" one by hand) makes this lookup
+  // return a non-null app with a DIFFERENT `id`/`aud`. Phase 2F whole-branch review, F3:
+  // comparing only "is it null" reported that as clean, while the stored `accessAppAud`
+  // was now stale (breaking the `self` app's own Access sign-in — `access-settings.ts`),
+  // the shared monitor policy almost certainly was not attached to the new app (failing
+  // every external probe), and `deprovision.ts` would later try to delete the long-gone
+  // old id and orphan the replacement. A replacement is reported as its own `kind` rather
+  // than folded into `access_app_deleted`: the remedy is different (re-record the new
+  // id/aud, not re-create an application) and an admin needs to know which one happened.
   if (exposure.accessAppId !== null) {
     const accessApp = await client.findAccessApp(exposure.hostname);
     if (accessApp === null) {
       findings.push({
         kind: "access_app_deleted",
         message: `The Access application protecting ${exposure.hostname} has been deleted in Cloudflare — this hostname is still routed and no longer requires sign-in.`,
+      });
+    } else if (accessApp.id !== exposure.accessAppId) {
+      findings.push({
+        kind: "access_app_replaced",
+        message: `The Access application protecting ${exposure.hostname} has been replaced in Cloudflare (a new id and audience tag) — the recorded audience is stale and sign-in checks against it will fail.`,
       });
     }
   }
@@ -98,8 +115,11 @@ export type ReconcileOutcome = {
  * currently eligible for it, and records what each one found back onto its own row —
  * `state` becomes `"drifted"` when `findings` is non-empty, `"ready"` when it's empty (an
  * admin who fixes a dashboard edit should see the flag clear on the next run, not stay lit
- * forever), and `lastError` carries `findings` JSON-encoded, defaulting to `null` when
- * there is nothing to report. JSON-encoded into a plain `text` column rather than
+ * forever), and `driftFindings` carries `findings` JSON-encoded, defaulting to `null` when
+ * there is nothing to report. A dedicated column, not `lastError` (which this used before
+ * the Phase 2F fix wave that added it): `lastError` is reserved for why the last PROVISION
+ * attempt failed, a different fact paired with `state: "error"` — see `schema.ts`'s own
+ * doc comment on both columns. JSON-encoded into a plain `text` column rather than
  * `schema.ts` declaring it `mode: "json"`, the same defensive choice `routes/setup.ts`'s
  * `parseCompletedSteps` makes for `completed_steps` and for the same reason: a caller
  * reading this column back (`routes/cloudflare-expose.ts`) controls its own parsing and
@@ -151,7 +171,7 @@ export async function reconcileExposures(deps: {
         .update(exposures)
         .set({
           state: findings.length > 0 ? "drifted" : "ready",
-          lastError: findings.length > 0 ? JSON.stringify(findings) : null,
+          driftFindings: findings.length > 0 ? JSON.stringify(findings) : null,
           lastSyncedAt: Math.floor(Date.now() / 1000),
         })
         .where(eq(exposures.id, row.id)),
@@ -163,8 +183,8 @@ export async function reconcileExposures(deps: {
 }
 
 /**
- * Defensive read of `exposures.lastError` back into `DriftFinding[]` — the other half of
- * `reconcileExposures`'s JSON-in-a-text-column choice above. `null`, not-JSON, or JSON
+ * Defensive read of `exposures.driftFindings` back into `DriftFinding[]` — the other half
+ * of `reconcileExposures`'s JSON-in-a-text-column choice above. `null`, not-JSON, or JSON
  * that isn't an array of the expected shape all degrade to `[]` rather than throwing: a
  * hand-edited or corrupted column should cost an admin the finding list, not the whole
  * route (`routes/setup.ts`'s `parseCompletedSteps` makes the identical trade-off for

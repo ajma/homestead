@@ -264,7 +264,7 @@ export async function cloudflareRoutes(app: FastifyInstance): Promise<void> {
    * this phase wires the check and its UI, not a scheduler; see `reconcile.ts`'s own doc
    * comment for what it actually does and, more importantly, what it never does. `cf:write`,
    * not `cf:read`, even though every Cloudflare call this makes is a read: unlike the
-   * status routes above, this one changes local state (`exposures.state`/`lastError`) that
+   * status routes above, this one changes local state (`exposures.state`/`driftFindings`) that
    * every exposure-status read after it reflects, which is closer to Provision or Expose
    * than to a plain status fetch.
    */

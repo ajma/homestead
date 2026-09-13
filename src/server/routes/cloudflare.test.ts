@@ -781,7 +781,7 @@ describe("cloudflare routes", () => {
 
       const [exposureRow] = await app.deps.db.select().from(exposures);
       expect(exposureRow?.state).toBe("drifted");
-      expect(exposureRow?.lastError).toContain("dns_record_missing");
+      expect(exposureRow?.driftFindings).toContain("dns_record_missing");
 
       const entries = await app.deps.db
         .select()
@@ -816,7 +816,7 @@ describe("cloudflare routes", () => {
 
       const [exposureRow] = await app.deps.db.select().from(exposures);
       expect(exposureRow?.state).toBe("ready");
-      expect(exposureRow?.lastError).toBeNull();
+      expect(exposureRow?.driftFindings).toBeNull();
     });
 
     it("gives a viewer 403", async () => {

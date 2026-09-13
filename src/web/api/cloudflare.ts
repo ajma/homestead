@@ -471,7 +471,7 @@ export function useAccessConfig() {
  * (`ExposureTab`) already has its own `GET /api/apps/:id/expose` for that, via
  * `useAppExposure`. A plain function, not `useMutation`, for the same class of reason
  * `useProvisionTunnel` avoids it — this changes real local state (every exposure's
- * `state`/`lastError`) that other queries need to see immediately, and the caller drives
+ * `state`/`driftFindings`) that other queries need to see immediately, and the caller drives
  * its own `checking` state the way every other consequential action in this codebase does.
  *
  * Invalidates every `["cloudflare", "expose", ...]` leaf, not just the current app's — a

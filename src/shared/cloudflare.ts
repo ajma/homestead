@@ -183,6 +183,7 @@ export type DriftFindingKind =
   | "ingress_rule_missing"
   | "ingress_service_mismatch"
   | "access_app_deleted"
+  | "access_app_replaced"
   | "check_failed";
 
 /**

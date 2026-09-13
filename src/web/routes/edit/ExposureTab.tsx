@@ -53,25 +53,35 @@ type ExposureApp = Pick<AdminApp, "id" | "displayName" | "systemKind">;
 /**
  * §6's drift findings (2F Task 6), rendered — never auto-corrected; there is no button
  * here that touches Cloudflare, only `ExposurePanel`'s own "Check for drift" above this.
- * `access_app_deleted` is pulled out and shown first, in its own more strongly-styled
- * banner: it is the one finding that means this hostname is routed and UNPROTECTED right
- * now, not merely recorded slightly wrong, and a flat bulleted list would bury it as one
- * row among several equally-weighted ones.
+ * `access_app_deleted` and `access_app_replaced` are pulled out and shown first, in their
+ * own more strongly-styled banner: deletion means this hostname is routed and UNPROTECTED
+ * right now, and a replacement means the recorded audience is stale and Access sign-in
+ * checks against it will fail (Phase 2F whole-branch review, F3) — neither is merely
+ * "recorded slightly wrong" the way the rest of this list is, and a flat bulleted list
+ * would bury either as one row among several equally-weighted ones.
  */
 function DriftBanner({ findings }: { findings: DriftFinding[] }) {
-  const accessAppDeleted = findings.filter((f) => f.kind === "access_app_deleted");
-  const rest = findings.filter((f) => f.kind !== "access_app_deleted");
+  const URGENT_KINDS: readonly DriftFinding["kind"][] = [
+    "access_app_deleted",
+    "access_app_replaced",
+  ];
+  const urgent = findings.filter((f) => URGENT_KINDS.includes(f.kind));
+  const rest = findings.filter((f) => !URGENT_KINDS.includes(f.kind));
 
   return (
     <div className="space-y-2">
-      {accessAppDeleted.map((finding, index) => (
+      {urgent.map((finding, index) => (
         <div
           // biome-ignore lint/suspicious/noArrayIndexKey: a fixed snapshot from one reconcile run, never reordered or individually removed.
           key={index}
           role="alert"
           className="space-y-1 rounded-2xl border-2 border-rose-600 bg-rose-50 p-3 text-sm text-rose-900 dark:bg-rose-950 dark:text-rose-200"
         >
-          <p className="font-semibold">Not protected: the Access application is gone.</p>
+          <p className="font-semibold">
+            {finding.kind === "access_app_deleted"
+              ? "Not protected: the Access application is gone."
+              : "The Access application was replaced: sign-in checks may now fail."}
+          </p>
           <p>{finding.message}</p>
         </div>
       ))}

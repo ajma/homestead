@@ -115,10 +115,10 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       accessAppAud: exposure.accessAppAud,
       runningJobId,
       // 2F Task 6: `[]` whenever `state !== "drifted"` in practice (`reconcileExposures`
-      // clears `lastError` back to `null` the moment a re-check finds nothing wrong — see
-      // its own doc comment), but read through `parseDriftFindings` regardless rather than
-      // trusted raw, the same defensive-JSON-column treatment `reconcile.ts` documents.
-      driftFindings: parseDriftFindings(exposure.lastError),
+      // clears `driftFindings` back to `null` the moment a re-check finds nothing wrong —
+      // see its own doc comment), but read through `parseDriftFindings` regardless rather
+      // than trusted raw, the same defensive-JSON-column treatment `reconcile.ts` documents.
+      driftFindings: parseDriftFindings(exposure.driftFindings),
     } satisfies AppExposureStatus;
   });
 

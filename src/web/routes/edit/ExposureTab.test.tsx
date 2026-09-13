@@ -456,6 +456,31 @@ describe("ExposurePanel", () => {
       expect(screen.getByText(/has drifted from what Cloudflare reports/)).toBeTruthy();
     });
 
+    it("gives a replaced Access application its own, more urgent banner too", async () => {
+      // Phase 2F whole-branch review, F3: a replaced Access application (new id, new
+      // aud) is at least as urgent as a deleted one — the stale recorded aud breaks
+      // this app's own Access sign-in checks.
+      stubFetch({
+        tunnel: PROVISIONED,
+        exposure: {
+          ...READY_EXPOSURE,
+          state: "drifted",
+          driftFindings: [
+            {
+              kind: "access_app_replaced",
+              message:
+                "The Access application protecting jellyfin.example.com has been replaced in Cloudflare (a new id and audience tag) — the recorded audience is stale and sign-in checks against it will fail.",
+            },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByText(/was replaced/)).toBeTruthy());
+      const urgent = screen.getByText(/was replaced/).closest('[role="alert"]');
+      expect(urgent?.textContent).toContain("sign-in checks against it will fail");
+    });
+
     it("Check for drift calls the reconcile route, never a Cloudflare write, and refreshes this app's own status", async () => {
       const fetchMock = stubFetch({
         tunnel: PROVISIONED,
