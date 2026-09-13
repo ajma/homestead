@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
 import { requireCapability } from "../auth/context.js";
+import { internalServiceUrl } from "../cloudflare/expose.js";
 import { probes } from "../db/schema.js";
 import { isValidStatusPattern } from "../monitoring/status-pattern.js";
 import { loadApp } from "./apps.js";
@@ -89,10 +90,18 @@ export async function probeRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!resolved.valid) return [];
     // Published ports are the only thing here that reliably names a reachable endpoint.
+    // `internalServiceUrl` (`cloudflare/expose.ts`) — the same function the ingress rule
+    // and the `http_internal` probe both resolve their target through — not a second
+    // `http://localhost:${port}` template literal. F4 (whole-branch review): this used to
+    // write its own, and `upsertProbe` (`expose.ts`) now refuses to create or adopt an
+    // internal probe whose target isn't byte-for-byte equal to what that function
+    // produces — a second construction here that drifted from it even slightly (a stray
+    // trailing slash, `127.0.0.1` instead of `localhost`) would make every suggestion this
+    // endpoint offers permanently rejected by exposure.
     return resolved.resolved.services.flatMap((service) =>
       service.publishedPorts.map((port) => ({
         service: service.name,
-        target: `http://localhost:${port}`,
+        target: internalServiceUrl(port),
       })),
     );
   });

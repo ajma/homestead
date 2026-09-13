@@ -16,11 +16,21 @@ import { removeIngress, spliceIngress } from "./ingress.js";
  * that one fact, computed exactly once rather than three call sites each writing their own
  * `http://localhost:${port}` template literal and risking one of them drifting from the
  * other two (a stray `https://`, a trailing slash, `127.0.0.1` in one place and `localhost`
- * in another). `routes/cloudflare-expose.ts` is the first caller — it builds the value
- * passed to `exposeSteps` below as `internalUrl`, used for BOTH the ingress rule's `service`
- * field and the `http_internal` probe's `target` (see `create-probe`) — and this is the
- * function a future launcher-URL caller (§6's third consumer, not built this phase) should
- * import rather than reimplement.
+ * in another).
+ *
+ * F4 (whole-branch review, Important): this was true of only ONE of the two callers this
+ * phase actually added — `routes/cloudflare-expose.ts` (the value passed to `exposeSteps`
+ * below as `internalUrl`, used for BOTH the ingress rule's `service` field and the
+ * `http_internal` probe's `target` via `create-probe`) called this function, while
+ * `GET /api/apps/:id/probes/suggestions` (`routes/probes.ts`) still wrote its own
+ * `http://localhost:${port}` literal — the plan's Task 4 asked for that second call site
+ * to be the one that triggers this extraction, and it wasn't done. That gap stopped being
+ * cosmetic the moment `upsertProbe` below started refusing to create or adopt an
+ * `http_internal` probe whose target isn't byte-for-byte equal to what THIS function
+ * produces (`ProbeTargetConflictError`) — a second construction drifting from this one by
+ * even a trailing slash would make every suggestion `probes.ts` offers permanently
+ * rejected by exposure. Both callers now import this rather than reimplement it; a future
+ * launcher-URL caller (§6's third consumer, not built this phase) should do the same.
  */
 export function internalServiceUrl(port: number): string {
   return `http://localhost:${port}`;
