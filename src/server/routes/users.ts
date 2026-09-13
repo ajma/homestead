@@ -80,6 +80,13 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     const body = createUserSchema
       .pick({ email: true, password: true, name: true })
       .parse(request.body);
+    // Better-Auth lowercases email at signup — `users.email` is ALWAYS lowercase on the
+    // row it just created — so every lookup below must compare against the same
+    // normalisation, not the raw, possibly mixed-case body. Comparing against the raw
+    // body here matched zero rows for e.g. `Bob@X.com`: the promotion UPDATE below found
+    // nothing to promote and returned 409 even on the very first bootstrap, leaving a
+    // permanently unpromoted viewer and no way to ever create an admin.
+    const email = body.email.toLowerCase();
 
     const result = await auth.api.signUpEmail({ body, asResponse: true });
     if (!result.ok) return reply.code(result.status).send(await result.json());
@@ -98,7 +105,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
       .set({ role: "admin", scopeAllApps: true })
       .where(
         and(
-          eq(users.email, body.email),
+          eq(users.email, email),
           notExists(db.select({ ok: sql`1` }).from(otherUsers).where(eq(otherUsers.role, "admin"))),
         ),
       )
@@ -106,7 +113,7 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
 
     if (promoted.length === 0) return reply.code(409).send({ error: "already_initialised" });
 
-    const [row] = await db.select(publicUser).from(users).where(eq(users.email, body.email));
+    const [row] = await db.select(publicUser).from(users).where(eq(users.email, email));
     await audit(
       db,
       { userId: null, authPath: "system" },
@@ -153,6 +160,12 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/users", async (request, reply) => {
     const ctx = requireAdmin(request);
     const body = createUserSchema.parse(request.body);
+    // Same normalisation as `/api/setup/admin` above, for the same reason: Better-Auth
+    // stores email lowercase regardless of what was submitted, so comparing against the
+    // raw body here matched zero rows for a mixed-case email — the role/scope UPDATE
+    // silently applied to nothing, the created row stayed a default-role viewer, and the
+    // SELECT below returned nothing, so the route answered 201 with an empty body.
+    const email = body.email.toLowerCase();
 
     const result = await auth.api.signUpEmail({
       body: { email: body.email, password: body.password, name: body.name },
@@ -163,9 +176,9 @@ export async function userRoutes(app: FastifyInstance): Promise<void> {
     await db
       .update(users)
       .set({ role: body.role, scopeAllApps: body.scopeAllApps })
-      .where(eq(users.email, body.email));
+      .where(eq(users.email, email));
 
-    const [row] = await db.select(publicUser).from(users).where(eq(users.email, body.email));
+    const [row] = await db.select(publicUser).from(users).where(eq(users.email, email));
     if (row && !body.scopeAllApps && body.appIds.length > 0) {
       await db.insert(userAppScope).values(body.appIds.map((appId) => ({ userId: row.id, appId })));
     }

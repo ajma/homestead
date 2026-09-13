@@ -68,7 +68,12 @@ async function sampleBody(response: Response): Promise<string> {
 
 export function createHttpRunners(deps: {
   fetch: typeof fetch;
-  accessCredentials?: () => Promise<AccessCredentials | null>;
+  // Required, not optional. This is the exact call-site defect Phase 1 shipped with:
+  // an omitted argument that type-checked and left every `http_external` probe
+  // reporting `degraded` forever. A caller with genuinely no store must say so
+  // explicitly with `() => Promise.resolve(null)` — see `build-runners.ts`'s doc
+  // comment for why a test alone was not enough to keep this closed.
+  accessCredentials: () => Promise<AccessCredentials | null>;
 }): { internal: ProbeRunner; external: ProbeRunner } {
   async function request(
     probe: ProbeRow,
@@ -141,7 +146,7 @@ export function createHttpRunners(deps: {
   const external: ProbeRunner = {
     kind: "http_external",
     async run(probe: ProbeRow, _ctx: ProbeContext): Promise<ProbeResult> {
-      const credentials = (await deps.accessCredentials?.()) ?? null;
+      const credentials = (await deps.accessCredentials()) ?? null;
       if (!credentials) {
         // Every request would land on the login page. "Up" would be a lie and "down"
         // would blame the app for a missing service token.

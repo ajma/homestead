@@ -292,6 +292,7 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
     fetch: async () => {
       throw new Error("scheduler fetch should not be called in tests");
     },
+    accessCredentials: async () => null,
   });
   const events = new EventBus({ maxStreamMs: overrides.maxStreamMs });
   const scheduler = new Scheduler({
@@ -365,6 +366,20 @@ export async function buildTestApp(overrides: { maxStreamMs?: number } = {}): Pr
   // Assign each app instance its own source address to avoid rate-limit bucket
   // collisions. Better-Auth's sign-in rate limiter is process-global and keyed by IP.
   const instanceIp = getUniqueTestIp();
+
+  // This instance's default `inject()` peer is treated as having arrived via the
+  // trusted proxy (2E fix-wave: `isTrustedProxyAddress`, app.ts). Without
+  // this, no test could reach the Access sign-in path without overriding
+  // `remoteAddress` to a literal `127.0.0.1`/`::1` on every single call — which would
+  // reintroduce exactly the rate-limit bucket collision `instanceIp` exists to avoid,
+  // since every test app in this file's worker would then share the same two buckets.
+  // Each instance keeps its own unique address AND is trusted under its own config,
+  // so there is no cross-test sharing.
+  app.deps.config = {
+    ...app.deps.config,
+    trustedProxies: [...app.deps.config.trustedProxies, instanceIp],
+  };
+
   const originalInject = app.inject.bind(app);
 
   // Wrap inject to default remoteAddress to this instance's IP when not specified.

@@ -1,6 +1,9 @@
-import { auditLog } from "@server/db/schema";
+import { ACCESS_TEAM_DOMAIN_SETTING_KEY } from "@server/auth/access-settings";
+import { LOCAL_HOST_ID } from "@server/bootstrap";
+import { apps, auditLog, exposures, settings } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
+import { ulid } from "ulid";
 import { describe, expect, it } from "vitest";
 
 const TOKEN = "cfat_super-secret-token-value";
@@ -514,6 +517,71 @@ describe("cloudflare routes", () => {
       const serialised = JSON.stringify(allRows);
       expect(serialised).not.toContain("secret-1");
       expect(serialised).not.toContain("rotated-secret");
+      await app.close();
+    });
+  });
+
+  describe("GET /api/cloudflare/access", () => {
+    it("is not configured when nothing is set anywhere", async () => {
+      const { app, cookie } = await withAdmin();
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/access",
+        headers: { cookie },
+      });
+      expect(res.json()).toEqual({ configured: false });
+      await app.close();
+    });
+
+    it("resolves from the database once an app is marked self and its exposure and team domain are recorded", async () => {
+      // Proves the wiring end to end through the route, not just `resolveAccessSettings`
+      // in isolation — using a manually-seeded `self` app, since nothing in the codebase
+      // assigns `systemKind: "self"` yet (see `access-settings.ts`'s doc comment).
+      const { app, cookie } = await withAdmin();
+      const appId = ulid();
+      await app.deps.db.insert(apps).values({
+        id: appId,
+        hostId: LOCAL_HOST_ID,
+        slug: "homestead",
+        displayName: "Homestead",
+        directory: "homestead",
+        composeFile: "compose.yaml",
+        projectName: "homestead",
+        systemKind: "self",
+      });
+      await app.deps.db.insert(exposures).values({
+        id: ulid(),
+        appId,
+        hostname: "homestead.example.com",
+        ingressService: "http://localhost:3000",
+        accessAppAud: "db-aud-value",
+      });
+      await app.deps.db
+        .insert(settings)
+        .values({ key: ACCESS_TEAM_DOMAIN_SETTING_KEY, value: "db-team" });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/access",
+        headers: { cookie },
+      });
+      expect(res.json()).toEqual({
+        configured: true,
+        teamDomain: "db-team",
+        aud: "db-aud-value",
+      });
+      await app.close();
+    });
+
+    it("gives a viewer 403", async () => {
+      const { app, cookie: adminCookie } = await withAdmin();
+      const { cookie } = await createViewer(app, adminCookie);
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/cloudflare/access",
+        headers: { cookie },
+      });
+      expect(res.statusCode).toBe(403);
       await app.close();
     });
   });

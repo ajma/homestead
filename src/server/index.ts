@@ -16,8 +16,8 @@ import { LocalHost } from "./host/local-host.js";
 import { runMountPreflight } from "./host/preflight.js";
 import { IconMetadata } from "./icons/metadata.js";
 import { IconStore } from "./icons/store.js";
+import { buildHttpRunners } from "./monitoring/build-runners.js";
 import { dockerRunner } from "./monitoring/docker-runner.js";
-import { createHttpRunners } from "./monitoring/http-runner.js";
 import { RetentionTimer } from "./monitoring/retention.js";
 import { Scheduler } from "./monitoring/scheduler.js";
 import { EventBus } from "./routes/events.js";
@@ -48,6 +48,7 @@ await startServer({
     await host.init();
 
     const auth = createAuth(config, db);
+    const secretStore = new SecretStore(db, config.secretKey);
     const composeConfig = new ComposeConfigCache(host);
     // Shared so a compose job and a step sequence exclude each other on the same app —
     // the whole reason `AppLock` was pulled out of `JobRunner` in the first place.
@@ -66,7 +67,7 @@ await startServer({
       },
     });
     const images = new ImageUpdateChecker({ db, host, composeConfig, registry });
-    const httpRunners = createHttpRunners({ fetch });
+    const httpRunners = buildHttpRunners({ fetch, db, secrets: secretStore });
     const events = new EventBus();
     const scheduler = new Scheduler({
       db,
@@ -108,7 +109,7 @@ await startServer({
       config,
       db,
       host,
-      secrets: new SecretStore(db, config.secretKey),
+      secrets: secretStore,
       auth,
       composeConfig,
       jobs,

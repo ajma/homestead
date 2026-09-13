@@ -88,6 +88,7 @@ async function buildRealHostTestApp(composeRoot: string): Promise<RealHostTestAp
     fetch: async () => {
       throw new Error("scheduler fetch should not be called in tests");
     },
+    accessCredentials: async () => null,
   });
   const events = new EventBus();
   const scheduler = new Scheduler({

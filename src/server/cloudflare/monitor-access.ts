@@ -100,6 +100,25 @@ export class MonitorAccessStore {
     );
   }
 
+  /**
+   * The secret, alongside the client id — unlike `get()`, which exists for status
+   * display and deliberately never reads it (see that method's doc comment). This is
+   * for the one caller that actually has to authenticate as the monitor: the
+   * `http_external` probe runner (2E), which needs a fresh read on every run so a
+   * rotation (`rotateMonitorSecret`) takes effect on the very next probe rather than
+   * whenever the process that captured a stale value happens to restart.
+   *
+   * `null` if either half is missing — a client id with no secret, or a secret with
+   * no record, is not usable credentials either way.
+   */
+  async getCredentials(): Promise<{ clientId: string; clientSecret: string } | null> {
+    const access = await this.get();
+    if (!access) return null;
+    const clientSecret = await this.secrets.get(MONITOR_CLIENT_SECRET_KEY);
+    if (clientSecret === null) return null;
+    return { clientId: access.clientId, clientSecret };
+  }
+
   /** Not transactional, the same reasoning as `TunnelStore.clear()`: a partial clear
    * still gets `get()` to `null` (any one of the three required settings missing is
    * already "absent"), which is the outcome this method promises. */
