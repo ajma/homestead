@@ -8,6 +8,7 @@ import { StepJobRunner } from "./apps/step-job-runner.js";
 import { sweepStrandedJobs } from "./apps/sweep.js";
 import { createAuth } from "./auth/auth.js";
 import { ensureLocalHost, LOCAL_HOST_ID } from "./bootstrap.js";
+import { TunnelConfigLock } from "./cloudflare/expose.js";
 import { loadConfig } from "./config.js";
 import { SecretStore } from "./crypto/secrets.js";
 import { createDb, runMigrations } from "./db/client.js";
@@ -53,6 +54,9 @@ await startServer({
     const appLock = new AppLock();
     const jobs = new JobRunner({ db, host, composeConfig, appLock });
     const stepJobs = new StepJobRunner({ db, appLock });
+    // One instance for the whole process — see its doc comment in `cloudflare/expose.ts`
+    // for why a lock built fresh per request would serialise nothing.
+    const tunnelConfigLock = new TunnelConfigLock();
     const registry = createRegistryClient({
       fetch,
       onError: (image, reason) => {
@@ -114,6 +118,7 @@ await startServer({
       events,
       icons: { metadata: iconMetadata, store: iconStore },
       fetch,
+      tunnelConfigLock,
       preflight: () =>
         runMountPreflight({ composeRoot: config.composeRoot, dockerSocket: config.dockerSocket }),
     });

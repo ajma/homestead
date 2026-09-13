@@ -1,0 +1,304 @@
+import { eq } from "drizzle-orm";
+import { ulid } from "ulid";
+import type { Step } from "../apps/step-sequence.js";
+import type { Db } from "../db/client.js";
+import { retryOnBusy } from "../db/retry.js";
+import { exposures, probes } from "../db/schema.js";
+import type { CloudflareClient } from "./client.js";
+import { removeIngress, spliceIngress } from "./ingress.js";
+
+/**
+ * Serialises every write to the ONE tunnel's ingress config: read, splice-or-remove,
+ * write — as one unit, never two interleaved. There is no "add one rule" endpoint (see
+ * `CloudflareClient.putTunnelConfig`'s own doc comment): every write replaces the whole
+ * array, so two concurrent read-modify-writes silently erase each other's hostname. §6
+ * names this a correctness bug, not a performance concern.
+ *
+ * **This is NOT `AppLock` (`apps/app-lock.ts`), and the two must not be confused.**
+ * `AppLock` is keyed per app and REJECTS a second holder outright (`tryAcquire` returns
+ * `false` synchronously) — two different apps being exposed at the same time each get
+ * their OWN `AppLock` entry and proceed in parallel, which is exactly the scenario this
+ * lock exists to prevent, because both still write the SAME tunnel's ingress array. This
+ * lock is per-tunnel — in practice global, since Homestead manages exactly one tunnel
+ * (`provision-tunnel.ts`'s `CLOUDFLARED_TUNNEL_NAME`) — and it QUEUES rather than
+ * rejects: a caller `await`s its turn instead of getting an error back. They solve
+ * different problems and neither substitutes for the other.
+ *
+ * Implemented as a promise chain rather than a flag-plus-wait-loop. `run` attaches the
+ * new work to `queue` and reassigns `queue` to a promise that resolves regardless of
+ * whether that work threw — both done synchronously, before the first `await` — so two
+ * calls issued in the same tick still queue in order, and one callback throwing can never
+ * wedge every call queued after it (the chain itself never rejects, only the individual
+ * `result` each caller gets back does).
+ */
+export class TunnelConfigLock {
+  private queue: Promise<void> = Promise.resolve();
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(fn);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+/**
+ * Carries what each step hands to the ones after it — same shape and same reasoning as
+ * `ProvisionCtx` (`provision-tunnel.ts`): every field optional because it is unset until
+ * the step that produces it has run, and every `undo` below checks for `undefined` before
+ * acting rather than assuming its own field was ever set.
+ */
+export type ExposeCtx = {
+  /** The `exposures` row's id, set the instant it exists so every later step (and this
+   * step's own `undo`) can find it. */
+  exposureId?: string;
+  ingressRuleCreatedByUs?: boolean;
+  dnsRecordId?: string;
+  dnsRecordCreatedByUs?: boolean;
+  accessAppId?: string;
+  accessAppAud?: string;
+  accessAppCreatedByUs?: boolean;
+  probeId?: string;
+};
+
+export type ExposeDeps = {
+  db: Db;
+  client: CloudflareClient;
+  /** Shared across every concurrent expose in the process — constructed once, at startup,
+   * the same lifetime `AppLock` has (see `index.ts`/`test-helpers.ts`). A lock built fresh
+   * per call would serialise nothing. */
+  tunnelConfigLock: TunnelConfigLock;
+  appId: string;
+  hostname: string;
+  zoneId: string;
+  tunnelId: string;
+  /** `http://localhost:<published-port>` — spec §6's `cloudflared` networking section.
+   * Accepted as-is rather than derived here: deriving it needs the app's compose config,
+   * which is the caller's (the route's) concern, not this sequence's. */
+  ingressService: string;
+  /** The admin-chosen policy demanding a human identity — §6: "policy list containing the
+   * chosen human policy plus the shared monitor policy by ID." Homestead does not create
+   * or manage this policy; it is referenced by id, the same way the shared monitor policy
+   * (below) is. */
+  humanPolicyId: string;
+  /** `MonitorAccess.policyId` (`monitor-access.ts`, Task 2) — the one reusable
+   * `non_identity` policy shared by every exposed app. */
+  monitorPolicyId: string;
+};
+
+/**
+ * The four-step expose sequence (spec §6), for `runSteps`/`StepJobRunner`. Each step is
+ * idempotent (adopts an existing Cloudflare resource rather than duplicating it) and
+ * records whether IT created what it is now responsible for — the `exposures` row's
+ * `dnsRecordCreatedByUs`/`ingressRuleCreatedByUs`/`accessAppCreatedByUs` columns, designed
+ * in Phase 1A and never written before this. 2C's whole-branch review measured what
+ * happens when adoption and deletion share one match: a rollback deleted a tunnel it had
+ * only adopted. Every `undo` below that touches a resource which might have pre-existed
+ * gates the delete on the flag THIS run set, never on the fact that `ctx` merely holds an
+ * id.
+ */
+export function exposeSteps(deps: ExposeDeps): Array<Step<ExposeCtx>> {
+  return [
+    {
+      name: "splice-ingress",
+      async run(ctx) {
+        const id = ulid();
+        // The LOCAL write goes first, deliberately — not the Cloudflare write. If the
+        // Cloudflare write below throws, undoing a local insert is a plain, reliable
+        // delete; the reverse order would need a Cloudflare round trip in the failure
+        // path of a step that is ABOUT to report itself failed, and `runSteps` never
+        // calls a failing step's own `undo` (step-sequence.ts, rule 1) — nothing else
+        // would ever clean up a Cloudflare write left dangling here.
+        await retryOnBusy(() =>
+          deps.db.insert(exposures).values({
+            id,
+            appId: deps.appId,
+            hostname: deps.hostname,
+            zoneId: deps.zoneId,
+            tunnelId: deps.tunnelId,
+            ingressService: deps.ingressService,
+            // Always true, unlike the DNS record and Access application below: the
+            // ingress array lives entirely inside the tunnel config that ONLY Homestead
+            // ever writes (`config_src: "cloudflare"`, provision-tunnel.ts). A
+            // pre-existing entry for this hostname here would mean an earlier partial
+            // expose attempt, not a resource a human made by hand outside Homestead —
+            // unlike a DNS record or an Access application, which live in the shared
+            // zone/account namespace a human plausibly configured directly. So there is
+            // no adoption case to gate this flag on.
+            ingressRuleCreatedByUs: true,
+            state: "provisioning",
+          }),
+        );
+        try {
+          // Lock, read, modify, write, unlock — never read-then-lock. A re-read outside
+          // the lock is the same read-modify-write race with extra steps: two concurrent
+          // exposes could still both read before either writes.
+          await deps.tunnelConfigLock.run(async () => {
+            const config = await deps.client.getTunnelConfig(deps.tunnelId);
+            const updated = spliceIngress(config.ingress, {
+              hostname: deps.hostname,
+              service: deps.ingressService,
+            });
+            await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
+          });
+        } catch (error) {
+          await deps.db
+            .delete(exposures)
+            .where(eq(exposures.id, id))
+            .catch(() => {
+              // Best effort — the same trade-off `write-files`'s undo makes: the
+              // ORIGINAL error is what the caller needs to see, not a secondary
+              // cleanup failure masking it.
+            });
+          throw error;
+        }
+        ctx.exposureId = id;
+        ctx.ingressRuleCreatedByUs = true;
+      },
+      async undo(ctx) {
+        if (ctx.exposureId === undefined) return;
+        // Removes the Cloudflare rule FIRST, the local row LAST — the same ordering
+        // Task 4's deprovisioning uses, for the same reason: if removing the rule fails,
+        // the row survives as the only record that a real ingress entry is still out
+        // there needing manual attention. Deleting the row first would erase that
+        // evidence while the rule — a REAL, live resource — was still out there.
+        await deps.tunnelConfigLock.run(async () => {
+          const config = await deps.client.getTunnelConfig(deps.tunnelId);
+          const updated = removeIngress(config.ingress, deps.hostname);
+          await deps.client.putTunnelConfig(deps.tunnelId, { ingress: updated });
+        });
+        await deps.db.delete(exposures).where(eq(exposures.id, ctx.exposureId));
+      },
+    },
+    {
+      name: "create-dns-record",
+      async run(ctx) {
+        if (ctx.exposureId === undefined) {
+          throw new Error("create-dns-record ran before splice-ingress produced an exposure row");
+        }
+        const exposureId = ctx.exposureId;
+        const existing = await deps.client.findDnsRecord(deps.zoneId, deps.hostname);
+        const dnsRecordId =
+          existing?.id ??
+          (
+            await deps.client.createDnsRecord(deps.zoneId, {
+              name: deps.hostname,
+              // §6: "a proxied CNAME to <tunnelId>.cfargotunnel.com" — `createDnsRecord`
+              // itself always sends `proxied: true` (client.ts).
+              content: `${deps.tunnelId}.cfargotunnel.com`,
+            })
+          ).id;
+        // Adopted (found, not created) vs. created BY US — the 2C lesson, applied here:
+        // an adopted record must never be authorised for deletion by the same match that
+        // found it.
+        const createdByUs = existing === null;
+        try {
+          await retryOnBusy(() =>
+            deps.db
+              .update(exposures)
+              .set({ dnsRecordId, dnsRecordCreatedByUs: createdByUs })
+              .where(eq(exposures.id, exposureId)),
+          );
+        } catch (error) {
+          if (createdByUs) {
+            // Same reasoning as `splice-ingress` above: this step is about to report
+            // FAILED, and a failing step's own `undo` never runs, so the record just
+            // created is stranded in Cloudflare with no local trace of it unless this
+            // removes it before rethrowing.
+            await deps.client.deleteDnsRecord(deps.zoneId, dnsRecordId).catch(() => {});
+          }
+          throw error;
+        }
+        ctx.dnsRecordId = dnsRecordId;
+        ctx.dnsRecordCreatedByUs = createdByUs;
+      },
+      async undo(ctx) {
+        if (ctx.dnsRecordId === undefined) return;
+        // 2C's lesson, load-bearing here: adoption and deletion must not be authorised by
+        // the same match. A record that already existed before this run is left alone —
+        // see `client.test.ts`'s seeded-adoption test for the measured failure this
+        // guards against.
+        if (!ctx.dnsRecordCreatedByUs) return;
+        await deps.client.deleteDnsRecord(deps.zoneId, ctx.dnsRecordId);
+      },
+    },
+    {
+      name: "create-access-app",
+      async run(ctx) {
+        if (ctx.exposureId === undefined) {
+          throw new Error("create-access-app ran before splice-ingress produced an exposure row");
+        }
+        const exposureId = ctx.exposureId;
+        const existing = await deps.client.findAccessApp(deps.hostname);
+        const accessApp =
+          existing ??
+          (await deps.client.createAccessApp({
+            domain: deps.hostname,
+            name: deps.hostname,
+            // §6: "policy list containing the chosen human policy plus the shared
+            // monitor policy by ID."
+            policyIds: [deps.humanPolicyId, deps.monitorPolicyId],
+          }));
+        const createdByUs = existing === null;
+        try {
+          await retryOnBusy(() =>
+            deps.db
+              .update(exposures)
+              .set({
+                accessAppId: accessApp.id,
+                accessAppAud: accessApp.aud,
+                accessAppCreatedByUs: createdByUs,
+              })
+              .where(eq(exposures.id, exposureId)),
+          );
+        } catch (error) {
+          if (createdByUs) {
+            await deps.client.deleteAccessApp(accessApp.id).catch(() => {});
+          }
+          throw error;
+        }
+        ctx.accessAppId = accessApp.id;
+        ctx.accessAppAud = accessApp.aud;
+        ctx.accessAppCreatedByUs = createdByUs;
+      },
+      async undo(ctx) {
+        if (ctx.accessAppId === undefined) return;
+        // Same 2C gate as `create-dns-record`'s undo, for the same reason.
+        if (!ctx.accessAppCreatedByUs) return;
+        await deps.client.deleteAccessApp(ctx.accessAppId);
+      },
+    },
+    {
+      name: "create-probe",
+      async run(ctx) {
+        if (ctx.exposureId === undefined) {
+          throw new Error("create-probe ran before splice-ingress produced an exposure row");
+        }
+        const exposureId = ctx.exposureId;
+        const id = ulid();
+        // Both writes here are local, with no network call between them — unlike the two
+        // steps above, they can share ONE transaction: either both land or neither does,
+        // so there is no partial-failure window for `runSteps`' "the failing step is
+        // never undone" rule to strand one half of this pair in.
+        await retryOnBusy(() =>
+          deps.db.transaction(async (tx) => {
+            await tx.insert(probes).values({
+              id,
+              appId: deps.appId,
+              kind: "http_external",
+              target: `https://${deps.hostname}`,
+            });
+            await tx.update(exposures).set({ state: "ready" }).where(eq(exposures.id, exposureId));
+          }),
+        );
+        ctx.probeId = id;
+      },
+      async undo(ctx) {
+        if (ctx.probeId === undefined) return;
+        await deps.db.delete(probes).where(eq(probes.id, ctx.probeId));
+      },
+    },
+  ];
+}

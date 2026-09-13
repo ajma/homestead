@@ -8,6 +8,7 @@ import type { ImageUpdateChecker } from "./apps/image-updates.js";
 import type { JobRunner } from "./apps/job-runner.js";
 import type { StepJobRunner } from "./apps/step-job-runner.js";
 import type { Auth } from "./auth/auth.js";
+import type { TunnelConfigLock } from "./cloudflare/expose.js";
 import type { Config } from "./config.js";
 import type { SecretStore } from "./crypto/secrets.js";
 import type { Db } from "./db/client.js";
@@ -19,6 +20,7 @@ import type { IconStore } from "./icons/store.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
 import { cloudflareRoutes } from "./routes/cloudflare.js";
+import { cloudflareExposeRoutes } from "./routes/cloudflare-expose.js";
 import { cloudflareTunnelRoutes } from "./routes/cloudflare-tunnel.js";
 import { containerRoutes } from "./routes/containers.js";
 import type { EventBus } from "./routes/events.js";
@@ -90,6 +92,11 @@ export type AppDeps = {
    * `preflight` above, so tests can override it wholesale without a second injection
    * mechanism. */
   fetch: typeof globalThis.fetch;
+  /** ONE instance shared by every concurrent expose in the process — see its own doc
+   * comment in `cloudflare/expose.ts` for why this is a different lock from `AppLock`
+   * (per-tunnel and global, not per-app) and must not be constructed fresh per request,
+   * which would serialise nothing. */
+  tunnelConfigLock: TunnelConfigLock;
 };
 
 declare module "fastify" {
@@ -202,6 +209,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(probeRoutes);
   await app.register(cloudflareRoutes);
   await app.register(cloudflareTunnelRoutes);
+  await app.register(cloudflareExposeRoutes);
   await app.register(eventRoutes);
   await app.register(launcherRoutes);
   await app.register(iconRoutes);
