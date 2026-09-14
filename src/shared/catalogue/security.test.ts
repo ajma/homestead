@@ -156,11 +156,6 @@ const ACKNOWLEDGED_LITERALS: readonly AcknowledgedLiteral[] = [
     reason: "mariadb image requires a non-empty password to create the app's db user.",
   },
   {
-    slug: "snipe-it",
-    key: "MYSQL_ROOT_PASSWORD",
-    reason: "mariadb image requires a non-empty root password when random-root-password is unset.",
-  },
-  {
     slug: "photoview",
     key: "MARIADB_PASSWORD",
     reason: "mariadb image requires a non-empty password to create the app's db user.",

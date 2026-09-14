@@ -249,7 +249,7 @@
     "iconRef": "n8n",
     "homepage": "https://n8n.io",
     "categories": ["development"],
-    "compose": "services:\n  n8n:\n    image: n8nio/n8n:latest\n    restart: unless-stopped\n    ports:\n      - \"5678:5678\"\n    volumes:\n      - ./data:/home/node/.n8n\n"
+    "compose": "services:\n  n8n:\n    image: n8nio/n8n:latest\n    restart: unless-stopped\n    environment:\n      - N8N_SECURE_COOKIE=false\n    ports:\n      - \"5678:5678\"\n    volumes:\n      - ./data:/home/node/.n8n\n"
   },
   {
     "slug": "photoview",
@@ -276,7 +276,7 @@
     "iconRef": "kavita",
     "homepage": "https://www.kavitareader.com",
     "categories": ["media"],
-    "compose": "services:\n  kavita:\n    image: jvmilazz0/kavita:latest\n    restart: unless-stopped\n    ports:\n      - \"5000:5000\"\n    volumes:\n      - ./manga:/manga\n      - ./data:/kavita/config\n"
+    "compose": "services:\n  kavita:\n    image: jvmilazz0/kavita:latest\n    restart: unless-stopped\n    ports:\n      - \"5005:5000\"\n    volumes:\n      - ./manga:/manga\n      - ./data:/kavita/config\n"
   },
   {
     "slug": "calibre-web",
@@ -429,7 +429,7 @@
     "iconRef": "excalidraw",
     "homepage": "https://excalidraw.com",
     "categories": ["productivity"],
-    "compose": "services:\n  excalidraw:\n    image: excalidraw/excalidraw:latest\n    restart: unless-stopped\n    ports:\n      - \"5001:80\"\n"
+    "compose": "services:\n  excalidraw:\n    image: excalidraw/excalidraw:latest\n    restart: unless-stopped\n    ports:\n      - \"5011:80\"\n"
   },
   {
     "slug": "whoogle",
@@ -447,6 +447,6 @@
     "iconRef": "snipe-it",
     "homepage": "https://snipeitapp.com",
     "categories": ["utilities"],
-    "compose": "services:\n  snipe-it:\n    image: snipe/snipe-it:latest\n    restart: unless-stopped\n    ports:\n      - \"8072:80\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8072\n      - DB_CONNECTION=mariadb\n      - DB_HOST=db\n      - DB_DATABASE=snipeit\n      - DB_USERNAME=snipeit\n      - DB_PASSWORD=changeme1234\n    volumes:\n      - ./storage:/var/lib/snipeit\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=snipeit\n      - MYSQL_USER=snipeit\n      - MYSQL_PASSWORD=changeme1234\n      - MYSQL_ROOT_PASSWORD=changeme1234\n    volumes:\n      - ./db:/var/lib/mysql\n"
+    "compose": "services:\n  snipe-it:\n    image: snipe/snipe-it:latest\n    restart: unless-stopped\n    ports:\n      - \"8072:80\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8072\n      - DB_CONNECTION=mariadb\n      - DB_HOST=db\n      - DB_DATABASE=snipeit\n      - DB_USERNAME=snipeit\n      - DB_PASSWORD=changeme1234\n    volumes:\n      - ./storage:/var/lib/snipeit\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=snipeit\n      - MYSQL_USER=snipeit\n      - MYSQL_PASSWORD=changeme1234\n      - MYSQL_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
   }
 ]
