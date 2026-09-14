@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { CatalogueEntry } from "@shared/catalogue/schema.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CreateAppDialog } from "@web/routes/CreateAppDialog";
@@ -27,6 +28,60 @@ function ok(body: unknown = { id: "a1", slug: "jellyfin" }, status = 201) {
         }),
     ),
   );
+}
+
+function catalogueEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry {
+  return {
+    slug: "uptime-kuma",
+    name: "Uptime Kuma",
+    description: "Self-hosted monitoring for websites and services.",
+    iconRef: "uptime-kuma",
+    homepage: "https://example.com/uptime-kuma",
+    categories: ["monitoring"],
+    compose: "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:1\n",
+    ...overrides,
+  };
+}
+
+/**
+ * Discriminates by URL and method, unlike `ok()` above — this suite's browse-and-create
+ * tests hit `GET /api/catalogue` and `POST /api/apps` in the same test, and the two must
+ * answer differently.
+ */
+function stubCatalogueAndCreate(
+  entries: CatalogueEntry[],
+  createResponse: { body?: unknown; status?: number } = {},
+) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/catalogue") {
+        return new Response(JSON.stringify(entries), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "/api/apps" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify(createResponse.body ?? { id: "a1", slug: entries[0]?.slug ?? "x" }),
+          {
+            status: createResponse.status ?? 201,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      throw new Error(`unexpected fetch: ${init?.method ?? "GET"} ${url}`);
+    }),
+  );
+}
+
+function lastCreateBody(): Record<string, unknown> {
+  const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls as Array<
+    [string, RequestInit | undefined]
+  >;
+  const call = calls.findLast(([url, init]) => url === "/api/apps" && init?.method === "POST");
+  if (!call) throw new Error("POST /api/apps was never called");
+  return JSON.parse(String(call[1]?.body));
 }
 
 describe("CreateAppDialog", () => {
@@ -150,5 +205,138 @@ describe("CreateAppDialog", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(fetch).not.toHaveBeenCalled();
     expect(screen.getByText(/64 characters or fewer/i)).toBeTruthy();
+  });
+
+  describe("browsing the catalogue", () => {
+    it("lists every catalogue entry once the browse panel opens", async () => {
+      stubCatalogueAndCreate([
+        catalogueEntry({ slug: "uptime-kuma", name: "Uptime Kuma" }),
+        catalogueEntry({ slug: "jellyfin", name: "Jellyfin" }),
+      ]);
+      mount();
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      await waitFor(() => expect(screen.getByText("Uptime Kuma")).toBeTruthy());
+      expect(screen.getByText("Jellyfin")).toBeTruthy();
+    });
+
+    it("narrows the list to entries matching the search across name, description and category", async () => {
+      stubCatalogueAndCreate([
+        catalogueEntry({
+          slug: "uptime-kuma",
+          name: "Uptime Kuma",
+          description: "Self-hosted monitoring for websites and services.",
+          categories: ["monitoring"],
+        }),
+        catalogueEntry({
+          slug: "jellyfin",
+          name: "Jellyfin",
+          description: "A media server.",
+          categories: ["media"],
+        }),
+      ]);
+      mount();
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      await waitFor(() => expect(screen.getByText("Jellyfin")).toBeTruthy());
+
+      fireEvent.change(screen.getByLabelText(/Search the catalogue/), {
+        target: { value: "monitoring" },
+      });
+      expect(screen.getByText("Uptime Kuma")).toBeTruthy();
+      expect(screen.queryByText("Jellyfin")).toBeNull();
+    });
+
+    it("says a search matched nothing, rather than showing an empty list", async () => {
+      stubCatalogueAndCreate([catalogueEntry()]);
+      mount();
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      await waitFor(() => expect(screen.getByText("Uptime Kuma")).toBeTruthy());
+
+      fireEvent.change(screen.getByLabelText(/Search the catalogue/), {
+        target: { value: "definitely-not-in-the-catalogue" },
+      });
+      expect(screen.queryByText("Uptime Kuma")).toBeNull();
+      expect(screen.getByText(/No apps match/)).toBeTruthy();
+    });
+
+    it("fills display name, description, icon and compose from a chosen entry, and each stays editable", async () => {
+      const entry = catalogueEntry();
+      stubCatalogueAndCreate([entry]);
+      const { container } = mount();
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      await waitFor(() => expect(screen.getByText(entry.name)).toBeTruthy());
+      fireEvent.click(screen.getByText(entry.name));
+
+      // Filled.
+      expect((screen.getByLabelText(/Display name/) as HTMLInputElement).value).toBe(entry.name);
+      expect((screen.getByLabelText(/Directory/) as HTMLInputElement).value).toBe(entry.slug);
+      expect((screen.getByLabelText(/Description/) as HTMLTextAreaElement).value).toBe(
+        entry.description,
+      );
+      expect(container.querySelector(`img[data-icon-slug="${entry.iconRef}"]`)).not.toBeNull();
+      expect((screen.getByLabelText(/Compose file/) as HTMLTextAreaElement).value).toBe(
+        entry.compose,
+      );
+
+      // Editable: change every field the catalogue filled, then confirm the edit stuck
+      // rather than the catalogue's own value re-asserting itself.
+      fireEvent.change(screen.getByLabelText(/Display name/), {
+        target: { value: "My Kuma" },
+      });
+      fireEvent.change(screen.getByLabelText(/Description/), {
+        target: { value: "A rewritten description." },
+      });
+      const editedCompose = "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2\n";
+      fireEvent.change(screen.getByLabelText(/Compose file/), {
+        target: { value: editedCompose },
+      });
+      // The icon field's own "Use a letter tile" clears the chosen icon back to null —
+      // proof the field is a live control, not a read-only echo of the catalogue.
+      fireEvent.click(screen.getByRole("button", { name: /Use a letter tile/ }));
+
+      expect((screen.getByLabelText(/Display name/) as HTMLInputElement).value).toBe("My Kuma");
+      expect((screen.getByLabelText(/Description/) as HTMLTextAreaElement).value).toBe(
+        "A rewritten description.",
+      );
+      expect((screen.getByLabelText(/Compose file/) as HTMLTextAreaElement).value).toBe(
+        editedCompose,
+      );
+      expect(container.querySelector("img[data-icon-slug]")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: /^Create$/ }));
+      await waitFor(() => expect(fetch).toHaveBeenCalled());
+      const body = lastCreateBody();
+      expect(body.displayName).toBe("My Kuma");
+      expect(body.description).toBe("A rewritten description.");
+      expect(body.compose).toBe(editedCompose);
+      expect(body.iconRef).toBeUndefined();
+    });
+
+    it("creates an app from an unedited catalogue entry with that entry's compose in the request", async () => {
+      // The strongest proof this routes through the SAME create path: the request body
+      // `POST /api/apps` actually receives carries the catalogue entry's own compose text.
+      const entry = catalogueEntry();
+      stubCatalogueAndCreate([entry]);
+      mount();
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      await waitFor(() => expect(screen.getByText(entry.name)).toBeTruthy());
+      fireEvent.click(screen.getByText(entry.name));
+
+      fireEvent.click(screen.getByRole("button", { name: /^Create$/ }));
+      await waitFor(() => expect(fetch).toHaveBeenCalled());
+      const body = lastCreateBody();
+      expect(body).toMatchObject({
+        displayName: entry.name,
+        directory: entry.slug,
+        description: entry.description,
+        iconRef: entry.iconRef,
+        compose: entry.compose,
+      });
+    });
+
+    it("does not fetch the catalogue until the browse panel is opened", async () => {
+      stubCatalogueAndCreate([catalogueEntry()]);
+      mount();
+      expect(fetch).not.toHaveBeenCalled();
+    });
   });
 });

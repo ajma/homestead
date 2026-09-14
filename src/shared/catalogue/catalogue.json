@@ -1,0 +1,452 @@
+[
+  {
+    "slug": "uptime-kuma",
+    "name": "Uptime Kuma",
+    "description": "A self-hosted uptime and status-page monitor for websites and services.",
+    "iconRef": "uptime-kuma",
+    "homepage": "https://github.com/louislam/uptime-kuma",
+    "categories": ["monitoring"],
+    "compose": "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:latest\n    restart: unless-stopped\n    volumes:\n      - ./data:/app/data\n    ports:\n      - \"3001:3001\"\n"
+  },
+  {
+    "slug": "miniflux",
+    "name": "Miniflux",
+    "description": "A minimalist RSS/Atom feed reader backed by PostgreSQL; no admin account exists until you run `miniflux -create-admin` inside the container after first start.",
+    "iconRef": "miniflux",
+    "homepage": "https://miniflux.app",
+    "categories": ["media", "productivity"],
+    "compose": "services:\n  miniflux:\n    image: miniflux/miniflux:latest\n    restart: unless-stopped\n    ports:\n      - \"8280:8080\"\n    depends_on:\n      - db\n    environment:\n      - DATABASE_URL=postgres://miniflux:secret@db/miniflux?sslmode=disable\n      - RUN_MIGRATIONS=1\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_USER=miniflux\n      - POSTGRES_PASSWORD=secret\n      - POSTGRES_DB=miniflux\n    volumes:\n      - ./db:/var/lib/postgresql\n"
+  },
+  {
+    "slug": "it-tools",
+    "name": "IT-Tools",
+    "description": "A collection of handy browser-based utilities for developers, with no persistent data of its own.",
+    "iconRef": "it-tools",
+    "homepage": "https://it-tools.tech",
+    "categories": ["development", "utilities"],
+    "compose": "services:\n  it-tools:\n    image: corentinth/it-tools:latest\n    restart: unless-stopped\n    ports:\n      - \"8080:80\"\n"
+  },
+  {
+    "slug": "jellyfin",
+    "name": "Jellyfin",
+    "description": "A free media server for streaming movies, shows, and music from your own library to any device.",
+    "iconRef": "jellyfin",
+    "homepage": "https://jellyfin.org",
+    "categories": ["media"],
+    "compose": "services:\n  jellyfin:\n    image: jellyfin/jellyfin:latest\n    restart: unless-stopped\n    ports:\n      - \"8096:8096\"\n    volumes:\n      - ./config:/config\n      - ./cache:/cache\n      - ./media:/media\n"
+  },
+  {
+    "slug": "navidrome",
+    "name": "Navidrome",
+    "description": "A music streaming server that indexes your personal audio library behind a Subsonic-compatible web interface.",
+    "iconRef": "navidrome",
+    "homepage": "https://www.navidrome.org",
+    "categories": ["media"],
+    "compose": "services:\n  navidrome:\n    image: deluan/navidrome:latest\n    restart: unless-stopped\n    ports:\n      - \"4533:4533\"\n    volumes:\n      - ./data:/data\n      - ./music:/music:ro\n"
+  },
+  {
+    "slug": "qbittorrent",
+    "name": "qBittorrent",
+    "description": "A BitTorrent client with a web interface; the image defaults to a non-root user, so the config directory may need its ownership adjusted before it can write.",
+    "iconRef": "qbittorrent",
+    "homepage": "https://www.qbittorrent.org",
+    "categories": ["utilities"],
+    "compose": "services:\n  qbittorrent:\n    image: lscr.io/linuxserver/qbittorrent:latest\n    restart: unless-stopped\n    environment:\n      - TZ=Etc/UTC\n      - WEBUI_PORT=8081\n      - TORRENTING_PORT=6881\n    volumes:\n      - ./config:/config\n      - ./downloads:/downloads\n    ports:\n      - \"8081:8081\"\n      - \"6881:6881\"\n      - \"6881:6881/udp\"\n"
+  },
+  {
+    "slug": "node-red",
+    "name": "Node-RED",
+    "description": "A flow-based tool for wiring together IoT and home-automation devices and APIs; the image runs as uid 1000, so the data directory needs matching ownership.",
+    "iconRef": "node-red",
+    "homepage": "https://nodered.org",
+    "categories": ["home-automation"],
+    "compose": "services:\n  node-red:\n    image: nodered/node-red:latest\n    restart: unless-stopped\n    ports:\n      - \"1880:1880\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "paperless-ngx",
+    "name": "Paperless-ngx",
+    "description": "A document scanner and archive that OCRs and tags paperwork, run here with SQLite and a Valkey broker instead of PostgreSQL.",
+    "iconRef": "paperless-ngx",
+    "homepage": "https://docs.paperless-ngx.com",
+    "categories": ["documents"],
+    "compose": "services:\n  broker:\n    image: docker.io/valkey/valkey:9-alpine\n    restart: unless-stopped\n    volumes:\n      - ./redisdata:/data\n  webserver:\n    image: ghcr.io/paperless-ngx/paperless-ngx:latest\n    restart: unless-stopped\n    depends_on:\n      - broker\n    ports:\n      - \"8000:8000\"\n    volumes:\n      - ./data:/usr/src/paperless/data\n      - ./media:/usr/src/paperless/media\n      - ./export:/usr/src/paperless/export\n      - ./consume:/usr/src/paperless/consume\n    environment:\n      - PAPERLESS_REDIS=redis://broker:6379\n      - PAPERLESS_DBENGINE=sqlite\n"
+  },
+  {
+    "slug": "trilium",
+    "name": "Trilium Notes",
+    "description": "A hierarchical personal notes app with rich formatting; the image runs as a non-root node user, so the data directory needs matching ownership.",
+    "iconRef": "trilium",
+    "homepage": "https://github.com/TriliumNext/Notes",
+    "categories": ["documents"],
+    "compose": "services:\n  trilium:\n    image: triliumnext/trilium:latest\n    restart: unless-stopped\n    environment:\n      - TRILIUM_DATA_DIR=/home/node/trilium-data\n    ports:\n      - \"8082:8080\"\n    volumes:\n      - ./trilium-data:/home/node/trilium-data\n"
+  },
+  {
+    "slug": "gitea",
+    "name": "Gitea",
+    "description": "A lightweight self-hosted Git service using SQLite, no external database needed; the image defaults to uid 1000, so the data directory needs matching ownership.",
+    "iconRef": "gitea",
+    "homepage": "https://gitea.com",
+    "categories": ["development"],
+    "compose": "services:\n  gitea:\n    image: docker.gitea.com/gitea:latest\n    restart: unless-stopped\n    volumes:\n      - ./gitea:/data\n    ports:\n      - \"3200:3000\"\n      - \"2222:22\"\n"
+  },
+  {
+    "slug": "nginx-proxy-manager",
+    "name": "Nginx Proxy Manager",
+    "description": "A reverse proxy with a web UI for issuing TLS certificates and routing traffic to other self-hosted apps by domain name.",
+    "iconRef": "nginx-proxy-manager",
+    "homepage": "https://nginxproxymanager.com",
+    "categories": ["networking"],
+    "compose": "services:\n  app:\n    image: jc21/nginx-proxy-manager:latest\n    restart: unless-stopped\n    ports:\n      - \"80:80\"\n      - \"443:443\"\n      - \"81:81\"\n    volumes:\n      - ./data:/data\n      - ./letsencrypt:/etc/letsencrypt\n"
+  },
+  {
+    "slug": "homepage",
+    "name": "Homepage",
+    "description": "A customizable start-page dashboard that links out to your self-hosted services; set HOMEPAGE_ALLOWED_HOSTS to the address you browse it from.",
+    "iconRef": "homepage",
+    "homepage": "https://gethomepage.dev",
+    "categories": ["utilities"],
+    "compose": "services:\n  homepage:\n    image: ghcr.io/gethomepage/homepage:latest\n    restart: unless-stopped\n    ports:\n      - \"3030:3000\"\n    volumes:\n      - ./config:/app/config\n    environment:\n      - HOMEPAGE_ALLOWED_HOSTS=localhost:3030\n"
+  },
+  {
+    "slug": "nextcloud",
+    "name": "Nextcloud",
+    "description": "A self-hosted file sync and collaboration platform, run here with its community-maintained image and default SQLite database.",
+    "iconRef": "nextcloud",
+    "homepage": "https://nextcloud.com",
+    "categories": ["documents", "productivity"],
+    "compose": "services:\n  app:\n    image: nextcloud:latest\n    restart: unless-stopped\n    ports:\n      - \"8083:80\"\n    volumes:\n      - ./data:/var/www/html\n"
+  },
+  {
+    "slug": "syncthing",
+    "name": "Syncthing",
+    "description": "A peer-to-peer file synchronization tool with no central server; the image runs as uid 1000, so the data directory needs matching ownership.",
+    "iconRef": "syncthing",
+    "homepage": "https://syncthing.net",
+    "categories": ["utilities"],
+    "compose": "services:\n  syncthing:\n    image: syncthing/syncthing:latest\n    restart: unless-stopped\n    hostname: syncthing\n    ports:\n      - \"8384:8384\"\n      - \"22000:22000\"\n      - \"22000:22000/udp\"\n      - \"21027:21027/udp\"\n    volumes:\n      - ./data:/var/syncthing\n"
+  },
+  {
+    "slug": "duplicati",
+    "name": "Duplicati",
+    "description": "A backup client that encrypts and uploads files to local or cloud storage, with its web UI unlocked by a token from the container logs.",
+    "iconRef": "duplicati",
+    "homepage": "https://duplicati.com",
+    "categories": ["utilities"],
+    "compose": "services:\n  duplicati:\n    image: duplicati/duplicati:latest\n    restart: unless-stopped\n    ports:\n      - \"8200:8200\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "vaultwarden",
+    "name": "Vaultwarden",
+    "description": "A lightweight, Bitwarden-compatible password manager server; signups default to off, set SIGNUPS_ALLOWED=true to add your first account, then flip it back.",
+    "iconRef": "vaultwarden",
+    "homepage": "https://github.com/dani-garcia/vaultwarden",
+    "categories": ["utilities"],
+    "compose": "services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    environment:\n      - SIGNUPS_ALLOWED=false\n    ports:\n      - \"8087:80\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "actual-budget",
+    "name": "Actual Budget",
+    "description": "A local-first personal budgeting app with a web UI for tracking accounts and transactions.",
+    "iconRef": "actual-budget",
+    "homepage": "https://actualbudget.org",
+    "categories": ["finance"],
+    "compose": "services:\n  actual:\n    image: actualbudget/actual-server:latest\n    restart: unless-stopped\n    ports:\n      - \"5006:5006\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "linkding",
+    "name": "Linkding",
+    "description": "A minimalist bookmark manager with tagging and full-text search; no admin account exists until you create one via its interactive setup after first start.",
+    "iconRef": "linkding",
+    "homepage": "https://linkding.link",
+    "categories": ["productivity"],
+    "compose": "services:\n  linkding:\n    image: sissbruecker/linkding:latest\n    restart: unless-stopped\n    ports:\n      - \"9090:9090\"\n    volumes:\n      - ./data:/etc/linkding/data\n"
+  },
+  {
+    "slug": "ntfy",
+    "name": "ntfy",
+    "description": "A pub-sub notification service for pushing alerts to phones and desktops over HTTP.",
+    "iconRef": "ntfy",
+    "homepage": "https://ntfy.sh",
+    "categories": ["utilities"],
+    "compose": "services:\n  ntfy:\n    image: binwiederhier/ntfy:latest\n    restart: unless-stopped\n    command:\n      - serve\n    environment:\n      - NTFY_CACHE_FILE=/var/cache/ntfy/cache.db\n      - NTFY_BASE_URL=http://localhost:8085\n    ports:\n      - \"8085:80\"\n    volumes:\n      - ./cache:/var/cache/ntfy\n"
+  },
+  {
+    "slug": "portainer",
+    "name": "Portainer",
+    "description": "A web UI for managing Docker containers, images, and volumes; it requires access to the host's Docker socket to work at all.",
+    "iconRef": "portainer",
+    "homepage": "https://www.portainer.io",
+    "categories": ["utilities"],
+    "compose": "services:\n  portainer:\n    image: portainer/portainer-ce:latest\n    restart: unless-stopped\n    ports:\n      - \"9443:9443\"\n    volumes:\n      - ./data:/data\n      - /var/run/docker.sock:/var/run/docker.sock\n"
+  },
+  {
+    "slug": "vikunja",
+    "name": "Vikunja",
+    "description": "A self-hosted to-do and project manager; files and db need uid-1000 ownership, and sessions reset on restart unless VIKUNJA_SERVICE_SECRET is set.",
+    "iconRef": "vikunja",
+    "homepage": "https://vikunja.io",
+    "categories": ["productivity"],
+    "compose": "services:\n  vikunja:\n    image: vikunja/vikunja:latest\n    restart: unless-stopped\n    environment:\n      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:3456/\n    ports:\n      - \"3456:3456\"\n    volumes:\n      - ./files:/app/vikunja/files\n      - ./db:/db\n"
+  },
+  {
+    "slug": "grafana",
+    "name": "Grafana",
+    "description": "A dashboarding and visualization tool for metrics and logs; the image runs as a non-root uid, so the data directory needs matching ownership.",
+    "iconRef": "grafana",
+    "homepage": "https://grafana.com",
+    "categories": ["monitoring"],
+    "compose": "services:\n  grafana:\n    image: grafana/grafana:latest\n    restart: unless-stopped\n    ports:\n      - \"3300:3000\"\n    volumes:\n      - ./data:/var/lib/grafana\n"
+  },
+  {
+    "slug": "photoprism",
+    "name": "PhotoPrism",
+    "description": "An AI-powered photo manager for a personal library, using SQLite by default; no admin password is set, so run `photoprism passwd admin` after first start.",
+    "iconRef": "photoprism",
+    "homepage": "https://www.photoprism.app",
+    "categories": ["photos"],
+    "compose": "services:\n  photoprism:\n    image: photoprism/photoprism:latest\n    restart: unless-stopped\n    ports:\n      - \"2342:2342\"\n    volumes:\n      - ./originals:/photoprism/originals\n      - ./storage:/photoprism/storage\n"
+  },
+  {
+    "slug": "mealie",
+    "name": "Mealie",
+    "description": "A recipe manager and meal planner with a web UI; the image defaults to a non-root uid, so the data directory needs matching ownership.",
+    "iconRef": "mealie",
+    "homepage": "https://mealie.io",
+    "categories": ["productivity"],
+    "compose": "services:\n  mealie:\n    image: ghcr.io/mealie-recipes/mealie:latest\n    restart: unless-stopped\n    ports:\n      - \"9925:9000\"\n    volumes:\n      - ./data:/app/data/\n"
+  },
+  {
+    "slug": "freshrss",
+    "name": "FreshRSS",
+    "description": "A lightweight self-hosted RSS/Atom feed aggregator with a web UI and a built-in SQLite database.",
+    "iconRef": "freshrss",
+    "homepage": "https://freshrss.org",
+    "categories": ["productivity"],
+    "compose": "services:\n  freshrss:\n    image: freshrss/freshrss:latest\n    restart: unless-stopped\n    ports:\n      - \"8380:80\"\n    volumes:\n      - ./data:/var/www/FreshRSS/data\n"
+  },
+  {
+    "slug": "pi-hole",
+    "name": "Pi-hole",
+    "description": "A network-wide DNS sinkhole that blocks ads and trackers for every device; the web UI password is random unless FTLCONF_webserver_api_password is set.",
+    "iconRef": "pi-hole",
+    "homepage": "https://pi-hole.net",
+    "categories": ["networking"],
+    "compose": "services:\n  pihole:\n    image: pihole/pihole:latest\n    restart: unless-stopped\n    ports:\n      - \"53:53/tcp\"\n      - \"53:53/udp\"\n      - \"8090:80/tcp\"\n    environment:\n      - TZ=Etc/UTC\n      - FTLCONF_dns_listeningMode=ALL\n    volumes:\n      - ./etc-pihole:/etc/pihole\n"
+  },
+  {
+    "slug": "home-assistant",
+    "name": "Home Assistant",
+    "description": "A home automation hub for smart-home devices; it uses host networking for discovery, so it has no published port, and USB dongles need extra passthrough.",
+    "iconRef": "home-assistant",
+    "homepage": "https://www.home-assistant.io",
+    "categories": ["home-automation"],
+    "compose": "services:\n  homeassistant:\n    image: ghcr.io/home-assistant/home-assistant:latest\n    restart: unless-stopped\n    network_mode: host\n    volumes:\n      - ./config:/config\n"
+  },
+  {
+    "slug": "n8n",
+    "name": "n8n",
+    "description": "A workflow automation platform with a visual editor and 400+ integrations; runs non-root; cookie needs HTTPS, set N8N_SECURE_COOKIE=false on a plain-HTTP LAN.",
+    "iconRef": "n8n",
+    "homepage": "https://n8n.io",
+    "categories": ["development"],
+    "compose": "services:\n  n8n:\n    image: n8nio/n8n:latest\n    restart: unless-stopped\n    ports:\n      - \"5678:5678\"\n    volumes:\n      - ./data:/home/node/.n8n\n"
+  },
+  {
+    "slug": "photoview",
+    "name": "Photoview",
+    "description": "A simple, fast photo gallery that indexes a read-only photo library into a MariaDB database for browsing.",
+    "iconRef": "photoview",
+    "homepage": "https://photoview.github.io",
+    "categories": ["photos"],
+    "compose": "services:\n  photoview:\n    image: viktorstrate/photoview:latest\n    restart: unless-stopped\n    ports:\n      - \"8060:80\"\n    environment:\n      - PHOTOVIEW_DATABASE_DRIVER=mysql\n      - PHOTOVIEW_MYSQL_URL=photoview:photoview@tcp(db)/photoview\n      - PHOTOVIEW_MEDIA_CACHE=/app/cache\n    volumes:\n      - ./photos:/photos:ro\n      - ./cache:/app/cache\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MARIADB_DATABASE=photoview\n      - MARIADB_USER=photoview\n      - MARIADB_PASSWORD=photoview\n      - MARIADB_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
+  },
+  {
+    "slug": "audiobookshelf",
+    "name": "Audiobookshelf",
+    "description": "A self-hosted server for audiobooks and podcasts, with mobile apps that stream and sync playback position.",
+    "iconRef": "audiobookshelf",
+    "homepage": "https://www.audiobookshelf.org",
+    "categories": ["media"],
+    "compose": "services:\n  audiobookshelf:\n    image: ghcr.io/advplyr/audiobookshelf:latest\n    restart: unless-stopped\n    ports:\n      - \"13378:80\"\n    volumes:\n      - ./audiobooks:/audiobooks\n      - ./podcasts:/podcasts\n      - ./config:/config\n      - ./metadata:/metadata\n"
+  },
+  {
+    "slug": "kavita",
+    "name": "Kavita",
+    "description": "A fast web-based reader for comics, manga, and ebooks that indexes a library folder you point it at.",
+    "iconRef": "kavita",
+    "homepage": "https://www.kavitareader.com",
+    "categories": ["media"],
+    "compose": "services:\n  kavita:\n    image: jvmilazz0/kavita:latest\n    restart: unless-stopped\n    ports:\n      - \"5005:5000\"\n    volumes:\n      - ./manga:/manga\n      - ./data:/kavita/config\n"
+  },
+  {
+    "slug": "calibre-web",
+    "name": "Calibre-Web",
+    "description": "A web interface for browsing and reading books from an existing Calibre library; it defaults to a non-root user, so config ownership may need adjusting.",
+    "iconRef": "calibre-web",
+    "homepage": "https://github.com/janeczku/calibre-web",
+    "categories": ["documents"],
+    "compose": "services:\n  calibre-web:\n    image: lscr.io/linuxserver/calibre-web:latest\n    restart: unless-stopped\n    environment:\n      - TZ=Etc/UTC\n    volumes:\n      - ./config:/config\n      - ./books:/books\n    ports:\n      - \"8570:8083\"\n"
+  },
+  {
+    "slug": "gotify",
+    "name": "Gotify",
+    "description": "A simple self-hosted push notification server that apps and scripts can send messages to over a REST API.",
+    "iconRef": "gotify",
+    "homepage": "https://gotify.net",
+    "categories": ["utilities"],
+    "compose": "services:\n  gotify:\n    image: gotify/server:latest\n    restart: unless-stopped\n    ports:\n      - \"8580:80\"\n    volumes:\n      - ./data:/app/data\n"
+  },
+  {
+    "slug": "privatebin",
+    "name": "PrivateBin",
+    "description": "A minimalist pastebin, encrypted and decrypted entirely in the browser; the image runs as uid 65534/gid 82, so the data directory needs matching ownership.",
+    "iconRef": "privatebin",
+    "homepage": "https://privatebin.info",
+    "categories": ["utilities"],
+    "compose": "services:\n  privatebin:\n    image: privatebin/nginx-fpm-alpine:latest\n    restart: unless-stopped\n    ports:\n      - \"8590:8080\"\n    volumes:\n      - ./data:/srv/data\n"
+  },
+  {
+    "slug": "baserow",
+    "name": "Baserow",
+    "description": "A no-code database and spreadsheet tool, an open-source alternative to Airtable, bundled here as a single all-in-one image.",
+    "iconRef": "baserow",
+    "homepage": "https://baserow.io",
+    "categories": ["productivity"],
+    "compose": "services:\n  baserow:\n    image: baserow/baserow:latest\n    restart: unless-stopped\n    environment:\n      - BASEROW_PUBLIC_URL=http://localhost:8071\n    ports:\n      - \"8071:80\"\n    volumes:\n      - ./data:/baserow/data\n"
+  },
+  {
+    "slug": "speedtest-tracker",
+    "name": "Speedtest Tracker",
+    "description": "A scheduled internet speed test that charts results over time; it requires an APP_KEY, generated before first run, to encrypt stored data.",
+    "iconRef": "speedtest-tracker",
+    "homepage": "https://github.com/alexjustesen/speedtest-tracker",
+    "categories": ["monitoring"],
+    "compose": "services:\n  speedtest-tracker:\n    image: lscr.io/linuxserver/speedtest-tracker:latest\n    restart: unless-stopped\n    environment:\n      - TZ=Etc/UTC\n      - APP_KEY=\n      - APP_URL=http://localhost:8073\n      - DB_CONNECTION=sqlite\n    volumes:\n      - ./config:/config\n    ports:\n      - \"8073:80\"\n"
+  },
+  {
+    "slug": "healthchecks",
+    "name": "Healthchecks",
+    "description": "A cron job and background task monitor that alerts you when a periodic ping does not arrive; needs PostgreSQL and a superuser created via createsuperuser.",
+    "iconRef": "healthchecks",
+    "homepage": "https://healthchecks.io",
+    "categories": ["monitoring"],
+    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SITE_ROOT=http://localhost:8088\n      - SECRET_KEY=\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql\n"
+  },
+  {
+    "slug": "wallabag",
+    "name": "Wallabag",
+    "description": "A read-it-later app that saves web articles for offline, ad-free reading; runs here on its built-in SQLite backend, no external database needed.",
+    "iconRef": "wallabag",
+    "homepage": "https://wallabag.org",
+    "categories": ["documents"],
+    "compose": "services:\n  wallabag:\n    image: wallabag/wallabag:latest\n    restart: unless-stopped\n    ports:\n      - \"8079:80\"\n    environment:\n      - SYMFONY__ENV__DOMAIN_NAME=http://localhost:8079\n    volumes:\n      - ./data:/var/www/wallabag/data\n      - ./images:/var/www/wallabag/web/assets/images\n"
+  },
+  {
+    "slug": "wiki-js",
+    "name": "Wiki.js",
+    "description": "A modern team wiki with Markdown editing and access control; it requires its own PostgreSQL database to store pages.",
+    "iconRef": "wikijs",
+    "homepage": "https://js.wiki",
+    "categories": ["documents"],
+    "compose": "services:\n  wiki:\n    image: requarks/wiki:latest\n    restart: unless-stopped\n    ports:\n      - \"8075:3000\"\n    environment:\n      - DB_TYPE=postgres\n      - DB_HOST=db\n      - DB_PORT=5432\n      - DB_USER=wikijs\n      - DB_PASS=wikijsrocks\n      - DB_NAME=wiki\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=wiki\n      - POSTGRES_USER=wikijs\n      - POSTGRES_PASSWORD=wikijsrocks\n    volumes:\n      - ./db:/var/lib/postgresql\n"
+  },
+  {
+    "slug": "firefly-iii",
+    "name": "Firefly III",
+    "description": "A personal finance manager for tracking budgets and expenses; needs an APP_KEY, a 32-character value, and its own MariaDB database.",
+    "iconRef": "firefly-iii",
+    "homepage": "https://www.firefly-iii.org",
+    "categories": ["finance"],
+    "compose": "services:\n  firefly-iii:\n    image: fireflyiii/core:latest\n    restart: unless-stopped\n    ports:\n      - \"8076:8080\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8076\n      - DB_CONNECTION=mysql\n      - DB_HOST=db\n      - DB_DATABASE=firefly\n      - DB_USERNAME=firefly\n      - DB_PASSWORD=secret_firefly_password\n    volumes:\n      - ./upload:/var/www/html/storage/upload\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=firefly\n      - MYSQL_USER=firefly\n      - MYSQL_PASSWORD=secret_firefly_password\n      - MYSQL_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
+  },
+  {
+    "slug": "stirling-pdf",
+    "name": "Stirling PDF",
+    "description": "A locally hosted toolkit for splitting, merging, converting, and otherwise manipulating PDF files entirely on your own server.",
+    "iconRef": "stirling-pdf",
+    "homepage": "https://www.stirlingpdf.com",
+    "categories": ["utilities"],
+    "compose": "services:\n  stirling-pdf:\n    image: stirlingtools/stirling-pdf:latest\n    restart: unless-stopped\n    ports:\n      - \"8077:8080\"\n    volumes:\n      - ./config:/configs\n      - ./logs:/logs\n"
+  },
+  {
+    "slug": "metube",
+    "name": "MeTube",
+    "description": "A web UI for yt-dlp that downloads video, audio, and captions from YouTube and dozens of other sites.",
+    "iconRef": "metube",
+    "homepage": "https://github.com/alexta69/metube",
+    "categories": ["media"],
+    "compose": "services:\n  metube:\n    image: ghcr.io/alexta69/metube:latest\n    restart: unless-stopped\n    ports:\n      - \"8091:8081\"\n    volumes:\n      - ./downloads:/downloads\n"
+  },
+  {
+    "slug": "grocy",
+    "name": "Grocy",
+    "description": "A household ERP for tracking groceries, chores, and batteries to cut down on food waste and missed tasks.",
+    "iconRef": "grocy",
+    "homepage": "https://grocy.info",
+    "categories": ["home-automation"],
+    "compose": "services:\n  grocy:\n    image: lscr.io/linuxserver/grocy:latest\n    restart: unless-stopped\n    environment:\n      - TZ=Etc/UTC\n    volumes:\n      - ./config:/config\n    ports:\n      - \"9283:80\"\n"
+  },
+  {
+    "slug": "homebox",
+    "name": "Homebox",
+    "description": "A home inventory tracker for possessions and maintenance; won't start without HBOX_AUTH_API_KEY_PEPPER set to 32+ random bytes, try `openssl rand -base64 48`.",
+    "iconRef": "homebox",
+    "homepage": "https://homebox.software",
+    "categories": ["utilities"],
+    "compose": "services:\n  homebox:\n    image: ghcr.io/sysadminsmedia/homebox:latest\n    restart: unless-stopped\n    ports:\n      - \"3100:7745\"\n    environment:\n      - TZ=Etc/UTC\n      - HBOX_AUTH_API_KEY_PEPPER=\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "beszel",
+    "name": "Beszel",
+    "description": "A lightweight server monitoring hub with a simple dashboard for CPU, memory, disk, and network metrics.",
+    "iconRef": "beszel",
+    "homepage": "https://beszel.dev",
+    "categories": ["monitoring"],
+    "compose": "services:\n  beszel:\n    image: henrygd/beszel:latest\n    restart: unless-stopped\n    ports:\n      - \"8092:8090\"\n    environment:\n      - APP_URL=http://localhost:8092\n    volumes:\n      - ./data:/beszel_data\n"
+  },
+  {
+    "slug": "onlyoffice-documentserver",
+    "name": "ONLYOFFICE Document Server",
+    "description": "A self-hosted online office suite for editing documents, spreadsheets, and presentations in the browser.",
+    "iconRef": "onlyoffice",
+    "homepage": "https://www.onlyoffice.com/document-server.aspx",
+    "categories": ["documents"],
+    "compose": "services:\n  documentserver:\n    image: onlyoffice/documentserver:latest\n    restart: unless-stopped\n    ports:\n      - \"8074:80\"\n    volumes:\n      - ./logs:/var/log/onlyoffice\n      - ./data:/var/www/onlyoffice/Data\n"
+  },
+  {
+    "slug": "code-server",
+    "name": "code-server",
+    "description": "VS Code running in the browser for coding from any device; it defaults to a non-root user, so mounted directories may need ownership adjusted.",
+    "iconRef": "code-server",
+    "homepage": "https://coder.com/docs/code-server",
+    "categories": ["development"],
+    "compose": "services:\n  code-server:\n    image: codercom/code-server:latest\n    restart: unless-stopped\n    ports:\n      - \"8078:8080\"\n    volumes:\n      - ./config:/home/coder/.config\n      - ./project:/home/coder/project\n"
+  },
+  {
+    "slug": "excalidraw",
+    "name": "Excalidraw",
+    "description": "A virtual whiteboard for sketching diagrams by hand; this self-hosted client is stateless, with no sharing or collaboration backend.",
+    "iconRef": "excalidraw",
+    "homepage": "https://excalidraw.com",
+    "categories": ["productivity"],
+    "compose": "services:\n  excalidraw:\n    image: excalidraw/excalidraw:latest\n    restart: unless-stopped\n    ports:\n      - \"5011:80\"\n"
+  },
+  {
+    "slug": "whoogle",
+    "name": "Whoogle Search",
+    "description": "A self-hosted, ad-free proxy for Google search results that strips tracking and ads before the page reaches you.",
+    "iconRef": "whoogle",
+    "homepage": "https://github.com/benbusby/whoogle-search",
+    "categories": ["networking"],
+    "compose": "services:\n  whoogle:\n    image: benbusby/whoogle-search:latest\n    restart: unless-stopped\n    ports:\n      - \"5010:5000\"\n"
+  },
+  {
+    "slug": "snipe-it",
+    "name": "Snipe-IT",
+    "description": "An IT asset management system for tracking who has which hardware and license; the container exits on start until you set a real APP_KEY.",
+    "iconRef": "snipe-it",
+    "homepage": "https://snipeitapp.com",
+    "categories": ["utilities"],
+    "compose": "services:\n  snipe-it:\n    image: snipe/snipe-it:latest\n    restart: unless-stopped\n    ports:\n      - \"8072:80\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8072\n      - DB_CONNECTION=mariadb\n      - DB_HOST=db\n      - DB_DATABASE=snipeit\n      - DB_USERNAME=snipeit\n      - DB_PASSWORD=changeme1234\n    volumes:\n      - ./storage:/var/lib/snipeit\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=snipeit\n      - MYSQL_USER=snipeit\n      - MYSQL_PASSWORD=changeme1234\n      - MYSQL_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
+  }
+]
