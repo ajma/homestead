@@ -10,7 +10,11 @@
 
 ## Two decisions already made by the user
 
-**1. Minimal and correct compose files.** Image, published port, named volumes for persistent data, restart policy. Not opinionated defaults — no `PUID`/`PGID`/`TZ`, no healthchecks, no bind mounts laid out under the app directory. Fewer moving parts means fewer ways to be subtly wrong, and the compose editor is right there afterwards.
+**1. Minimal and correct compose files.** Image, published port, persistent data, restart policy. Not opinionated defaults — no healthchecks, no invented environment variables. Fewer moving parts means fewer ways to be subtly wrong, and the compose editor is right there afterwards.
+
+**1b. Persistent data goes in relative bind mounts — `./data:/…` — not named volumes.** Corrected after Task 1, which used named volumes and surfaced the problem. Spec §10's path-identity constraint exists *precisely* so a relative bind mount works: `./data` in `/volume2/docker/uptime-kuma/compose.yaml` resolves to `/volume2/docker/uptime-kuma/data` on the host. That is Homestead's whole model — files on disk under the app directory, maintained by hand, backed up by copying a folder. A named volume hides the data in Docker's volume store where a directory-level backup misses it.
+
+**The accepted cost, stated because it will bite:** `PUID`/`PGID` are still excluded, so an image with a baked-in non-root `USER` can fail to write to a root-owned `./data`. Where an entry's image is known to run as non-root, **say so in its description** rather than adding environment variables the user did not ask for.
 
 **2. `latest` tags.** Matches Homestead's own `cloudflared` scaffold. A vendored file of 50 pinned versions rots the moment it ships, and the image-update checker already exists to report drift.
 
