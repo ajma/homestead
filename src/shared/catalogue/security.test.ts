@@ -4,7 +4,13 @@
  * secret, token, API key, or app-encryption key) or is a placeholder word like
  * `changeme` — either way, something a real deployer would ship unchanged, because
  * shipping a catalogue entry as-is is the entire point of a catalogue. Also guards
- * against a `SIGNUPS_ALLOWED`-style open-registration flag defaulting to on.
+ * against a `SIGNUPS_ALLOWED`-style open-registration flag defaulting to on, and against
+ * a security-relevant flag (secure-cookie, TLS-required, certificate-verification —
+ * `N8N_SECURE_COOKIE`-shaped) shipped disabled by default. Homestead's whole purpose is
+ * putting apps on the internet through a tunnel, so an insecure flag someone never
+ * revisits is a real, ongoing cost — the fix for a first-run friction problem like "no
+ * HTTPS on my LAN" belongs in the entry's description, told to the person who hits the
+ * failure, not in a value the catalogue ships pre-weakened.
  *
  * What this does NOT catch, by design of a regex-shaped "reasonable core" rather than a
  * real compose/URL parser: a credential embedded inside a connection-string VALUE under
@@ -83,6 +89,21 @@ const PLACEHOLDER_VALUE_PATTERN = /change[-_ ]?(?:me|this)|placeholder|somerando
 const OPEN_REGISTRATION_KEY_PATTERN =
   /SIGNUPS_ALLOWED|ALLOW_REGISTRATION|ENABLE_REGISTRATION|OPEN_REGISTRATION|REGISTRATION_ENABLED/i;
 const TRUTHY_VALUE = /^(?:true|yes|1|on)$/i;
+
+/** A key naming a flag that governs whether the app requires HTTPS/TLS for something
+ * security-relevant: a secure-cookie flag, a "TLS required" toggle, a certificate
+ * verification flag. Checked against all 50 entries in the catalogue as of this writing
+ * (see the n8n fix this guard was added for) — `N8N_SECURE_COOKIE` is the only key in
+ * the whole catalogue this pattern, or even the broader `SECURE|COOKIE|TLS|SSL|HTTPS|
+ * VERIFY` superset, matches. Bare `SECURE` is intentionally in the core (not just
+ * `SECURE_COOKIE`) so a same-shaped flag under another app's own naming still gets
+ * caught; re-run the same check against the full catalogue before loosening it further,
+ * since a broader net over 50 free-form compose blocks risks catching an unrelated key. */
+const INSECURE_FLAG_KEY_PATTERN =
+  /SECURE_COOKIE|COOKIE_SECURE|SECURE|TLS_REQUIRED|REQUIRE_HTTPS|VERIFY_SSL/i;
+
+/** A falsy value disabling the security flag above. */
+const FALSY_VALUE = /^(?:false|no|0|off)$/i;
 
 interface AcknowledgedLiteral {
   slug: string;
@@ -166,6 +187,46 @@ function isAcknowledged(slug: string, key: string): boolean {
   return ACKNOWLEDGED_LITERALS.some((a) => a.slug === slug && a.key === key);
 }
 
+interface AcknowledgedInsecureFlag {
+  slug: string;
+  key: string;
+  reason: string;
+}
+
+/**
+ * The ONLY way to ship a security flag `INSECURE_FLAG_KEY_PATTERN` matches set falsy:
+ * add a `{ slug, key, reason }` row here, in the same diff as the value itself — same
+ * visible, per-entry shape as `ACKNOWLEDGED_LITERALS` above. Deliberately a SEPARATE
+ * list rather than a new case added to `ACKNOWLEDGED_LITERALS`: that list's (slug, key)
+ * gate is checked once, before ANY of that rule's own checks run, so acknowledging a key
+ * there already silences both the credential-literal check and the placeholder check for
+ * that key — an over-broad coupling a prior review flagged, not something to extend.
+ * Routing this rule's exemption through the same gate would mean acknowledging, say, a
+ * `..._TOKEN` key for the credential rule could also silently exempt it here if a future
+ * key happened to match both patterns (e.g. a hypothetical `SECURE_TOKEN`). Keeping this
+ * list separate means acknowledging a key for one rule never silences a different rule
+ * for that same key.
+ */
+const ACKNOWLEDGED_INSECURE_FLAGS: readonly AcknowledgedInsecureFlag[] = [];
+
+function isInsecureFlagAcknowledged(slug: string, key: string): boolean {
+  return ACKNOWLEDGED_INSECURE_FLAGS.some((a) => a.slug === slug && a.key === key);
+}
+
+/** Every reason this env entry ships a security flag disabled by default, empty when
+ * it's clean or the key doesn't name one of these flags. Kept separate from
+ * `violationsFor` for the same reason `ACKNOWLEDGED_INSECURE_FLAGS` is kept separate from
+ * `ACKNOWLEDGED_LITERALS`: folding it into one function would make it easy to fold the
+ * acknowledgement gates together later too. */
+function insecureFlagViolationsFor(entry: EnvEntry): string[] {
+  const value = entry.value.trim();
+  if (value.length === 0) return [];
+  if (INSECURE_FLAG_KEY_PATTERN.test(entry.key) && FALSY_VALUE.test(value)) {
+    return [`${entry.key}="${value}" ships a security flag disabled by default`];
+  }
+  return [];
+}
+
 /** Every reason this env entry should fail the guard, empty when it's clean. Named
  * functions rather than one inline predicate so a failure message says WHICH rule fired,
  * not just that one did. */
@@ -212,6 +273,33 @@ describe("catalogue security guard", () => {
       ).toBe(true);
     }
     expect(ACKNOWLEDGED_LITERALS.every((a) => a.reason.trim().length > 0)).toBe(true);
+  });
+
+  it("has no un-acknowledged insecure security-flag default in any entry's compose", () => {
+    const failures: string[] = [];
+    for (const catalogueEntry of CATALOGUE) {
+      for (const envEntry of envEntriesOf(catalogueEntry.compose)) {
+        if (isInsecureFlagAcknowledged(catalogueEntry.slug, envEntry.key)) continue;
+        for (const reason of insecureFlagViolationsFor(envEntry)) {
+          failures.push(`${catalogueEntry.slug} [${envEntry.service}]: ${reason}`);
+        }
+      }
+    }
+    expect(failures, failures.join("\n")).toEqual([]);
+  });
+
+  it("every acknowledged insecure flag still points at something real, so the list can't rot", () => {
+    for (const acknowledged of ACKNOWLEDGED_INSECURE_FLAGS) {
+      const entry = CATALOGUE.find((candidate) => candidate.slug === acknowledged.slug);
+      expect(entry, `acknowledged slug "${acknowledged.slug}" no longer exists`).toBeTruthy();
+      if (!entry) continue;
+      const stillPresent = envEntriesOf(entry.compose).some((e) => e.key === acknowledged.key);
+      expect(
+        stillPresent,
+        `acknowledged key "${acknowledged.key}" no longer appears on "${acknowledged.slug}" — remove the row`,
+      ).toBe(true);
+    }
+    expect(ACKNOWLEDGED_INSECURE_FLAGS.every((a) => a.reason.trim().length > 0)).toBe(true);
   });
 
   describe("the detection rules themselves", () => {
@@ -265,6 +353,34 @@ describe("catalogue security guard", () => {
     // acknowledged row for a different key.
     it("does not let acknowledging one key on a slug exempt a different key on the same slug", () => {
       expect(isAcknowledged("miniflux", "SOME_UNACKNOWLEDGED_SECRET")).toBe(false);
+    });
+
+    it("flags a security flag disabled by default", () => {
+      const failures = envEntriesOf(
+        "services:\n  app:\n    image: x\n    environment:\n      - APP_SECURE_COOKIE=false\n",
+      ).flatMap(insecureFlagViolationsFor);
+      expect(failures.length).toBeGreaterThan(0);
+    });
+
+    it("does not flag a security flag left at its (secure) default", () => {
+      const failures = envEntriesOf(
+        "services:\n  app:\n    image: x\n    environment:\n      - APP_SECURE_COOKIE=true\n",
+      ).flatMap(insecureFlagViolationsFor);
+      expect(failures).toEqual([]);
+    });
+
+    it("does not flag an unrelated key with a falsy value", () => {
+      const failures = envEntriesOf(
+        "services:\n  app:\n    image: x\n    environment:\n      - SIGNUPS_ALLOWED=false\n",
+      ).flatMap(insecureFlagViolationsFor);
+      expect(failures).toEqual([]);
+    });
+
+    // Pins the whole reason `ACKNOWLEDGED_INSECURE_FLAGS` is a separate list from
+    // `ACKNOWLEDGED_LITERALS`: acknowledging a credential key for the credential/
+    // placeholder rules must not also exempt that key from this rule, and vice versa.
+    it("does not let acknowledging a credential key also silence the insecure-flag rule", () => {
+      expect(isInsecureFlagAcknowledged("miniflux", "POSTGRES_PASSWORD")).toBe(false);
     });
   });
 });

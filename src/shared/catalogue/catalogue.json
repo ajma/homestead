@@ -245,11 +245,11 @@
   {
     "slug": "n8n",
     "name": "n8n",
-    "description": "A workflow automation platform with a visual editor and 400+ integrations; it runs as a non-root user, so its data may need its ownership adjusted.",
+    "description": "A workflow automation platform with a visual editor and 400+ integrations; runs non-root; cookie needs HTTPS, set N8N_SECURE_COOKIE=false on a plain-HTTP LAN.",
     "iconRef": "n8n",
     "homepage": "https://n8n.io",
     "categories": ["development"],
-    "compose": "services:\n  n8n:\n    image: n8nio/n8n:latest\n    restart: unless-stopped\n    environment:\n      - N8N_SECURE_COOKIE=false\n    ports:\n      - \"5678:5678\"\n    volumes:\n      - ./data:/home/node/.n8n\n"
+    "compose": "services:\n  n8n:\n    image: n8nio/n8n:latest\n    restart: unless-stopped\n    ports:\n      - \"5678:5678\"\n    volumes:\n      - ./data:/home/node/.n8n\n"
   },
   {
     "slug": "photoview",
