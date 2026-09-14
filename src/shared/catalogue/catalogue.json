@@ -78,7 +78,7 @@
     "iconRef": "trilium",
     "homepage": "https://github.com/TriliumNext/Notes",
     "categories": ["documents"],
-    "compose": "services:\n  trilium:\n    image: triliumnext/notes:latest\n    restart: unless-stopped\n    environment:\n      - TRILIUM_DATA_DIR=/home/node/trilium-data\n    ports:\n      - \"8082:8080\"\n    volumes:\n      - ./trilium-data:/home/node/trilium-data\n"
+    "compose": "services:\n  trilium:\n    image: triliumnext/trilium:latest\n    restart: unless-stopped\n    environment:\n      - TRILIUM_DATA_DIR=/home/node/trilium-data\n    ports:\n      - \"8082:8080\"\n    volumes:\n      - ./trilium-data:/home/node/trilium-data\n"
   },
   {
     "slug": "gitea",
@@ -168,7 +168,7 @@
     "iconRef": "ntfy",
     "homepage": "https://ntfy.sh",
     "categories": ["utilities"],
-    "compose": "services:\n  ntfy:\n    image: binwiederhier/ntfy:latest\n    restart: unless-stopped\n    command:\n      - serve\n    ports:\n      - \"8085:80\"\n    volumes:\n      - ./cache:/var/cache/ntfy\n"
+    "compose": "services:\n  ntfy:\n    image: binwiederhier/ntfy:latest\n    restart: unless-stopped\n    command:\n      - serve\n    environment:\n      - NTFY_CACHE_FILE=/var/cache/ntfy/cache.db\n      - NTFY_BASE_URL=http://localhost:8085\n    ports:\n      - \"8085:80\"\n    volumes:\n      - ./cache:/var/cache/ntfy\n"
   },
   {
     "slug": "portainer",
@@ -267,7 +267,7 @@
     "iconRef": "audiobookshelf",
     "homepage": "https://www.audiobookshelf.org",
     "categories": ["media"],
-    "compose": "services:\n  audiobookshelf:\n    image: ghcr.io/advplyr/audiobookshelf:latest\n    restart: unless-stopped\n    ports:\n      - \"13378:80\"\n    volumes:\n      - ./audiobooks:/audiobooks\n      - ./config:/config\n      - ./metadata:/metadata\n"
+    "compose": "services:\n  audiobookshelf:\n    image: ghcr.io/advplyr/audiobookshelf:latest\n    restart: unless-stopped\n    ports:\n      - \"13378:80\"\n    volumes:\n      - ./audiobooks:/audiobooks\n      - ./podcasts:/podcasts\n      - ./config:/config\n      - ./metadata:/metadata\n"
   },
   {
     "slug": "kavita",
@@ -299,7 +299,7 @@
   {
     "slug": "privatebin",
     "name": "PrivateBin",
-    "description": "A minimalist pastebin where pasted data is encrypted and decrypted entirely in the browser, so the server never sees it in plain text.",
+    "description": "A minimalist pastebin, encrypted and decrypted entirely in the browser; the image runs as uid 65534/gid 82, so the data directory needs matching ownership.",
     "iconRef": "privatebin",
     "homepage": "https://privatebin.info",
     "categories": ["utilities"],
@@ -312,7 +312,7 @@
     "iconRef": "baserow",
     "homepage": "https://baserow.io",
     "categories": ["productivity"],
-    "compose": "services:\n  baserow:\n    image: baserow/baserow:latest\n    restart: unless-stopped\n    ports:\n      - \"8071:80\"\n    volumes:\n      - ./data:/baserow/data\n"
+    "compose": "services:\n  baserow:\n    image: baserow/baserow:latest\n    restart: unless-stopped\n    environment:\n      - BASEROW_PUBLIC_URL=http://localhost:8071\n    ports:\n      - \"8071:80\"\n    volumes:\n      - ./data:/baserow/data\n"
   },
   {
     "slug": "speedtest-tracker",
@@ -326,11 +326,11 @@
   {
     "slug": "healthchecks",
     "name": "Healthchecks",
-    "description": "A cron job and background task monitor that expects a periodic ping and alerts you when one does not arrive; needs its own PostgreSQL database.",
+    "description": "A cron job and background task monitor that alerts you when a periodic ping does not arrive; needs PostgreSQL and a superuser created via createsuperuser.",
     "iconRef": "healthchecks",
     "homepage": "https://healthchecks.io",
     "categories": ["monitoring"],
-    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SITE_ROOT=http://localhost:8088\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql\n"
+    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SITE_ROOT=http://localhost:8088\n      - SECRET_KEY=\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql\n"
   },
   {
     "slug": "wallabag",
