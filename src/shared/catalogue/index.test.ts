@@ -36,23 +36,44 @@ const ARR_EXCLUSION_LIST = [
 type ComposeDoc = { services?: Record<string, { ports?: unknown[] }> };
 
 /**
- * Host-side ports a compose string publishes, across every service. Handles both the
- * short `"HOST:CONTAINER"` string form (what every seed entry uses today) and the long
- * mapping form (`{ published, target }`), so this does not quietly stop working the day
- * an entry uses the other syntax.
+ * The host-side port one `ports` entry publishes, with any `/tcp` or `/udp` suffix
+ * stripped first — protocol never changes which host port is being claimed, so
+ * `"6881:6881/tcp"` and `"6881:6881/udp"` must read as the same port, not two. Handles the
+ * short string form (`"HOST:CONTAINER[/PROTOCOL]"`, optionally with a leading
+ * `HOST_IP:`) and the long mapping form (`{ published, protocol }`). A bare
+ * container-only port (no host mapping, e.g. `"6881"`) publishes to a random host port
+ * each run and has no fixed default to compare across entries, so it contributes nothing.
  */
-function publishedPorts(compose: string): string[] {
+function hostPortOf(entry: unknown): string | undefined {
+  if (typeof entry === "string") {
+    const withoutProtocol = entry.split("/")[0] ?? entry;
+    const segments = withoutProtocol.split(":");
+    if (segments.length < 2) return undefined;
+    return segments[segments.length - 2] || undefined;
+  }
+  if (typeof entry === "object" && entry !== null && "published" in entry) {
+    const published = (entry as { published?: unknown }).published;
+    return published === undefined || published === null || published === ""
+      ? undefined
+      : String(published);
+  }
+  return undefined;
+}
+
+/**
+ * The distinct host ports one entry's compose file publishes, across every service. A
+ * tcp/udp pair sharing a host port (`"6881:6881/tcp"` + `"6881:6881/udp"`) is one logical
+ * port, folded here so an entry can never collide with itself over its own pair. An entry
+ * with none at all — `network_mode: host`, which publishes nothing — is legitimate and
+ * contributes an empty set, not a failure.
+ */
+function publishedPorts(compose: string): Set<string> {
   const doc = parseYaml(compose) as ComposeDoc;
-  const ports: string[] = [];
+  const ports = new Set<string>();
   for (const service of Object.values(doc.services ?? {})) {
     for (const entry of service.ports ?? []) {
-      if (typeof entry === "string") {
-        const host = entry.split(":")[0];
-        if (host) ports.push(host);
-      } else if (typeof entry === "object" && entry !== null && "published" in entry) {
-        const published = (entry as { published?: unknown }).published;
-        if (published !== undefined && published !== null) ports.push(String(published));
-      }
+      const host = hostPortOf(entry);
+      if (host) ports.add(host);
     }
   }
   return ports;
@@ -158,9 +179,31 @@ describe("catalogue", () => {
   });
 
   it("no two entries share a default published port", () => {
-    const allPorts = CATALOGUE.flatMap((entry) => publishedPorts(entry.compose));
+    const allPorts = CATALOGUE.flatMap((entry) => [...publishedPorts(entry.compose)]);
     expect(allPorts.length).toBeGreaterThan(0);
     expect(new Set(allPorts).size).toBe(allPorts.length);
+  });
+
+  describe("port parsing is protocol-aware and per-entry", () => {
+    it("a tcp/udp pair on the same host port within one entry is not a self-collision", () => {
+      const ports = publishedPorts(
+        'services:\n  app:\n    image: x\n    ports:\n      - "6881:6881/tcp"\n      - "6881:6881/udp"\n',
+      );
+      expect([...ports]).toEqual(["6881"]);
+    });
+
+    it("two different entries claiming the same host port is still a genuine collision", () => {
+      const allPorts = [
+        ...publishedPorts('services:\n  a:\n    image: x\n    ports:\n      - "9999:80"\n'),
+        ...publishedPorts('services:\n  b:\n    image: x\n    ports:\n      - "9999:81"\n'),
+      ];
+      expect(new Set(allPorts).size).not.toBe(allPorts.length);
+    });
+
+    it("network_mode: host with no ports contributes nothing, and is not an error", () => {
+      const ports = publishedPorts("services:\n  app:\n    image: x\n    network_mode: host\n");
+      expect(ports.size).toBe(0);
+    });
   });
 
   it("every compose value parses as YAML with a non-empty services map", () => {

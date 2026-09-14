@@ -63,19 +63,40 @@ function imagesIn(doc: ComposeDoc): string[] {
     .filter((image): image is string => typeof image === "string" && image.length > 0);
 }
 
-/** Host-side ports a compose document publishes, across every service. Both the short
- * `"HOST:CONTAINER"` string form and the long mapping form. */
-function publishedPorts(doc: ComposeDoc): string[] {
-  const ports: string[] = [];
+/** The host-side port one `ports` entry publishes, with any `/tcp` or `/udp` suffix
+ * stripped first — protocol never changes which host port is being claimed, so
+ * `"6881:6881/tcp"` and `"6881:6881/udp"` must read as the same port, not two. Handles the
+ * short string form (`"HOST:CONTAINER[/PROTOCOL]"`, optionally with a leading
+ * `HOST_IP:`) and the long mapping form (`{ published, protocol }`). A bare
+ * container-only port (no host mapping) publishes to a random host port each run and has
+ * no fixed default to compare across entries, so it contributes nothing. Kept in sync
+ * with the identical helper in `src/shared/catalogue/index.test.ts`. */
+function hostPortOf(entry: unknown): string | undefined {
+  if (typeof entry === "string") {
+    const withoutProtocol = entry.split("/")[0] ?? entry;
+    const segments = withoutProtocol.split(":");
+    if (segments.length < 2) return undefined;
+    return segments[segments.length - 2] || undefined;
+  }
+  if (typeof entry === "object" && entry !== null && "published" in entry) {
+    const published = (entry as { published?: unknown }).published;
+    return published === undefined || published === null || published === ""
+      ? undefined
+      : String(published);
+  }
+  return undefined;
+}
+
+/** The distinct host ports one compose document publishes, across every service. A
+ * tcp/udp pair sharing a host port is one logical port, folded here so an entry can never
+ * collide with itself over its own pair. An entry with none at all (`network_mode: host`)
+ * is legitimate and contributes an empty set. */
+function publishedPorts(doc: ComposeDoc): Set<string> {
+  const ports = new Set<string>();
   for (const service of Object.values(doc.services ?? {})) {
     for (const entry of service.ports ?? []) {
-      if (typeof entry === "string") {
-        const host = entry.split(":")[0];
-        if (host) ports.push(host);
-      } else if (typeof entry === "object" && entry !== null && "published" in entry) {
-        const published = (entry as { published?: unknown }).published;
-        if (published !== undefined && published !== null) ports.push(String(published));
-      }
+      const host = hostPortOf(entry);
+      if (host) ports.add(host);
     }
   }
   return ports;
