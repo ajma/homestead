@@ -25,5 +25,203 @@
     "homepage": "https://it-tools.tech",
     "categories": ["development", "utilities"],
     "compose": "services:\n  it-tools:\n    image: corentinth/it-tools:latest\n    restart: unless-stopped\n    ports:\n      - \"8080:80\"\n"
+  },
+  {
+    "slug": "jellyfin",
+    "name": "Jellyfin",
+    "description": "A free media server for streaming movies, shows, and music from your own library to any device.",
+    "iconRef": "jellyfin",
+    "homepage": "https://jellyfin.org",
+    "categories": ["media"],
+    "compose": "services:\n  jellyfin:\n    image: jellyfin/jellyfin:latest\n    restart: unless-stopped\n    ports:\n      - \"8096:8096\"\n    volumes:\n      - ./config:/config\n      - ./cache:/cache\n      - ./media:/media\n"
+  },
+  {
+    "slug": "navidrome",
+    "name": "Navidrome",
+    "description": "A music streaming server that indexes your personal audio library behind a Subsonic-compatible web interface.",
+    "iconRef": "navidrome",
+    "homepage": "https://www.navidrome.org",
+    "categories": ["media"],
+    "compose": "services:\n  navidrome:\n    image: deluan/navidrome:latest\n    restart: unless-stopped\n    ports:\n      - \"4533:4533\"\n    volumes:\n      - ./data:/data\n      - ./music:/music:ro\n"
+  },
+  {
+    "slug": "qbittorrent",
+    "name": "qBittorrent",
+    "description": "A BitTorrent client with a web interface; the image defaults to a non-root user, so the config directory may need its ownership adjusted before it can write.",
+    "iconRef": "qbittorrent",
+    "homepage": "https://www.qbittorrent.org",
+    "categories": ["utilities"],
+    "compose": "services:\n  qbittorrent:\n    image: lscr.io/linuxserver/qbittorrent:latest\n    restart: unless-stopped\n    environment:\n      - TZ=Etc/UTC\n      - WEBUI_PORT=8081\n      - TORRENTING_PORT=6881\n    volumes:\n      - ./config:/config\n      - ./downloads:/downloads\n    ports:\n      - \"8081:8081\"\n      - \"6881:6881\"\n      - \"6882:6881/udp\"\n"
+  },
+  {
+    "slug": "node-red",
+    "name": "Node-RED",
+    "description": "A flow-based tool for wiring together IoT and home-automation devices and APIs; the image runs as uid 1000, so the data directory needs matching ownership.",
+    "iconRef": "node-red",
+    "homepage": "https://nodered.org",
+    "categories": ["home-automation"],
+    "compose": "services:\n  node-red:\n    image: nodered/node-red:latest\n    restart: unless-stopped\n    ports:\n      - \"1880:1880\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "paperless-ngx",
+    "name": "Paperless-ngx",
+    "description": "A document scanner and archive that OCRs and tags paperwork, run here with SQLite and a Valkey broker instead of PostgreSQL.",
+    "iconRef": "paperless-ngx",
+    "homepage": "https://docs.paperless-ngx.com",
+    "categories": ["documents"],
+    "compose": "services:\n  broker:\n    image: docker.io/valkey/valkey:9-alpine\n    restart: unless-stopped\n    volumes:\n      - ./redisdata:/data\n  webserver:\n    image: ghcr.io/paperless-ngx/paperless-ngx:latest\n    restart: unless-stopped\n    depends_on:\n      - broker\n    ports:\n      - \"8000:8000\"\n    volumes:\n      - ./data:/usr/src/paperless/data\n      - ./media:/usr/src/paperless/media\n      - ./export:/usr/src/paperless/export\n      - ./consume:/usr/src/paperless/consume\n    environment:\n      - PAPERLESS_REDIS=redis://broker:6379\n      - PAPERLESS_DBENGINE=sqlite\n"
+  },
+  {
+    "slug": "trilium",
+    "name": "Trilium Notes",
+    "description": "A hierarchical personal notes app with rich formatting; the image runs as a non-root node user, so the data directory needs matching ownership.",
+    "iconRef": "trilium",
+    "homepage": "https://github.com/TriliumNext/Notes",
+    "categories": ["documents"],
+    "compose": "services:\n  trilium:\n    image: triliumnext/notes:latest\n    restart: unless-stopped\n    environment:\n      - TRILIUM_DATA_DIR=/home/node/trilium-data\n    ports:\n      - \"8082:8080\"\n    volumes:\n      - ./trilium-data:/home/node/trilium-data\n"
+  },
+  {
+    "slug": "gitea",
+    "name": "Gitea",
+    "description": "A lightweight self-hosted Git service using SQLite, no external database needed; the image defaults to uid 1000, so the data directory needs matching ownership.",
+    "iconRef": "gitea",
+    "homepage": "https://gitea.com",
+    "categories": ["development"],
+    "compose": "services:\n  gitea:\n    image: docker.gitea.com/gitea:latest\n    restart: unless-stopped\n    volumes:\n      - ./gitea:/data\n    ports:\n      - \"3000:3000\"\n      - \"2222:22\"\n"
+  },
+  {
+    "slug": "nginx-proxy-manager",
+    "name": "Nginx Proxy Manager",
+    "description": "A reverse proxy with a web UI for issuing TLS certificates and routing traffic to other self-hosted apps by domain name.",
+    "iconRef": "nginx-proxy-manager",
+    "homepage": "https://nginxproxymanager.com",
+    "categories": ["networking"],
+    "compose": "services:\n  app:\n    image: jc21/nginx-proxy-manager:latest\n    restart: unless-stopped\n    ports:\n      - \"8880:80\"\n      - \"8443:443\"\n      - \"81:81\"\n    volumes:\n      - ./data:/data\n      - ./letsencrypt:/etc/letsencrypt\n"
+  },
+  {
+    "slug": "homepage",
+    "name": "Homepage",
+    "description": "A customizable start-page dashboard that links out to your self-hosted services; set HOMEPAGE_ALLOWED_HOSTS to the address you browse it from.",
+    "iconRef": "homepage",
+    "homepage": "https://gethomepage.dev",
+    "categories": ["utilities"],
+    "compose": "services:\n  homepage:\n    image: ghcr.io/gethomepage/homepage:latest\n    restart: unless-stopped\n    ports:\n      - \"3030:3000\"\n    volumes:\n      - ./config:/app/config\n    environment:\n      - HOMEPAGE_ALLOWED_HOSTS=localhost:3030\n"
+  },
+  {
+    "slug": "nextcloud",
+    "name": "Nextcloud",
+    "description": "A self-hosted file sync and collaboration platform, run here with its community-maintained image and default SQLite database.",
+    "iconRef": "nextcloud",
+    "homepage": "https://nextcloud.com",
+    "categories": ["documents", "productivity"],
+    "compose": "services:\n  app:\n    image: nextcloud:latest\n    restart: unless-stopped\n    ports:\n      - \"8083:80\"\n    volumes:\n      - ./data:/var/www/html\n"
+  },
+  {
+    "slug": "syncthing",
+    "name": "Syncthing",
+    "description": "A peer-to-peer file synchronization tool with no central server; the image runs as uid 1000, so the data directory needs matching ownership.",
+    "iconRef": "syncthing",
+    "homepage": "https://syncthing.net",
+    "categories": ["utilities"],
+    "compose": "services:\n  syncthing:\n    image: syncthing/syncthing:latest\n    restart: unless-stopped\n    hostname: syncthing\n    ports:\n      - \"8384:8384\"\n      - \"22000:22000\"\n      - \"22001:22000/udp\"\n      - \"21027:21027/udp\"\n    volumes:\n      - ./data:/var/syncthing\n"
+  },
+  {
+    "slug": "duplicati",
+    "name": "Duplicati",
+    "description": "A backup client that encrypts and uploads files to local or cloud storage, with its web UI unlocked by a token from the container logs.",
+    "iconRef": "duplicati",
+    "homepage": "https://duplicati.com",
+    "categories": ["utilities"],
+    "compose": "services:\n  duplicati:\n    image: duplicati/duplicati:latest\n    restart: unless-stopped\n    ports:\n      - \"8200:8200\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "vaultwarden",
+    "name": "Vaultwarden",
+    "description": "A lightweight, Bitwarden-compatible password manager server; disable SIGNUPS_ALLOWED once your own account exists.",
+    "iconRef": "vaultwarden",
+    "homepage": "https://github.com/dani-garcia/vaultwarden",
+    "categories": ["utilities"],
+    "compose": "services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    environment:\n      - SIGNUPS_ALLOWED=true\n    ports:\n      - \"8087:80\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "actual-budget",
+    "name": "Actual Budget",
+    "description": "A local-first personal budgeting app with a web UI for tracking accounts and transactions.",
+    "iconRef": "actual-budget",
+    "homepage": "https://actualbudget.org",
+    "categories": ["finance"],
+    "compose": "services:\n  actual:\n    image: actualbudget/actual-server:latest\n    restart: unless-stopped\n    ports:\n      - \"5006:5006\"\n    volumes:\n      - ./data:/data\n"
+  },
+  {
+    "slug": "linkding",
+    "name": "Linkding",
+    "description": "A minimalist bookmark manager with tagging and full-text search; change the default admin credentials after first login.",
+    "iconRef": "linkding",
+    "homepage": "https://linkding.link",
+    "categories": ["productivity"],
+    "compose": "services:\n  linkding:\n    image: sissbruecker/linkding:latest\n    restart: unless-stopped\n    ports:\n      - \"9090:9090\"\n    volumes:\n      - ./data:/etc/linkding/data\n    environment:\n      - LD_SUPERUSER_NAME=admin\n      - LD_SUPERUSER_PASSWORD=changeme\n"
+  },
+  {
+    "slug": "ntfy",
+    "name": "ntfy",
+    "description": "A pub-sub notification service for pushing alerts to phones and desktops over HTTP.",
+    "iconRef": "ntfy",
+    "homepage": "https://ntfy.sh",
+    "categories": ["utilities"],
+    "compose": "services:\n  ntfy:\n    image: binwiederhier/ntfy:latest\n    restart: unless-stopped\n    command:\n      - serve\n    ports:\n      - \"8085:80\"\n    volumes:\n      - ./cache:/var/cache/ntfy\n"
+  },
+  {
+    "slug": "portainer",
+    "name": "Portainer",
+    "description": "A web UI for managing Docker containers, images, and volumes; it requires access to the host's Docker socket to work at all.",
+    "iconRef": "portainer",
+    "homepage": "https://www.portainer.io",
+    "categories": ["utilities"],
+    "compose": "services:\n  portainer:\n    image: portainer/portainer-ce:latest\n    restart: unless-stopped\n    ports:\n      - \"9443:9443\"\n    volumes:\n      - ./data:/data\n      - /var/run/docker.sock:/var/run/docker.sock\n"
+  },
+  {
+    "slug": "vikunja",
+    "name": "Vikunja",
+    "description": "A self-hosted to-do and project manager; the image runs as uid 1000 and won't chown its own mounts, so the files and db directories need matching ownership.",
+    "iconRef": "vikunja",
+    "homepage": "https://vikunja.io",
+    "categories": ["productivity"],
+    "compose": "services:\n  vikunja:\n    image: vikunja/vikunja:latest\n    restart: unless-stopped\n    environment:\n      - VIKUNJA_SERVICE_SECRET=changeme-generate-a-real-secret\n      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:3456/\n    ports:\n      - \"3456:3456\"\n    volumes:\n      - ./files:/app/vikunja/files\n      - ./db:/db\n"
+  },
+  {
+    "slug": "grafana",
+    "name": "Grafana",
+    "description": "A dashboarding and visualization tool for metrics and logs; the image runs as a non-root uid, so the data directory needs matching ownership.",
+    "iconRef": "grafana",
+    "homepage": "https://grafana.com",
+    "categories": ["monitoring"],
+    "compose": "services:\n  grafana:\n    image: grafana/grafana:latest\n    restart: unless-stopped\n    ports:\n      - \"3300:3000\"\n    volumes:\n      - ./data:/var/lib/grafana\n"
+  },
+  {
+    "slug": "photoprism",
+    "name": "PhotoPrism",
+    "description": "An AI-powered photo manager that indexes and tags a personal photo library, using SQLite when no external database is configured.",
+    "iconRef": "photoprism",
+    "homepage": "https://www.photoprism.app",
+    "categories": ["photos"],
+    "compose": "services:\n  photoprism:\n    image: photoprism/photoprism:latest\n    restart: unless-stopped\n    ports:\n      - \"2342:2342\"\n    environment:\n      - PHOTOPRISM_ADMIN_PASSWORD=changeme123\n    volumes:\n      - ./originals:/photoprism/originals\n      - ./storage:/photoprism/storage\n"
+  },
+  {
+    "slug": "mealie",
+    "name": "Mealie",
+    "description": "A recipe manager and meal planner with a web UI; the image defaults to a non-root uid, so the data directory needs matching ownership.",
+    "iconRef": "mealie",
+    "homepage": "https://mealie.io",
+    "categories": ["productivity"],
+    "compose": "services:\n  mealie:\n    image: ghcr.io/mealie-recipes/mealie:latest\n    restart: unless-stopped\n    ports:\n      - \"9925:9000\"\n    volumes:\n      - ./data:/app/data/\n"
+  },
+  {
+    "slug": "freshrss",
+    "name": "FreshRSS",
+    "description": "A lightweight self-hosted RSS/Atom feed aggregator with a web UI and a built-in SQLite database.",
+    "iconRef": "freshrss",
+    "homepage": "https://freshrss.org",
+    "categories": ["productivity"],
+    "compose": "services:\n  freshrss:\n    image: freshrss/freshrss:latest\n    restart: unless-stopped\n    ports:\n      - \"8380:80\"\n    volumes:\n      - ./data:/var/www/FreshRSS/data\n"
   }
 ]
