@@ -47,7 +47,11 @@ const createBody = z.object({
   // catalogue's own schema already requires a non-empty `services` map — see
   // `catalogueEntrySchema`. The user can still edit this text in the dialog before
   // submitting, so treating it as pre-blessed content would be wrong regardless.
-  compose: z.string().min(1).optional(),
+  compose: z
+    .string()
+    .min(1)
+    .refine((value) => value.trim().length > 0, "compose must not be blank")
+    .optional(),
 });
 
 const launchUrlSchema = z
