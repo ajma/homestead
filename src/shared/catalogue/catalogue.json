@@ -1,0 +1,29 @@
+[
+  {
+    "slug": "uptime-kuma",
+    "name": "Uptime Kuma",
+    "description": "A self-hosted uptime and status-page monitor for websites and services.",
+    "iconRef": "uptime-kuma",
+    "homepage": "https://github.com/louislam/uptime-kuma",
+    "categories": ["monitoring"],
+    "compose": "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:latest\n    restart: unless-stopped\n    volumes:\n      - uptime-kuma:/app/data\n    ports:\n      - \"3001:3001\"\nvolumes:\n  uptime-kuma:\n"
+  },
+  {
+    "slug": "miniflux",
+    "name": "Miniflux",
+    "description": "A minimalist RSS/Atom feed reader that requires a PostgreSQL database and starts with a default admin login you should change immediately.",
+    "iconRef": "miniflux",
+    "homepage": "https://miniflux.app",
+    "categories": ["media", "productivity"],
+    "compose": "services:\n  miniflux:\n    image: miniflux/miniflux:latest\n    restart: unless-stopped\n    ports:\n      - \"80:8080\"\n    depends_on:\n      - db\n    environment:\n      - DATABASE_URL=postgres://miniflux:secret@db/miniflux?sslmode=disable\n      - RUN_MIGRATIONS=1\n      - CREATE_ADMIN=1\n      - ADMIN_USERNAME=admin\n      - ADMIN_PASSWORD=test123\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_USER=miniflux\n      - POSTGRES_PASSWORD=secret\n      - POSTGRES_DB=miniflux\n    volumes:\n      - miniflux-db:/var/lib/postgresql\nvolumes:\n  miniflux-db:\n"
+  },
+  {
+    "slug": "it-tools",
+    "name": "IT-Tools",
+    "description": "A collection of handy browser-based utilities for developers, with no persistent data of its own.",
+    "iconRef": "it-tools",
+    "homepage": "https://it-tools.tech",
+    "categories": ["development", "utilities"],
+    "compose": "services:\n  it-tools:\n    image: corentinth/it-tools:latest\n    restart: unless-stopped\n    ports:\n      - \"8080:80\"\n"
+  }
+]

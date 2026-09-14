@@ -20,7 +20,8 @@
     "lint:fix": "biome check --write .",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/server/db/migrate.ts",
-    "check:schema-drift": "tsx scripts/check-schema-drift.ts"
+    "check:schema-drift": "tsx scripts/check-schema-drift.ts",
+    "verify:catalogue": "tsx scripts/verify-catalogue.ts"
   },
   "keywords": [],
   "author": "",
