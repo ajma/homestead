@@ -6,7 +6,7 @@
     "iconRef": "uptime-kuma",
     "homepage": "https://github.com/louislam/uptime-kuma",
     "categories": ["monitoring"],
-    "compose": "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:latest\n    restart: unless-stopped\n    volumes:\n      - uptime-kuma:/app/data\n    ports:\n      - \"3001:3001\"\nvolumes:\n  uptime-kuma:\n"
+    "compose": "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:latest\n    restart: unless-stopped\n    volumes:\n      - ./data:/app/data\n    ports:\n      - \"3001:3001\"\n"
   },
   {
     "slug": "miniflux",
@@ -15,7 +15,7 @@
     "iconRef": "miniflux",
     "homepage": "https://miniflux.app",
     "categories": ["media", "productivity"],
-    "compose": "services:\n  miniflux:\n    image: miniflux/miniflux:latest\n    restart: unless-stopped\n    ports:\n      - \"80:8080\"\n    depends_on:\n      - db\n    environment:\n      - DATABASE_URL=postgres://miniflux:secret@db/miniflux?sslmode=disable\n      - RUN_MIGRATIONS=1\n      - CREATE_ADMIN=1\n      - ADMIN_USERNAME=admin\n      - ADMIN_PASSWORD=test123\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_USER=miniflux\n      - POSTGRES_PASSWORD=secret\n      - POSTGRES_DB=miniflux\n    volumes:\n      - miniflux-db:/var/lib/postgresql\nvolumes:\n  miniflux-db:\n"
+    "compose": "services:\n  miniflux:\n    image: miniflux/miniflux:latest\n    restart: unless-stopped\n    ports:\n      - \"80:8080\"\n    depends_on:\n      - db\n    environment:\n      - DATABASE_URL=postgres://miniflux:secret@db/miniflux?sslmode=disable\n      - RUN_MIGRATIONS=1\n      - CREATE_ADMIN=1\n      - ADMIN_USERNAME=admin\n      - ADMIN_PASSWORD=test123\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_USER=miniflux\n      - POSTGRES_PASSWORD=secret\n      - POSTGRES_DB=miniflux\n    volumes:\n      - ./db:/var/lib/postgresql\n"
   },
   {
     "slug": "it-tools",
