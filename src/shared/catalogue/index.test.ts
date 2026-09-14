@@ -224,6 +224,25 @@ describe("catalogue", () => {
     }
   });
 
+  // Pins the list itself, not just what it's checked against. Every assertion above is
+  // `expect(list).not.toContain(x)`, which an emptied `ARR_EXCLUSION_LIST` satisfies
+  // vacuously — proved by the whole-branch review's mutation, which left this file's other
+  // 22 tests green. This fails the moment the list stops naming the seven apps it exists
+  // to exclude.
+  it("names the seven *arr apps it exists to exclude, so emptying the list cannot pass silently", () => {
+    for (const name of [
+      "sonarr",
+      "radarr",
+      "lidarr",
+      "readarr",
+      "prowlarr",
+      "bazarr",
+      "whisparr",
+    ]) {
+      expect(ARR_EXCLUSION_LIST).toContain(name);
+    }
+  });
+
   describe("descriptions", () => {
     it("are under the length rendered in a browsing list", () => {
       for (const entry of CATALOGUE) {

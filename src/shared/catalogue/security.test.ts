@@ -256,5 +256,15 @@ describe("catalogue security guard", () => {
       ).flatMap(violationsFor);
       expect(failures).toEqual([]);
     });
+
+    // Pins the guarantee the module comment makes ("no slug-wide opt-out, nothing that
+    // could silently cover a second, unrelated field on the same entry") against the exact
+    // mutation the whole-branch review found survives without it: narrowing
+    // `isAcknowledged` from a (slug, key) pair match to a slug-only match. Under that
+    // mutation this assertion flips to `true` and fails, because "miniflux" already has an
+    // acknowledged row for a different key.
+    it("does not let acknowledging one key on a slug exempt a different key on the same slug", () => {
+      expect(isAcknowledged("miniflux", "SOME_UNACKNOWLEDGED_SECRET")).toBe(false);
+    });
   });
 });
