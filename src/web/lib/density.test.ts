@@ -18,12 +18,12 @@ import { describe, expect, it } from "vitest";
  * truth, rather than only in whichever screen happened to be tested for it.
  */
 describe("density scale", () => {
-  it("caps page width well past the old 1024px max-w-5xl, but bounded", () => {
-    expect(PAGE_MAX_WIDTH).toBe("max-w-[1680px]");
+  it("caps page width at 1328px — 1024px of content, a 16px gap, and the 288px rail", () => {
+    expect(PAGE_MAX_WIDTH).toBe("max-w-[1328px]");
   });
 
   it("composes the page shell from the max width plus phone-safe, md-grown padding", () => {
-    expect(PAGE_SHELL).toBe("mx-auto max-w-[1680px] p-4 md:px-6 md:py-5");
+    expect(PAGE_SHELL).toBe("mx-auto max-w-[1328px] p-4 md:px-6 md:py-5");
     // The phone base (`p-4`) is untouched — only `md:` and up add anything.
     expect(PAGE_SHELL).toContain("p-4");
   });

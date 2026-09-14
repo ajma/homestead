@@ -161,7 +161,7 @@ describe("AdminApps", () => {
     // to fix — pinned here as a class-string assertion since jsdom has no geometry.
     const { container } = mount([app()]);
     const shell = container.firstElementChild as HTMLElement;
-    expect(shell.className).toContain("max-w-[1680px]");
+    expect(shell.className).toContain("max-w-[1328px]");
     expect(shell.className).not.toContain("max-w-5xl");
   });
 

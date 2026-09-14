@@ -6,7 +6,7 @@ import { ActionBar } from "@web/components/ActionBar";
 import { AppIcon } from "@web/components/AppIcon";
 import { ImageUpdates } from "@web/components/ImageUpdates";
 import { StatusChip } from "@web/components/StatusChip";
-import { EDIT_CONTENT_MAX_WIDTH } from "@web/lib/density";
+import { PAGE_MAX_WIDTH } from "@web/lib/density";
 import { relativeTime } from "@web/lib/relative-time";
 import { useNow } from "@web/lib/use-now";
 import { useLayoutEffect, useState } from "react";
@@ -57,7 +57,8 @@ export type EditAppContext = { app: AdminApp; setWideTab?: (wide: boolean) => vo
 
 /**
  * The opt-out `ConfigTab` uses to keep the full content row width instead of the capped,
- * centred column every other tab gets (`EDIT_CONTENT_MAX_WIDTH`, in `density.ts`). A tab
+ * centred column every other tab gets (`PAGE_MAX_WIDTH`, in `density.ts` — the same cap
+ * every other screen in the app uses, not a separate edit-only number). A tab
  * calls this once, unconditionally, at its own top level — the "wide" case is explicit at
  * the tab that wants it, rather than `EditApp` hardcoding "config is the wide one" (which
  * would silently stay wrong the day a second wide tab shows up).
@@ -165,10 +166,10 @@ function tabLinkClass({ isActive }: { isActive: boolean }): string {
 export function EditApp() {
   const { slug = "" } = useParams<{ slug: string }>();
   const now = useNow();
-  // Defaults to capped/centred (`EDIT_CONTENT_MAX_WIDTH`) — every tab except `ConfigTab`
-  // wants that, and a new tab added later gets it for free without `EditApp` having to
-  // know it exists. Only `useWideEditLayout` (called from inside a tab, via the outlet
-  // context below) ever flips this.
+  // Defaults to capped/centred at `PAGE_MAX_WIDTH` — every tab except `ConfigTab` wants
+  // that, and a new tab added later gets it for free without `EditApp` having to know it
+  // exists. Only `useWideEditLayout` (called from inside a tab, via the outlet context
+  // below) ever flips this.
   const [wideTab, setWideTab] = useState(false);
   // Resolves through the cheap single-app endpoint (`GET /api/apps/:id`, which accepts a
   // slug too — see `loadAppByIdOrSlug`), not `useAdminApps()`'s whole-inventory rollup.
@@ -199,28 +200,41 @@ export function EditApp() {
 
   return (
     <div className="pb-24 lg:pb-0">
-      <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
-        <AppIcon iconRef={app.iconRef} displayName={app.displayName} size="sm" />
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-lg font-semibold">{app.displayName}</h1>
-          <p className="truncate text-xs text-slate-500 dark:text-slate-400">{app.directory}</p>
+      {/*
+       * The bar itself (`sticky`, `border-b`, background) stays full-bleed — only its
+       * content is constrained, via the same `PAGE_MAX_WIDTH` every other screen (and the
+       * content row below) lines up against, so the app name sits directly above the body
+       * it belongs to instead of pinned to the far left of a wider bar.
+       */}
+      <header className="sticky top-0 z-10 border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950">
+        <div className={`mx-auto flex items-center gap-3 px-4 py-3 ${PAGE_MAX_WIDTH}`}>
+          <AppIcon iconRef={app.iconRef} displayName={app.displayName} size="sm" />
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-lg font-semibold">{app.displayName}</h1>
+            <p className="truncate text-xs text-slate-500 dark:text-slate-400">{app.directory}</p>
+          </div>
+          <StatusChip
+            status={app.status}
+            reason={app.statusDetail ?? STATUS_FALLBACK[app.status]}
+            since={null}
+          />
         </div>
-        <StatusChip
-          status={app.status}
-          reason={app.statusDetail ?? STATUS_FALLBACK[app.status]}
-          since={null}
-        />
       </header>
 
-      <nav
-        className="flex gap-1 border-b border-slate-200 px-4 dark:border-slate-800"
-        aria-label="App sections"
-      >
-        {TABS.map((tab) => (
-          <NavLink key={tab.to} to={tab.to} className={tabLinkClass}>
-            {tab.label}
-          </NavLink>
-        ))}
+      {/*
+       * Same treatment as the header above: the bar's own `border-b` stays full-bleed so
+       * the rule still spans the window, but the tabs themselves sit in an inner
+       * container capped at `PAGE_MAX_WIDTH` so they line up with the app name above and
+       * the content row below rather than reading as a third, disagreeing width.
+       */}
+      <nav className="border-b border-slate-200 dark:border-slate-800" aria-label="App sections">
+        <div className={`mx-auto flex gap-1 px-4 ${PAGE_MAX_WIDTH}`}>
+          {TABS.map((tab) => (
+            <NavLink key={tab.to} to={tab.to} className={tabLinkClass}>
+              {tab.label}
+            </NavLink>
+          ))}
+        </div>
       </nav>
 
       {/*
@@ -234,7 +248,7 @@ export function EditApp() {
        */}
       <div
         data-testid="edit-content-row"
-        className={`flex flex-col gap-4 p-4 lg:flex-row ${wideTab ? "" : EDIT_CONTENT_MAX_WIDTH}`}
+        className={`flex flex-col gap-4 p-4 lg:flex-row ${wideTab ? "" : `lg:mx-auto lg:${PAGE_MAX_WIDTH}`}`}
       >
         <main className="min-w-0 flex-1">
           <Outlet context={{ app, setWideTab } satisfies EditAppContext} />

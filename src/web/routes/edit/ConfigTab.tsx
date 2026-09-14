@@ -29,8 +29,9 @@ import { useCallback, useState } from "react";
  * deterministic strings a test can (and does) read directly.
  *
  * Also the one tab that opts out of `EditApp`'s capped, centred content column
- * (`EDIT_CONTENT_MAX_WIDTH` in `density.ts`) via `useWideEditLayout` — two side-by-side
- * editors are the one case on this page dense enough to want the full row rather than a
+ * (`PAGE_MAX_WIDTH` in `density.ts` — the same cap every other screen in the app shares)
+ * via `useWideEditLayout` — two side-by-side editors are the one case on this page dense
+ * enough to want the full row rather than a
  * ~1024px column plus the rail.
  */
 export function ConfigTab() {

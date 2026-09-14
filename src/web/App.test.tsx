@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import type { AdminApp } from "@shared/dto";
 import { SETUP_STEPS, type SetupState } from "@shared/setup.js";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App, queryClient } from "@web/App";
 import type { Me } from "@web/auth/useSession";
+import { PAGE_MAX_WIDTH } from "@web/lib/density";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // jsdom has no EventSource, and `AppLayout` opens one (`useEventStream`) on every route
@@ -362,6 +363,30 @@ describe("the settings nav link", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Search apps")).toBeTruthy());
     expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
+  });
+});
+
+describe("the global header width", () => {
+  // The other half of the report: "the global header ... needs the same width
+  // restriction too". `AppLayout` (not the nonexistent `AppLayout.tsx` the report
+  // guessed — this file, confirmed by reading it) renders the nav bar every route sits
+  // under. Its `<header>` (the only one with implicit "banner" role here — `EditApp`'s
+  // own header is nested inside `<main>`, which strips that role) must stay full-bleed
+  // itself while its content lines up with `PAGE_MAX_WIDTH`, same as every page body.
+  it("constrains the nav bar's content to PAGE_MAX_WIDTH while the bar itself stays full-bleed", async () => {
+    stubMe({ role: "admin" });
+    renderAt("/");
+
+    const header = await screen.findByRole("banner");
+    // The bar: no max-width class directly on it, so its background/border keep
+    // spanning the full viewport.
+    expect(header.className).not.toContain("max-w-");
+    // Its content: the actual nav links and sign-out button live in one inner
+    // container, capped and centred at the same token every page body uses.
+    const inner = header.firstElementChild as HTMLElement;
+    expect(inner.className).toContain("mx-auto");
+    expect(inner.className).toContain(PAGE_MAX_WIDTH);
+    expect(within(inner).getByText("Homestead")).toBeTruthy();
   });
 });
 

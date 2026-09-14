@@ -156,7 +156,7 @@ describe("ConfigTab", () => {
   it("opts out of EditApp's capped content column on mount, and opts back in on unmount", async () => {
     // `EditApp.tsx`'s `useWideEditLayout` is the mechanism `ConfigTab` uses to keep the
     // full row width instead of the capped, centred column every other tab gets — see
-    // `density.ts`'s `EDIT_CONTENT_MAX_WIDTH` doc comment. This is the unit-level half of
+    // `density.ts`'s `PAGE_MAX_WIDTH` doc comment. This is the unit-level half of
     // that binding; `EditApp.test.tsx`'s "content row width" tests are the integration
     // half, proving `EditApp` itself actually reacts to the call this test proves happens.
     stubMatchMedia();
