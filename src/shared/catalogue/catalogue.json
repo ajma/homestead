@@ -87,7 +87,7 @@
     "iconRef": "gitea",
     "homepage": "https://gitea.com",
     "categories": ["development"],
-    "compose": "services:\n  gitea:\n    image: docker.gitea.com/gitea:latest\n    restart: unless-stopped\n    volumes:\n      - ./gitea:/data\n    ports:\n      - \"3000:3000\"\n      - \"2222:22\"\n"
+    "compose": "services:\n  gitea:\n    image: docker.gitea.com/gitea:latest\n    restart: unless-stopped\n    volumes:\n      - ./gitea:/data\n    ports:\n      - \"3200:3000\"\n      - \"2222:22\"\n"
   },
   {
     "slug": "nginx-proxy-manager",
@@ -330,7 +330,7 @@
     "iconRef": "healthchecks",
     "homepage": "https://healthchecks.io",
     "categories": ["monitoring"],
-    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SITE_ROOT=http://localhost:8088\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql/data\n"
+    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SITE_ROOT=http://localhost:8088\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql\n"
   },
   {
     "slug": "wallabag",
@@ -348,7 +348,7 @@
     "iconRef": "wikijs",
     "homepage": "https://js.wiki",
     "categories": ["documents"],
-    "compose": "services:\n  wiki:\n    image: requarks/wiki:latest\n    restart: unless-stopped\n    ports:\n      - \"8075:3000\"\n    environment:\n      - DB_TYPE=postgres\n      - DB_HOST=db\n      - DB_PORT=5432\n      - DB_USER=wikijs\n      - DB_PASS=wikijsrocks\n      - DB_NAME=wiki\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=wiki\n      - POSTGRES_USER=wikijs\n      - POSTGRES_PASSWORD=wikijsrocks\n    volumes:\n      - ./db:/var/lib/postgresql/data\n"
+    "compose": "services:\n  wiki:\n    image: requarks/wiki:latest\n    restart: unless-stopped\n    ports:\n      - \"8075:3000\"\n    environment:\n      - DB_TYPE=postgres\n      - DB_HOST=db\n      - DB_PORT=5432\n      - DB_USER=wikijs\n      - DB_PASS=wikijsrocks\n      - DB_NAME=wiki\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=wiki\n      - POSTGRES_USER=wikijs\n      - POSTGRES_PASSWORD=wikijsrocks\n    volumes:\n      - ./db:/var/lib/postgresql\n"
   },
   {
     "slug": "firefly-iii",
