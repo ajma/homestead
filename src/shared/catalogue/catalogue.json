@@ -11,11 +11,11 @@
   {
     "slug": "miniflux",
     "name": "Miniflux",
-    "description": "A minimalist RSS/Atom feed reader that requires a PostgreSQL database and starts with a default admin login you should change immediately.",
+    "description": "A minimalist RSS/Atom feed reader backed by PostgreSQL; no admin account exists until you run `miniflux -create-admin` inside the container after first start.",
     "iconRef": "miniflux",
     "homepage": "https://miniflux.app",
     "categories": ["media", "productivity"],
-    "compose": "services:\n  miniflux:\n    image: miniflux/miniflux:latest\n    restart: unless-stopped\n    ports:\n      - \"8280:8080\"\n    depends_on:\n      - db\n    environment:\n      - DATABASE_URL=postgres://miniflux:secret@db/miniflux?sslmode=disable\n      - RUN_MIGRATIONS=1\n      - CREATE_ADMIN=1\n      - ADMIN_USERNAME=admin\n      - ADMIN_PASSWORD=test123\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_USER=miniflux\n      - POSTGRES_PASSWORD=secret\n      - POSTGRES_DB=miniflux\n    volumes:\n      - ./db:/var/lib/postgresql\n"
+    "compose": "services:\n  miniflux:\n    image: miniflux/miniflux:latest\n    restart: unless-stopped\n    ports:\n      - \"8280:8080\"\n    depends_on:\n      - db\n    environment:\n      - DATABASE_URL=postgres://miniflux:secret@db/miniflux?sslmode=disable\n      - RUN_MIGRATIONS=1\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_USER=miniflux\n      - POSTGRES_PASSWORD=secret\n      - POSTGRES_DB=miniflux\n    volumes:\n      - ./db:/var/lib/postgresql\n"
   },
   {
     "slug": "it-tools",
@@ -137,11 +137,11 @@
   {
     "slug": "vaultwarden",
     "name": "Vaultwarden",
-    "description": "A lightweight, Bitwarden-compatible password manager server; disable SIGNUPS_ALLOWED once your own account exists.",
+    "description": "A lightweight, Bitwarden-compatible password manager server; signups default to off, set SIGNUPS_ALLOWED=true to add your first account, then flip it back.",
     "iconRef": "vaultwarden",
     "homepage": "https://github.com/dani-garcia/vaultwarden",
     "categories": ["utilities"],
-    "compose": "services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    environment:\n      - SIGNUPS_ALLOWED=true\n    ports:\n      - \"8087:80\"\n    volumes:\n      - ./data:/data\n"
+    "compose": "services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    environment:\n      - SIGNUPS_ALLOWED=false\n    ports:\n      - \"8087:80\"\n    volumes:\n      - ./data:/data\n"
   },
   {
     "slug": "actual-budget",
@@ -155,11 +155,11 @@
   {
     "slug": "linkding",
     "name": "Linkding",
-    "description": "A minimalist bookmark manager with tagging and full-text search; change the default admin credentials after first login.",
+    "description": "A minimalist bookmark manager with tagging and full-text search; no admin account exists until you create one via its interactive setup after first start.",
     "iconRef": "linkding",
     "homepage": "https://linkding.link",
     "categories": ["productivity"],
-    "compose": "services:\n  linkding:\n    image: sissbruecker/linkding:latest\n    restart: unless-stopped\n    ports:\n      - \"9090:9090\"\n    volumes:\n      - ./data:/etc/linkding/data\n    environment:\n      - LD_SUPERUSER_NAME=admin\n      - LD_SUPERUSER_PASSWORD=changeme\n"
+    "compose": "services:\n  linkding:\n    image: sissbruecker/linkding:latest\n    restart: unless-stopped\n    ports:\n      - \"9090:9090\"\n    volumes:\n      - ./data:/etc/linkding/data\n"
   },
   {
     "slug": "ntfy",
@@ -182,11 +182,11 @@
   {
     "slug": "vikunja",
     "name": "Vikunja",
-    "description": "A self-hosted to-do and project manager; the image runs as uid 1000 and won't chown its own mounts, so the files and db directories need matching ownership.",
+    "description": "A self-hosted to-do and project manager; files and db need uid-1000 ownership, and sessions reset on restart unless VIKUNJA_SERVICE_SECRET is set.",
     "iconRef": "vikunja",
     "homepage": "https://vikunja.io",
     "categories": ["productivity"],
-    "compose": "services:\n  vikunja:\n    image: vikunja/vikunja:latest\n    restart: unless-stopped\n    environment:\n      - VIKUNJA_SERVICE_SECRET=changeme-generate-a-real-secret\n      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:3456/\n    ports:\n      - \"3456:3456\"\n    volumes:\n      - ./files:/app/vikunja/files\n      - ./db:/db\n"
+    "compose": "services:\n  vikunja:\n    image: vikunja/vikunja:latest\n    restart: unless-stopped\n    environment:\n      - VIKUNJA_SERVICE_PUBLICURL=http://localhost:3456/\n    ports:\n      - \"3456:3456\"\n    volumes:\n      - ./files:/app/vikunja/files\n      - ./db:/db\n"
   },
   {
     "slug": "grafana",
@@ -200,11 +200,11 @@
   {
     "slug": "photoprism",
     "name": "PhotoPrism",
-    "description": "An AI-powered photo manager that indexes and tags a personal photo library, using SQLite when no external database is configured.",
+    "description": "An AI-powered photo manager for a personal library, using SQLite by default; no admin password is set, so run `photoprism passwd admin` after first start.",
     "iconRef": "photoprism",
     "homepage": "https://www.photoprism.app",
     "categories": ["photos"],
-    "compose": "services:\n  photoprism:\n    image: photoprism/photoprism:latest\n    restart: unless-stopped\n    ports:\n      - \"2342:2342\"\n    environment:\n      - PHOTOPRISM_ADMIN_PASSWORD=changeme123\n    volumes:\n      - ./originals:/photoprism/originals\n      - ./storage:/photoprism/storage\n"
+    "compose": "services:\n  photoprism:\n    image: photoprism/photoprism:latest\n    restart: unless-stopped\n    ports:\n      - \"2342:2342\"\n    volumes:\n      - ./originals:/photoprism/originals\n      - ./storage:/photoprism/storage\n"
   },
   {
     "slug": "mealie",
@@ -330,7 +330,7 @@
     "iconRef": "healthchecks",
     "homepage": "https://healthchecks.io",
     "categories": ["monitoring"],
-    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SECRET_KEY=change-this-to-a-random-value\n      - SITE_ROOT=http://localhost:8088\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql/data\n"
+    "compose": "services:\n  healthchecks:\n    image: healthchecks/healthchecks:latest\n    restart: unless-stopped\n    ports:\n      - \"8088:8000\"\n    environment:\n      - ALLOWED_HOSTS=*\n      - SITE_ROOT=http://localhost:8088\n      - DB=postgres\n      - DB_HOST=db\n      - DB_NAME=hc\n      - DB_USER=postgres\n      - DB_PASSWORD=change-this-too\n    depends_on:\n      - db\n  db:\n    image: postgres:latest\n    restart: unless-stopped\n    environment:\n      - POSTGRES_DB=hc\n      - POSTGRES_PASSWORD=change-this-too\n    volumes:\n      - ./db:/var/lib/postgresql/data\n"
   },
   {
     "slug": "wallabag",
@@ -357,7 +357,7 @@
     "iconRef": "firefly-iii",
     "homepage": "https://www.firefly-iii.org",
     "categories": ["finance"],
-    "compose": "services:\n  firefly-iii:\n    image: fireflyiii/core:latest\n    restart: unless-stopped\n    ports:\n      - \"8076:8080\"\n    environment:\n      - APP_KEY=SomeRandomStringOf32CharsExactly\n      - APP_URL=http://localhost:8076\n      - DB_CONNECTION=mysql\n      - DB_HOST=db\n      - DB_DATABASE=firefly\n      - DB_USERNAME=firefly\n      - DB_PASSWORD=secret_firefly_password\n    volumes:\n      - ./upload:/var/www/html/storage/upload\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=firefly\n      - MYSQL_USER=firefly\n      - MYSQL_PASSWORD=secret_firefly_password\n      - MYSQL_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
+    "compose": "services:\n  firefly-iii:\n    image: fireflyiii/core:latest\n    restart: unless-stopped\n    ports:\n      - \"8076:8080\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8076\n      - DB_CONNECTION=mysql\n      - DB_HOST=db\n      - DB_DATABASE=firefly\n      - DB_USERNAME=firefly\n      - DB_PASSWORD=secret_firefly_password\n    volumes:\n      - ./upload:/var/www/html/storage/upload\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=firefly\n      - MYSQL_USER=firefly\n      - MYSQL_PASSWORD=secret_firefly_password\n      - MYSQL_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
   },
   {
     "slug": "stirling-pdf",
@@ -389,11 +389,11 @@
   {
     "slug": "homebox",
     "name": "Homebox",
-    "description": "A home inventory tracker for cataloguing possessions, warranties, and maintenance; requires a random HBOX_AUTH_API_KEY_PEPPER value before first run.",
+    "description": "A home inventory tracker for possessions and maintenance; won't start without HBOX_AUTH_API_KEY_PEPPER set to 32+ random bytes, try `openssl rand -base64 48`.",
     "iconRef": "homebox",
     "homepage": "https://homebox.software",
     "categories": ["utilities"],
-    "compose": "services:\n  homebox:\n    image: ghcr.io/sysadminsmedia/homebox:latest\n    restart: unless-stopped\n    ports:\n      - \"3100:7745\"\n    environment:\n      - TZ=Etc/UTC\n      - HBOX_AUTH_API_KEY_PEPPER=change-this-to-a-random-48-byte-value\n    volumes:\n      - ./data:/data\n"
+    "compose": "services:\n  homebox:\n    image: ghcr.io/sysadminsmedia/homebox:latest\n    restart: unless-stopped\n    ports:\n      - \"3100:7745\"\n    environment:\n      - TZ=Etc/UTC\n      - HBOX_AUTH_API_KEY_PEPPER=\n    volumes:\n      - ./data:/data\n"
   },
   {
     "slug": "beszel",
@@ -443,10 +443,10 @@
   {
     "slug": "snipe-it",
     "name": "Snipe-IT",
-    "description": "An IT asset management system for tracking who has which hardware and license; needs an APP_KEY and its own MariaDB database.",
+    "description": "An IT asset management system for tracking who has which hardware and license; the container exits on start until you set a real APP_KEY.",
     "iconRef": "snipe-it",
     "homepage": "https://snipeitapp.com",
     "categories": ["utilities"],
-    "compose": "services:\n  snipe-it:\n    image: snipe/snipe-it:latest\n    restart: unless-stopped\n    ports:\n      - \"8072:80\"\n    environment:\n      - APP_KEY=base64:3ilviXqB9u6DX1NRcyWGJ+sjySF+H18CPDGb3+IVwMQ=\n      - APP_URL=http://localhost:8072\n      - DB_CONNECTION=mariadb\n      - DB_HOST=db\n      - DB_DATABASE=snipeit\n      - DB_USERNAME=snipeit\n      - DB_PASSWORD=changeme1234\n    volumes:\n      - ./storage:/var/lib/snipeit\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=snipeit\n      - MYSQL_USER=snipeit\n      - MYSQL_PASSWORD=changeme1234\n      - MYSQL_ROOT_PASSWORD=changeme1234\n    volumes:\n      - ./db:/var/lib/mysql\n"
+    "compose": "services:\n  snipe-it:\n    image: snipe/snipe-it:latest\n    restart: unless-stopped\n    ports:\n      - \"8072:80\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8072\n      - DB_CONNECTION=mariadb\n      - DB_HOST=db\n      - DB_DATABASE=snipeit\n      - DB_USERNAME=snipeit\n      - DB_PASSWORD=changeme1234\n    volumes:\n      - ./storage:/var/lib/snipeit\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=snipeit\n      - MYSQL_USER=snipeit\n      - MYSQL_PASSWORD=changeme1234\n      - MYSQL_ROOT_PASSWORD=changeme1234\n    volumes:\n      - ./db:/var/lib/mysql\n"
   }
 ]
