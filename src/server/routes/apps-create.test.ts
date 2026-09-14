@@ -182,6 +182,23 @@ describe("POST /api/apps", () => {
     expect(loser.json().error).toBe("directory_exists");
   });
 
+  it("writes a given compose body verbatim instead of scaffolding one", async () => {
+    // The catalogue browser's create path (Task 4): a chosen entry's compose text rides
+    // in the same `compose` field this route already accepts, so this is the one place
+    // that has to prove the substitution — everything above this test already proves the
+    // scaffolded default still works when `compose` is absent.
+    const { app, cookie } = await ready();
+    const compose = "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:1\n";
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/apps",
+      headers: { cookie },
+      payload: { displayName: "Uptime Kuma", directory: "uptime-kuma", compose },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(app.deps.host.files.get("uptime-kuma/compose.yaml")).toBe(compose);
+  });
+
   it("is forbidden to a viewer", async () => {
     const { app, cookie } = await ready();
     const viewer = await createViewer(app, cookie);

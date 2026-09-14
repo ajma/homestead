@@ -38,6 +38,16 @@ const createBody = z.object({
   description: z.string().max(500).nullable().optional(),
   iconRef: z.string().max(64).nullable().optional(),
   category: z.string().max(64).nullable().optional(),
+  // The catalogue browser's contribution (Task 4): a chosen entry's compose text, routed
+  // through this SAME field rather than a second create path. Omitted, this route keeps
+  // scaffolding a starter file exactly as it always has — `compose` only changes what
+  // gets written, never how or where. Not re-validated against `docker compose config`
+  // here, on purpose: the scaffolded default was never validated at create time either
+  // (Phase 1F's editor is where that check lives, on every subsequent save), and the
+  // catalogue's own schema already requires a non-empty `services` map — see
+  // `catalogueEntrySchema`. The user can still edit this text in the dialog before
+  // submitting, so treating it as pre-blessed content would be wrong regardless.
+  compose: z.string().min(1).optional(),
 });
 
 const launchUrlSchema = z
@@ -439,7 +449,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     try {
       await host.writeTextFile(
         `${body.directory}/compose.yaml`,
-        scaffoldCompose(body.displayName),
+        body.compose ?? scaffoldCompose(body.displayName),
         null,
       );
     } catch (error) {
