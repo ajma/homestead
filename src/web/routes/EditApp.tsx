@@ -252,7 +252,7 @@ export function EditApp() {
        */}
       <div
         data-testid="edit-content-row"
-        className={`flex flex-col gap-4 p-4 lg:flex-row ${wideTab ? "" : `lg:mx-auto lg:${PAGE_MAX_WIDTH}`}`}
+        className={`flex flex-col gap-4 p-4 lg:flex-row ${wideTab ? "" : `mx-auto ${PAGE_MAX_WIDTH}`}`}
       >
         <main className="min-w-0 flex-1">
           <Outlet context={{ app, setWideTab } satisfies EditAppContext} />

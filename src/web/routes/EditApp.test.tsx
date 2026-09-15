@@ -262,7 +262,7 @@ describe("EditApp", () => {
       stubFetch(app);
       mount();
       const row = screen.getByTestId("edit-content-row");
-      for (const cls of `lg:mx-auto lg:${PAGE_MAX_WIDTH}`.split(" ")) {
+      for (const cls of `mx-auto ${PAGE_MAX_WIDTH}`.split(" ")) {
         expect(row.className).toContain(cls);
       }
     });
@@ -271,7 +271,7 @@ describe("EditApp", () => {
       stubFetch(app);
       mount("/apps/jellyfin/config");
       const row = screen.getByTestId("edit-content-row");
-      for (const cls of `lg:mx-auto lg:${PAGE_MAX_WIDTH}`.split(" ")) {
+      for (const cls of `mx-auto ${PAGE_MAX_WIDTH}`.split(" ")) {
         expect(row.className).not.toContain(cls);
       }
     });
