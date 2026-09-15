@@ -219,6 +219,19 @@ describe("CreateAppDialog", () => {
       expect(screen.getByText("Jellyfin")).toBeTruthy();
     });
 
+    it("renders each browsed entry's own icon", async () => {
+      stubCatalogAndCreate([
+        catalogEntry({ slug: "uptime-kuma", name: "Uptime Kuma", iconRef: "uptime-kuma" }),
+        catalogEntry({ slug: "jellyfin", name: "Jellyfin", iconRef: "jellyfin" }),
+      ]);
+      const { container } = mount();
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalog/ }));
+      await waitFor(() => expect(screen.getByText("Uptime Kuma")).toBeTruthy());
+
+      expect(container.querySelector('img[data-icon-slug="uptime-kuma"]')).not.toBeNull();
+      expect(container.querySelector('img[data-icon-slug="jellyfin"]')).not.toBeNull();
+    });
+
     it("narrows the list to entries matching the search across name, description and category", async () => {
       stubCatalogAndCreate([
         catalogEntry({

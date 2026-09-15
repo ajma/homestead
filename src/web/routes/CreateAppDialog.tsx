@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppsKey } from "@web/api/admin";
 import { type CatalogEntry, useCatalog } from "@web/api/catalog";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
+import { AppIcon } from "@web/components/AppIcon";
 import { DialogShell } from "@web/components/DialogShell";
 import { IconPicker } from "@web/components/IconPicker";
 import { useState } from "react";
@@ -129,6 +130,13 @@ function matchesQuery(entry: CatalogEntry, query: string): boolean {
  * The catalog itself is fetched only while the browse panel is open (`useCatalog`'s
  * `enabled` flag) — never imported, so its 50 compose bodies never enter this bundle. See
  * `src/web/api/catalog.ts` and `src/shared/catalog/index.ts`'s own doc comment.
+ *
+ * Each row renders its entry's icon through the same `AppIcon` every other screen uses
+ * (never a second path to `/api/icons/:file`), so a missing or unresolvable icon degrades
+ * to `AppIcon`'s own letter tile rather than a broken image. Opening the browse panel asks
+ * for up to 50 icons at once; `AppIcon`'s `<img loading="lazy">` already limits that to
+ * whatever is actually scrolled into view, which is why nothing here adds its own
+ * throttling or a virtualised list for fifty rows.
  */
 export function CreateAppDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -267,13 +275,16 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
                   <button
                     type="button"
                     onClick={() => handleSelectCatalogEntry(entry)}
-                    className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm dark:border-slate-800"
+                    className="flex w-full items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm dark:border-slate-800"
                   >
-                    <span className="font-medium text-slate-900 dark:text-slate-100">
-                      {entry.name}
-                    </span>
-                    <span className="text-xs text-slate-500 dark:text-slate-400">
-                      {entry.description}
+                    <AppIcon iconRef={entry.iconRef} displayName={entry.name} size="sm" />
+                    <span className="flex min-w-0 flex-col items-start gap-0.5">
+                      <span className="font-medium text-slate-900 dark:text-slate-100">
+                        {entry.name}
+                      </span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {entry.description}
+                      </span>
                     </span>
                   </button>
                 </li>
