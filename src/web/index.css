@@ -18,3 +18,17 @@ body {
     color-scheme: dark;
   }
 }
+
+/*
+ * `Settings`' left nav jumps to an in-page anchor (`#host-check` etc.) on click — smooth
+ * scrolling makes that read as a jump-to instead of a teleport. Scoped to `no-preference`
+ * rather than applied unconditionally so a visitor who has asked their OS for reduced
+ * motion gets the instant jump instead, per WCAG 2.3.3 — a media query, not a JS
+ * `matchMedia` check, so it can't disagree with the OS setting after the page has
+ * already rendered.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}

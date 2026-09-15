@@ -2,7 +2,7 @@
 import type { HostCheck } from "@shared/setup.js";
 import { SETUP_STEPS } from "@shared/setup.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App, queryClient } from "@web/App";
 import type { Me } from "@web/auth/useSession";
 import { Settings } from "@web/routes/Settings";
@@ -40,7 +40,7 @@ describe("Settings", () => {
 
     expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy();
     await waitFor(() => expect(screen.getByText("No users yet.")).toBeTruthy());
-    expect(screen.getByText("Users")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Users" })).toBeTruthy();
   });
 
   it("uses the shared page shell's width cap, not the old 1024px max-w-5xl, and the tightened section gap", async () => {
@@ -66,9 +66,11 @@ describe("Settings", () => {
     expect(shell.className).toContain("md:space-y-4");
   });
 
-  it("places Host check and Cloudflare side by side at lg: and up, leaving Users full width", async () => {
-    // Host check and Cloudflare are short fact-and-action panels; Users is a genuine
-    // table and stays out of the grid, full width, below it.
+  it("stacks Host check, Cloudflare and Users full width in the content column, not a two-up grid", async () => {
+    // The left nav (Phase 1C) takes width back from the content column — two panels
+    // squeezed into what's left of it read as cramped, so Host check and Cloudflare
+    // stack full width now, the same as Users always did. None of the three sections'
+    // parent should carry a grid-columns class.
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -86,12 +88,101 @@ describe("Settings", () => {
 
     const hostHeading = screen.getByRole("heading", { name: "Host check" });
     const cloudflareHeading = screen.getByRole("heading", { name: "Cloudflare" });
-    const grid = hostHeading.closest("section")?.parentElement;
-    expect(grid?.className).toContain("lg:grid-cols-2");
-    expect(cloudflareHeading.closest("section")?.parentElement).toBe(grid);
+    const contentColumn = hostHeading.closest("section")?.parentElement;
+    expect(contentColumn?.className ?? "").not.toContain("grid-cols");
+    expect(cloudflareHeading.closest("section")?.parentElement).toBe(contentColumn);
 
-    const usersHeading = await screen.findByText("Users");
-    expect(usersHeading.closest("section")?.parentElement).not.toBe(grid);
+    const usersHeading = await screen.findByRole("heading", { name: "Users" });
+    expect(usersHeading.closest("section")?.parentElement).toBe(contentColumn);
+  });
+
+  it("gives every section a nav link and every nav link a matching section, both ways", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    const links = within(nav).getAllByRole("link");
+    const linkTargets = links.map((link) => link.getAttribute("href"));
+
+    // Every link points at an id that actually exists on the page...
+    for (const href of linkTargets) {
+      const id = (href ?? "").replace(/^#/, "");
+      expect(id.length).toBeGreaterThan(0);
+      expect(document.getElementById(id)).not.toBeNull();
+    }
+
+    // ...and every top-level settings <section> has a link pointing at it. A section
+    // added without a nav link, or a link added without a section, fails one direction
+    // of this or the other.
+    const sections = container.querySelectorAll("section[id]");
+    expect(sections.length).toBe(links.length);
+    for (const section of Array.from(sections)) {
+      expect(linkTargets).toContain(`#${section.id}`);
+    }
+  });
+
+  it("lets a keyboard user reach and activate every nav link", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    const links = within(nav).getAllByRole("link");
+    expect(links.length).toBe(3);
+    for (const link of links) {
+      // Real anchors need no tabIndex to be keyboard-reachable — this just confirms
+      // nothing here suppressed it (a `tabIndex={-1}` mistake on the link itself, say).
+      expect(link.tabIndex).not.toBe(-1);
+      link.focus();
+      expect(document.activeElement).toBe(link);
+    }
+  });
+
+  it("moves focus to the target section when its nav link is activated", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/setup/host-check")) return json(200, HEALTHY_HOST_CHECK);
+        return json(200, []);
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Settings />
+      </QueryClientProvider>,
+    );
+
+    const cloudflareLink = screen.getByRole("link", { name: "Cloudflare" });
+    fireEvent.click(cloudflareLink);
+
+    const cloudflareSection = document.getElementById("cloudflare");
+    expect(cloudflareSection).not.toBeNull();
+    expect(document.activeElement).toBe(cloudflareSection);
   });
 
   it("mounts the host check panel, reused from setup, with no wizard footer", async () => {
@@ -223,6 +314,6 @@ describe("the settings route guard", () => {
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Settings" })).toBeTruthy());
     await waitFor(() => expect(screen.getByText("No users yet.")).toBeTruthy());
-    expect(screen.getByText("Users")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Users" })).toBeTruthy();
   });
 });
