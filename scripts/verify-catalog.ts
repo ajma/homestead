@@ -1,13 +1,13 @@
 /**
- * Manual verification for the app catalogue (`src/shared/catalogue/catalogue.json`) —
- * Task 1 of the app-catalogue feature.
+ * Manual verification for the app catalog (`src/shared/catalog/catalog.json`) —
+ * Task 1 of the app-catalog feature.
  *
  * There is no CI in this repo (see `scripts/check-schema-drift.ts`'s own header), and this
  * script hits the network and shells out to `docker` on every run — exactly the property a
- * test suite must not have, which is why `src/shared/catalogue/index.test.ts` stops short
+ * test suite must not have, which is why `src/shared/catalog/index.test.ts` stops short
  * of these three checks and this script exists to run them by hand:
  *
- *     pnpm run verify:catalogue
+ *     pnpm run verify:catalog
  *
  * For every entry, and for every service inside its `compose`:
  *
@@ -20,9 +20,9 @@
  *   3. `iconRef` exists in the dashboard-icons metadata — via `IconMetadata` from
  *      `src/server/icons/metadata.ts`, the same class the icon search endpoint uses.
  *
- * Also checks, across the whole catalogue: no two entries share a slug, a name, or a
+ * Also checks, across the whole catalog: no two entries share a slug, a name, or a
  * default published port. (Uniqueness needs no network and is ALSO asserted in
- * `index.test.ts` — repeated here so a single `verify:catalogue` run is a complete
+ * `index.test.ts` — repeated here so a single `verify:catalog` run is a complete
  * pre-flight, not one of two commands someone has to remember.)
  *
  * WHAT A GREEN RUN MEANS, AND DOES NOT MEAN: every entry's compose file resolves, and
@@ -38,7 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRegistryClient } from "@server/apps/registry.js";
 import { IconMetadata } from "@server/icons/metadata.js";
-import type { CatalogueEntry } from "@shared/catalogue/schema.js";
+import type { CatalogEntry } from "@shared/catalog/schema.js";
 import { parse as parseYaml } from "yaml";
 
 type ComposeDoc = { services?: Record<string, { image?: unknown; ports?: unknown[] }> };
@@ -70,7 +70,7 @@ function imagesIn(doc: ComposeDoc): string[] {
  * `HOST_IP:`) and the long mapping form (`{ published, protocol }`). A bare
  * container-only port (no host mapping) publishes to a random host port each run and has
  * no fixed default to compare across entries, so it contributes nothing. Kept in sync
- * with the identical helper in `src/shared/catalogue/index.test.ts`. */
+ * with the identical helper in `src/shared/catalog/index.test.ts`. */
 function hostPortOf(entry: unknown): string | undefined {
   if (typeof entry === "string") {
     const withoutProtocol = entry.split("/")[0] ?? entry;
@@ -104,8 +104,8 @@ function publishedPorts(doc: ComposeDoc): Set<string> {
 
 /** Runs the real `docker compose config` against one entry's compose file, written to its
  * own temp directory so entries never share a working directory. */
-async function verifyComposeConfig(entry: CatalogueEntry): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), `hs-verify-catalogue-${entry.slug}-`));
+async function verifyComposeConfig(entry: CatalogEntry): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), `hs-verify-catalog-${entry.slug}-`));
   try {
     const composePath = join(dir, "compose.yaml");
     await writeFile(composePath, entry.compose, "utf8");
@@ -133,7 +133,7 @@ async function verifyComposeConfig(entry: CatalogueEntry): Promise<void> {
 
 /** Confirms every image named by an entry's compose file resolves in its registry, reusing
  * the same client `ImageUpdateChecker` uses rather than a second implementation. */
-async function verifyImages(entry: CatalogueEntry, doc: ComposeDoc): Promise<void> {
+async function verifyImages(entry: CatalogEntry, doc: ComposeDoc): Promise<void> {
   const images = imagesIn(doc);
   if (images.length === 0) {
     fail(entry.slug, "image", "compose file names no service with an image");
@@ -151,7 +151,7 @@ async function verifyImages(entry: CatalogueEntry, doc: ComposeDoc): Promise<voi
 }
 
 /** Confirms `iconRef` exists in the dashboard-icons metadata index. */
-async function verifyIcon(entry: CatalogueEntry, metadata: IconMetadata): Promise<void> {
+async function verifyIcon(entry: CatalogEntry, metadata: IconMetadata): Promise<void> {
   if (metadata.has(entry.iconRef)) {
     pass(entry.slug, "icon");
   } else {
@@ -159,7 +159,7 @@ async function verifyIcon(entry: CatalogueEntry, metadata: IconMetadata): Promis
   }
 }
 
-function verifyUniqueness(entries: readonly CatalogueEntry[]): void {
+function verifyUniqueness(entries: readonly CatalogEntry[]): void {
   const bySlug = new Map<string, string[]>();
   const byName = new Map<string, string[]>();
   const byPort = new Map<string, string[]>();
@@ -192,22 +192,22 @@ function verifyUniqueness(entries: readonly CatalogueEntry[]): void {
 }
 
 async function main(): Promise<void> {
-  // Dynamic, not static: a schema-invalid catalogue.json throws the moment anything
-  // imports `@shared/catalogue`, and a static import here would crash before this script
-  // got to print anything. `src/shared/catalogue/index.test.ts` is the right place for
+  // Dynamic, not static: a schema-invalid catalog.json throws the moment anything
+  // imports `@shared/catalog`, and a static import here would crash before this script
+  // got to print anything. `src/shared/catalog/index.test.ts` is the right place for
   // that failure to surface — this script assumes it already passed and focuses on what
   // that test cannot check.
-  const { CATALOGUE } = await import("../src/shared/catalogue/index.js");
+  const { CATALOG } = await import("../src/shared/catalog/index.js");
 
   console.log(
-    `Verifying ${CATALOGUE.length} catalogue ${CATALOGUE.length === 1 ? "entry" : "entries"}...\n`,
+    `Verifying ${CATALOG.length} catalog ${CATALOG.length === 1 ? "entry" : "entries"}...\n`,
   );
 
-  verifyUniqueness(CATALOGUE);
+  verifyUniqueness(CATALOG);
 
   // Own temp dir, removed in `finally` below — `IconMetadata` also writes a cache file
   // into it, so leaving this behind would litter /tmp on every run of this script.
-  const iconCacheDir = await mkdtemp(join(tmpdir(), "hs-verify-catalogue-icons-"));
+  const iconCacheDir = await mkdtemp(join(tmpdir(), "hs-verify-catalog-icons-"));
   try {
     const iconMetadata = new IconMetadata({ cacheDir: iconCacheDir });
     await iconMetadata.load();
@@ -218,7 +218,7 @@ async function main(): Promise<void> {
       );
     }
 
-    for (const entry of CATALOGUE) {
+    for (const entry of CATALOG) {
       console.log(`\n${entry.name} (${entry.slug})`);
       const doc = parseYaml(entry.compose) as ComposeDoc;
       await verifyComposeConfig(entry);

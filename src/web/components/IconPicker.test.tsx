@@ -28,7 +28,7 @@ function stub(icons: Array<{ slug: string; aliases: string[] }>) {
 
 describe("IconPicker", () => {
   it("does not search until the user types", async () => {
-    // The catalogue is 3,238 entries. Fetching a default page on mount, for a control
+    // The catalog is 3,238 entries. Fetching a default page on mount, for a control
     // most edits never touch, is one request per page view for nothing.
     stub([]);
     mount(null);

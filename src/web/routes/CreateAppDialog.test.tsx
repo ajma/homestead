@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { CatalogueEntry } from "@shared/catalogue/schema.js";
+import type { CatalogEntry } from "@shared/catalog/schema.js";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CreateAppDialog } from "@web/routes/CreateAppDialog";
@@ -30,7 +30,7 @@ function ok(body: unknown = { id: "a1", slug: "jellyfin" }, status = 201) {
   );
 }
 
-function catalogueEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry {
+function catalogEntry(overrides: Partial<CatalogEntry> = {}): CatalogEntry {
   return {
     slug: "uptime-kuma",
     name: "Uptime Kuma",
@@ -45,17 +45,17 @@ function catalogueEntry(overrides: Partial<CatalogueEntry> = {}): CatalogueEntry
 
 /**
  * Discriminates by URL and method, unlike `ok()` above — this suite's browse-and-create
- * tests hit `GET /api/catalogue` and `POST /api/apps` in the same test, and the two must
+ * tests hit `GET /api/catalog` and `POST /api/apps` in the same test, and the two must
  * answer differently.
  */
-function stubCatalogueAndCreate(
-  entries: CatalogueEntry[],
+function stubCatalogAndCreate(
+  entries: CatalogEntry[],
   createResponse: { body?: unknown; status?: number } = {},
 ) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === "/api/catalogue") {
+      if (url === "/api/catalog") {
         return new Response(JSON.stringify(entries), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -207,27 +207,27 @@ describe("CreateAppDialog", () => {
     expect(screen.getByText(/64 characters or fewer/i)).toBeTruthy();
   });
 
-  describe("browsing the catalogue", () => {
-    it("lists every catalogue entry once the browse panel opens", async () => {
-      stubCatalogueAndCreate([
-        catalogueEntry({ slug: "uptime-kuma", name: "Uptime Kuma" }),
-        catalogueEntry({ slug: "jellyfin", name: "Jellyfin" }),
+  describe("browsing the catalog", () => {
+    it("lists every catalog entry once the browse panel opens", async () => {
+      stubCatalogAndCreate([
+        catalogEntry({ slug: "uptime-kuma", name: "Uptime Kuma" }),
+        catalogEntry({ slug: "jellyfin", name: "Jellyfin" }),
       ]);
       mount();
-      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalog/ }));
       await waitFor(() => expect(screen.getByText("Uptime Kuma")).toBeTruthy());
       expect(screen.getByText("Jellyfin")).toBeTruthy();
     });
 
     it("narrows the list to entries matching the search across name, description and category", async () => {
-      stubCatalogueAndCreate([
-        catalogueEntry({
+      stubCatalogAndCreate([
+        catalogEntry({
           slug: "uptime-kuma",
           name: "Uptime Kuma",
           description: "Self-hosted monitoring for websites and services.",
           categories: ["monitoring"],
         }),
-        catalogueEntry({
+        catalogEntry({
           slug: "jellyfin",
           name: "Jellyfin",
           description: "A media server.",
@@ -235,10 +235,10 @@ describe("CreateAppDialog", () => {
         }),
       ]);
       mount();
-      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalog/ }));
       await waitFor(() => expect(screen.getByText("Jellyfin")).toBeTruthy());
 
-      fireEvent.change(screen.getByLabelText(/Search the catalogue/), {
+      fireEvent.change(screen.getByLabelText(/Search the catalog/), {
         target: { value: "monitoring" },
       });
       expect(screen.getByText("Uptime Kuma")).toBeTruthy();
@@ -246,23 +246,23 @@ describe("CreateAppDialog", () => {
     });
 
     it("says a search matched nothing, rather than showing an empty list", async () => {
-      stubCatalogueAndCreate([catalogueEntry()]);
+      stubCatalogAndCreate([catalogEntry()]);
       mount();
-      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalog/ }));
       await waitFor(() => expect(screen.getByText("Uptime Kuma")).toBeTruthy());
 
-      fireEvent.change(screen.getByLabelText(/Search the catalogue/), {
-        target: { value: "definitely-not-in-the-catalogue" },
+      fireEvent.change(screen.getByLabelText(/Search the catalog/), {
+        target: { value: "definitely-not-in-the-catalog" },
       });
       expect(screen.queryByText("Uptime Kuma")).toBeNull();
       expect(screen.getByText(/No apps match/)).toBeTruthy();
     });
 
     it("fills display name, description, icon and compose from a chosen entry, and each stays editable", async () => {
-      const entry = catalogueEntry();
-      stubCatalogueAndCreate([entry]);
+      const entry = catalogEntry();
+      stubCatalogAndCreate([entry]);
       const { container } = mount();
-      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalog/ }));
       await waitFor(() => expect(screen.getByText(entry.name)).toBeTruthy());
       fireEvent.click(screen.getByText(entry.name));
 
@@ -277,8 +277,8 @@ describe("CreateAppDialog", () => {
         entry.compose,
       );
 
-      // Editable: change every field the catalogue filled, then confirm the edit stuck
-      // rather than the catalogue's own value re-asserting itself.
+      // Editable: change every field the catalog filled, then confirm the edit stuck
+      // rather than the catalog's own value re-asserting itself.
       fireEvent.change(screen.getByLabelText(/Display name/), {
         target: { value: "My Kuma" },
       });
@@ -290,7 +290,7 @@ describe("CreateAppDialog", () => {
         target: { value: editedCompose },
       });
       // The icon field's own "Use a letter tile" clears the chosen icon back to null —
-      // proof the field is a live control, not a read-only echo of the catalogue.
+      // proof the field is a live control, not a read-only echo of the catalog.
       fireEvent.click(screen.getByRole("button", { name: /Use a letter tile/ }));
 
       expect((screen.getByLabelText(/Display name/) as HTMLInputElement).value).toBe("My Kuma");
@@ -311,13 +311,13 @@ describe("CreateAppDialog", () => {
       expect(body.iconRef).toBeUndefined();
     });
 
-    it("creates an app from an unedited catalogue entry with that entry's compose in the request", async () => {
+    it("creates an app from an unedited catalog entry with that entry's compose in the request", async () => {
       // The strongest proof this routes through the SAME create path: the request body
-      // `POST /api/apps` actually receives carries the catalogue entry's own compose text.
-      const entry = catalogueEntry();
-      stubCatalogueAndCreate([entry]);
+      // `POST /api/apps` actually receives carries the catalog entry's own compose text.
+      const entry = catalogEntry();
+      stubCatalogAndCreate([entry]);
       mount();
-      fireEvent.click(screen.getByRole("button", { name: /Browse the catalogue/ }));
+      fireEvent.click(screen.getByRole("button", { name: /Browse the catalog/ }));
       await waitFor(() => expect(screen.getByText(entry.name)).toBeTruthy());
       fireEvent.click(screen.getByText(entry.name));
 
@@ -333,8 +333,8 @@ describe("CreateAppDialog", () => {
       });
     });
 
-    it("does not fetch the catalogue until the browse panel is opened", async () => {
-      stubCatalogueAndCreate([catalogueEntry()]);
+    it("does not fetch the catalog until the browse panel is opened", async () => {
+      stubCatalogAndCreate([catalogEntry()]);
       mount();
       expect(fetch).not.toHaveBeenCalled();
     });

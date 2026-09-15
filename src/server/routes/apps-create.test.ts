@@ -183,7 +183,7 @@ describe("POST /api/apps", () => {
   });
 
   it("writes a given compose body verbatim instead of scaffolding one", async () => {
-    // The catalogue browser's create path (Task 4): a chosen entry's compose text rides
+    // The catalog browser's create path (Task 4): a chosen entry's compose text rides
     // in the same `compose` field this route already accepts, so this is the one place
     // that has to prove the substitution — everything above this test already proves the
     // scaffolded default still works when `compose` is absent.
