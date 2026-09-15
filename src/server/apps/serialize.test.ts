@@ -24,6 +24,13 @@ const row = {
 
 const status = { status: "up" as const, detail: "4/4 services up" };
 
+const extras = {
+  lastDeployAt: null,
+  runningJobId: null,
+  exposureHostname: null,
+  uptimeSince: null,
+};
+
 describe("app serializers", () => {
   it("gives a viewer only what a housemate needs", () => {
     const dto = toViewerApp(row, status);
@@ -64,7 +71,15 @@ describe("app serializers", () => {
 
   it("serialises the whole row for an admin", () => {
     // Full shape, not spot-checks: a missing admin field would otherwise pass.
-    expect(toAdminApp(row, status, 1700003600, "job-1")).toEqual({
+    expect(
+      toAdminApp(row, status, {
+        ...extras,
+        lastDeployAt: 1700003600,
+        runningJobId: "job-1",
+        exposureHostname: "jellyfin.example.com",
+        uptimeSince: 1700003000,
+      }),
+    ).toEqual({
       id: "app-1",
       slug: "jellyfin",
       displayName: "Jellyfin",
@@ -87,15 +102,41 @@ describe("app serializers", () => {
       archivedAt: null,
       lastDeployAt: 1700003600,
       runningJobId: "job-1",
+      exposureHostname: "jellyfin.example.com",
+      uptimeSince: 1700003000,
+      ports: [],
     });
   });
 
   it("passes null through when there is no deploy to report", () => {
-    expect(toAdminApp(row, status, null, null).lastDeployAt).toBeNull();
+    expect(toAdminApp(row, status, extras).lastDeployAt).toBeNull();
   });
 
   it("passes null through when there is no running job to report", () => {
-    expect(toAdminApp(row, status, null, null).runningJobId).toBeNull();
+    expect(toAdminApp(row, status, extras).runningJobId).toBeNull();
+  });
+
+  it("passes null through when there is no exposure to report", () => {
+    expect(toAdminApp(row, status, extras).exposureHostname).toBeNull();
+  });
+
+  it("passes null through when there is no uptime to report", () => {
+    expect(toAdminApp(row, status, extras).uptimeSince).toBeNull();
+  });
+
+  it("collects, deduplicates and sorts every published port across every service", () => {
+    const statusWithServices = {
+      ...status,
+      services: [
+        { name: "web", image: "nginx", restart: null, publishedPorts: [8080, 443] },
+        { name: "sidecar", image: "envoy", restart: null, publishedPorts: [443, 22] },
+      ],
+    };
+    expect(toAdminApp(row, statusWithServices, extras).ports).toEqual([22, 443, 8080]);
+  });
+
+  it("reports no ports when the status carries no resolved services", () => {
+    expect(toAdminApp(row, status, extras).ports).toEqual([]);
   });
 
   // A new column must not silently reach viewers. This is the guard that makes the

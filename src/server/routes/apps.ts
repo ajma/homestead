@@ -7,11 +7,13 @@ import { ulid } from "ulid";
 import { z } from "zod";
 import { normaliseProjectName, scanForApps } from "../apps/adoption.js";
 import { deployTimestamps } from "../apps/deploy-timestamps.js";
+import { exposureHostnames } from "../apps/exposure-hostnames.js";
 import { runningJobs } from "../apps/running-jobs.js";
 import { scaffoldCompose } from "../apps/scaffold.js";
 import { detectSelfDirectory } from "../apps/self-detect.js";
 import { toAdminApp, toViewerApp } from "../apps/serialize.js";
 import { currentProjectName, statusFor } from "../apps/status-for.js";
+import { oldestStartTimes } from "../apps/uptime.js";
 import { audit } from "../audit.js";
 import type { AuthContext } from "../auth/context.js";
 import { can, requireCapability, visibleAppsWhere } from "../auth/context.js";
@@ -401,11 +403,38 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       // generated here. Composing the scope predicate would return nothing for a scoped
       // principal, so a successful adoption would report an empty `adopted` list.
       const [row] = await db.select().from(apps).where(eq(apps.id, id));
-      // `lastDeployAt` and `runningJobId` are null, not looked up: this row was inserted
-      // in the transaction just above, in this same request, so no job can exist for it
-      // yet.
+      // `lastDeployAt`, `runningJobId` and `exposureHostname` are null, not looked up:
+      // this row was inserted in the transaction just above, in this same request, so no
+      // job can exist for it yet, and `exposures.appId` cannot reference a row that did
+      // not exist a moment ago. `uptimeSince` is different — adoption is how Homestead
+      // starts tracking a directory that may already be running, so it IS looked up:
+      // `resolved` (this directory's own compose resolve, above) already names the
+      // project, and `containers` is fetched once and handed to both `statusFor` (so it
+      // does not fetch them again) and `oldestStartTimes`.
       if (row) {
-        adopted.push(toAdminApp(row, await statusFor({ host, composeConfig }, row), null, null));
+        const project = resolved.resolved.projectName;
+        // A wedged Docker socket must not fail the whole adopt request for every
+        // directory in it — same fallback `statusFor`'s own try/catch already gave this
+        // call before `listContainers` was hoisted out to feed `oldestStartTimes` too.
+        let containers: ContainerSummary[] | undefined;
+        let dockerReachable = true;
+        try {
+          containers = await host.listContainers({ project });
+        } catch {
+          dockerReachable = false;
+        }
+        const status = await statusFor({ host, composeConfig }, row, containers);
+        const uptimeMap = dockerReachable
+          ? await oldestStartTimes(host, new Map([[project, containers ?? []]]))
+          : new Map<string, number>();
+        adopted.push(
+          toAdminApp(row, status, {
+            lastDeployAt: null,
+            runningJobId: null,
+            exposureHostname: null,
+            uptimeSince: uptimeMap.get(project) ?? null,
+          }),
+        );
       }
       await audit(db, ctx, {
         action: "app.adopted",
@@ -509,10 +538,16 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
     const [row] = await db.select().from(apps).where(eq(apps.id, id));
     if (!row) return reply.code(500).send({ error: "created_but_missing" });
-    // Just inserted above, in this request — no job can exist for it yet.
-    return reply
-      .code(201)
-      .send(toAdminApp(row, await statusFor({ host, composeConfig }, row), null, null));
+    // Just inserted above, in this request: no job, no exposure, and (a brand-new
+    // directory this route itself just scaffolded) no container has ever run for it.
+    return reply.code(201).send(
+      toAdminApp(row, await statusFor({ host, composeConfig }, row), {
+        lastDeployAt: null,
+        runningJobId: null,
+        exposureHostname: null,
+        uptimeSince: null,
+      }),
+    );
   });
 
   app.get("/api/apps", async (request) => {
@@ -540,6 +575,16 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
         )
       : new Map<string, string>();
 
+    // Same reasoning again: one grouped query over `exposures` instead of every row
+    // asking `GET /api/apps/:id/expose`'s own question for itself. Viewers never see
+    // `exposureHostname`, so they never pay for it.
+    const exposureMap = detailed
+      ? await exposureHostnames(
+          db,
+          rows.map((row) => row.id),
+        )
+      : new Map<string, string>();
+
     // One Docker call for the whole page, partitioned by project. The per-row
     // alternative was a round trip per app on the screen that lists them all.
     let dockerReachable = true;
@@ -556,6 +601,17 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
       dockerReachable = false;
     }
 
+    // One bounded-concurrency batch of `inspectContainer` calls for the whole page's
+    // Uptime column, over every running container across every project at once — see
+    // `uptime.ts`'s own doc comment on why this is a single call here rather than one
+    // per app. Skipped entirely when Docker is unreachable (nothing to inspect) or for a
+    // viewer (who never sees `uptimeSince`), so this never spends a socket call a
+    // viewer's screen has no use for.
+    const uptimeMap =
+      detailed && dockerReachable
+        ? await oldestStartTimes(host, byProject)
+        : new Map<string, number>();
+
     // Bound concurrency to 4. Each cache miss spawns `docker compose config`, and on a
     // cold cache that's one Go binary per app simultaneously — thirty on this NAS. The
     // irony: we collapsed thirty Docker API calls into one above, then fan out thirty
@@ -570,12 +626,15 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
           if (!dockerReachable) {
             const status = { status: "unknown" as const, detail: "Docker is unreachable" };
             return detailed
-              ? toAdminApp(
-                  row,
-                  status,
-                  deployMap.get(row.id) ?? null,
-                  runningMap.get(row.id) ?? null,
-                )
+              ? toAdminApp(row, status, {
+                  lastDeployAt: deployMap.get(row.id) ?? null,
+                  runningJobId: runningMap.get(row.id) ?? null,
+                  exposureHostname: exposureMap.get(row.id) ?? null,
+                  // Docker is unreachable, so "how long has it been up" is unanswerable
+                  // right now — not the same fact as "it isn't running", but the same
+                  // honest `null` this column reports for both.
+                  uptimeSince: null,
+                })
               : toViewerApp(row, status);
           }
           const project = await currentProjectName({ host, composeConfig }, row);
@@ -585,7 +644,12 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
             byProject.get(project) ?? [],
           );
           return detailed
-            ? toAdminApp(row, status, deployMap.get(row.id) ?? null, runningMap.get(row.id) ?? null)
+            ? toAdminApp(row, status, {
+                lastDeployAt: deployMap.get(row.id) ?? null,
+                runningJobId: runningMap.get(row.id) ?? null,
+                exposureHostname: exposureMap.get(row.id) ?? null,
+                uptimeSince: uptimeMap.get(project) ?? null,
+              })
             : toViewerApp(row, status);
         }),
       );
@@ -601,11 +665,36 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     // Accepts a slug too — see `loadAppByIdOrSlug`'s doc comment.
     const row = await loadAppByIdOrSlug(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    const status = await statusFor({ host, composeConfig }, row);
+    // Resolved once, fed to both `statusFor` (so it does not call `listContainers`
+    // again itself) and `oldestStartTimes` — the same one-call-per-project shape the
+    // list route uses, just for a single app here. `statusFor`'s own try/catch is what
+    // handled a wedged Docker socket before this route ever called `listContainers`
+    // itself, so this keeps the same fallback rather than letting the fetch throw
+    // straight through as an uncaught 500: a `containers: undefined` still lets
+    // `statusFor` make its own attempt (and its own `unknown` fallback) exactly as it
+    // did when it was the only caller of `listContainers` here.
+    const project = await currentProjectName({ host, composeConfig }, row);
+    let containers: ContainerSummary[] | undefined;
+    let dockerReachable = true;
+    try {
+      containers = await host.listContainers({ project });
+    } catch {
+      dockerReachable = false;
+    }
+    const status = await statusFor({ host, composeConfig }, row, containers);
     if (!can(ctx, "app:config")) return toViewerApp(row, status);
     const deployMap = await deployTimestamps(db, [row.id]);
     const runningMap = await runningJobs(db, [row.id]);
-    return toAdminApp(row, status, deployMap.get(row.id) ?? null, runningMap.get(row.id) ?? null);
+    const exposureMap = await exposureHostnames(db, [row.id]);
+    const uptimeMap = dockerReachable
+      ? await oldestStartTimes(host, new Map([[project, containers ?? []]]))
+      : new Map<string, number>();
+    return toAdminApp(row, status, {
+      lastDeployAt: deployMap.get(row.id) ?? null,
+      runningJobId: runningMap.get(row.id) ?? null,
+      exposureHostname: exposureMap.get(row.id) ?? null,
+      uptimeSince: uptimeMap.get(project) ?? null,
+    });
   });
 
   app.patch("/api/apps/:id", async (request, reply) => {
@@ -665,10 +754,28 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     });
     const row = await loadApp(db, ctx, id);
     if (!row) return reply.code(404).send({ error: "not_found" });
-    const status = await statusFor({ host, composeConfig }, row);
+    // Same fallback as `GET /api/apps/:id` above — see its own comment.
+    const project = await currentProjectName({ host, composeConfig }, row);
+    let containers: ContainerSummary[] | undefined;
+    let dockerReachable = true;
+    try {
+      containers = await host.listContainers({ project });
+    } catch {
+      dockerReachable = false;
+    }
+    const status = await statusFor({ host, composeConfig }, row, containers);
     const deployMap = await deployTimestamps(db, [row.id]);
     const runningMap = await runningJobs(db, [row.id]);
-    return toAdminApp(row, status, deployMap.get(row.id) ?? null, runningMap.get(row.id) ?? null);
+    const exposureMap = await exposureHostnames(db, [row.id]);
+    const uptimeMap = dockerReachable
+      ? await oldestStartTimes(host, new Map([[project, containers ?? []]]))
+      : new Map<string, number>();
+    return toAdminApp(row, status, {
+      lastDeployAt: deployMap.get(row.id) ?? null,
+      runningJobId: runningMap.get(row.id) ?? null,
+      exposureHostname: exposureMap.get(row.id) ?? null,
+      uptimeSince: uptimeMap.get(project) ?? null,
+    });
   });
 
   app.delete("/api/apps/:id", async (request, reply) => {

@@ -67,7 +67,11 @@ describe("statusFor", () => {
       },
     ];
     // With the stored name the query matches nothing and this reads "down, 1 missing".
-    expect(await statusFor(d, row)).toEqual({ status: "up", detail: "1/1 services up" });
+    expect(await statusFor(d, row)).toEqual({
+      status: "up",
+      detail: "1/1 services up",
+      services: [{ name: "web", image: "nginx", restart: null, publishedPorts: [] }],
+    });
   });
 
   it("keeps raw compose stderr out of the viewer-facing field", async () => {
@@ -110,14 +114,22 @@ describe("statusFor", () => {
     const d = deps("media");
     const nowSeconds = Math.floor(Date.now() / 1000);
     const result = await statusFor(d, rowWithGrace(nowSeconds + 120));
-    expect(result).toEqual({ status: "starting", detail: "0/1 services up, 1 missing" });
+    expect(result).toEqual({
+      status: "starting",
+      detail: "0/1 services up, 1 missing",
+      services: [{ name: "web", image: "nginx", restart: null, publishedPorts: [] }],
+    });
   });
 
   it("reads down once the grace window has closed", async () => {
     const d = deps("media");
     const nowSeconds = Math.floor(Date.now() / 1000);
     const result = await statusFor(d, rowWithGrace(nowSeconds - 1));
-    expect(result).toEqual({ status: "down", detail: "0/1 services up, 1 missing" });
+    expect(result).toEqual({
+      status: "down",
+      detail: "0/1 services up, 1 missing",
+      services: [{ name: "web", image: "nginx", restart: null, publishedPorts: [] }],
+    });
   });
 
   it("does not report starting for a stack that is actually up, just because grace is open", async () => {

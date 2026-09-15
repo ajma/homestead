@@ -112,6 +112,9 @@ const app = (over: Partial<AdminApp> = {}): AdminApp => ({
   archivedAt: null,
   lastDeployAt: null,
   runningJobId: null,
+  exposureHostname: null,
+  uptimeSince: null,
+  ports: [],
   ...over,
 });
 
@@ -150,10 +153,10 @@ describe("AdminApps", () => {
     vi.restoreAllMocks();
   });
 
-  it("lists each app with its status and directory", async () => {
+  it("lists each app with its name and status", async () => {
     mount([app()]);
     expect(screen.getByText("Jellyfin")).toBeTruthy();
-    expect(screen.getByText(/jellyfin/)).toBeTruthy();
+    expect(screen.getByText("Healthy")).toBeTruthy();
   });
 
   it("uses the shared page shell's width cap, not the old 1024px max-w-5xl", () => {
@@ -252,6 +255,54 @@ describe("AdminApps", () => {
     expect(screen.getByText(/1m ago/)).toBeTruthy();
   });
 
+  describe("Uptime column", () => {
+    it("shows a dash for an app with no running container", async () => {
+      // `ports` is given a value here so the Ports column's own dash (also empty by
+      // default) cannot be mistaken for this one — each column's "absent" case is
+      // pinned by its own test below.
+      mount([app({ uptimeSince: null, ports: [80] })]);
+      expect(screen.getByText("—")).toBeTruthy();
+    });
+
+    it("shows how long the oldest running container has been up", async () => {
+      const now = Math.floor(Date.now() / 1000);
+      mount([app({ uptimeSince: now - 3600 })]);
+      expect(screen.getByText("1h")).toBeTruthy();
+    });
+  });
+
+  describe("Exposure column", () => {
+    it("says 'Not exposed' for an app with no exposure", async () => {
+      mount([app({ exposureHostname: null })]);
+      expect(screen.getByText("Not exposed")).toBeTruthy();
+    });
+
+    it("shows the hostname for an app that is exposed", async () => {
+      mount([app({ exposureHostname: "jellyfin.example.com" })]);
+      expect(screen.getByText("jellyfin.example.com")).toBeTruthy();
+    });
+  });
+
+  describe("Ports column", () => {
+    it("shows a dash for an app with no published ports", async () => {
+      const now = Math.floor(Date.now() / 1000);
+      // `uptimeSince` is given a value here so the Uptime column's own dash cannot be
+      // mistaken for this one.
+      mount([app({ ports: [], uptimeSince: now - 60 })]);
+      expect(screen.getByText("—")).toBeTruthy();
+    });
+
+    it("shows every published port, comma-separated", async () => {
+      mount([app({ ports: [22, 443, 8080] })]);
+      expect(screen.getByText("22, 443, 8080")).toBeTruthy();
+    });
+  });
+
+  it("no longer shows a Directory column", async () => {
+    mount([app({ directory: "jellyfin-data" })]);
+    expect(screen.queryByText("jellyfin-data")).toBeNull();
+  });
+
   it("does not claim a zero-services app is healthy", async () => {
     // `statusDetail` is null exactly when `statusFor` reports `unknown` — a probe that
     // never ran is not evidence of health, and the fallback must not say otherwise.
@@ -266,54 +317,107 @@ describe("AdminApps", () => {
   });
 
   describe("row actions", () => {
-    it("offers deploy, restart and a shortcut to the config editor", () => {
+    it("offers restart, a shortcut to the config editor, and no Deploy button", () => {
       stubRowFetch([app()]);
       mount([app()]);
-      expect(screen.getByRole("button", { name: "Deploy" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Restart" })).toBeTruthy();
-      const editorLink = screen.getByRole("link", { name: /Open in editor/ });
+      expect(screen.queryByRole("button", { name: "Deploy" })).toBeNull();
+      const editorLink = screen.getByRole("link", { name: "Open in editor" });
       expect(editorLink.getAttribute("href")).toBe("/apps/jellyfin/config");
     });
 
-    it("posts to the deploy action's own kind", async () => {
-      const started = stubRowFetch([app()]);
-      mount([app()]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
-
-      await waitFor(() => expect(started).toContain("up"));
+    it("gives every icon button a real accessible name", () => {
+      // Queried by role and name, not by test id: an icon-only control with no
+      // accessible name would fail every `getByRole(..., { name })` lookup in this
+      // file, but this is the one test whose whole point is that property.
+      stubRowFetch([app({ status: "up" })]);
+      mount([app({ status: "up" })]);
+      expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Restart" })).toBeTruthy();
+      expect(screen.getByRole("link", { name: "Open in editor" })).toBeTruthy();
     });
 
-    it("confirms before restarting, the one destructive row action", () => {
-      stubRowFetch([app()]);
+    describe("Start/Stop toggle", () => {
+      it("shows Start, not Stop, for a stopped app", () => {
+        stubRowFetch([app({ status: "down" })]);
+        mount([app({ status: "down" })]);
+        expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+      });
+
+      it("shows Stop, not Start, for a running app", () => {
+        stubRowFetch([app({ status: "up" })]);
+        mount([app({ status: "up" })]);
+        expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Start" })).toBeNull();
+      });
+
+      it("shows Stop for a degraded or starting app too — something is running", () => {
+        for (const status of ["degraded", "starting"] as const) {
+          const { unmount } = mount([app({ status })]);
+          expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+          expect(screen.queryByRole("button", { name: "Start" })).toBeNull();
+          unmount();
+        }
+      });
+
+      it("shows Start for an unknown-status app — nothing confirmed running", () => {
+        mount([app({ status: "unknown" })]);
+        expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+      });
+
+      it("posts to up when Start is clicked for a stopped app, without confirming", async () => {
+        const started = stubRowFetch([app({ status: "down" })]);
+        mount([app({ status: "down" })]);
+
+        fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+        expect(screen.queryByRole("dialog")).toBeNull();
+        await waitFor(() => expect(started).toContain("up"));
+      });
+
+      it("confirms before stopping, the one destructive row action", () => {
+        stubRowFetch([app({ status: "up" })]);
+        mount([app({ status: "up" })]);
+
+        fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+
+        const dialog = screen.getByRole("dialog");
+        expect(within(dialog).getByText(/Jellyfin/)).toBeTruthy();
+      });
+
+      it("does not post down when the stop confirmation is cancelled", () => {
+        const started = stubRowFetch([app({ status: "up" })]);
+        mount([app({ status: "up" })]);
+
+        fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+        const dialog = screen.getByRole("dialog");
+        fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+        expect(started).not.toContain("down");
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+
+      it("posts down once the stop is confirmed", async () => {
+        const started = stubRowFetch([app({ status: "up" })]);
+        mount([app({ status: "up" })]);
+
+        fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+        const dialog = screen.getByRole("dialog");
+        fireEvent.click(within(dialog).getByRole("button", { name: "Stop" }));
+
+        await waitFor(() => expect(started).toContain("down"));
+      });
+    });
+
+    it("posts to restart without confirming — unlike Stop, Restart does not open a dialog", async () => {
+      const started = stubRowFetch([app()]);
       mount([app()]);
 
       fireEvent.click(screen.getByRole("button", { name: "Restart" }));
 
-      const dialog = screen.getByRole("dialog");
-      expect(within(dialog).getByText(/Jellyfin/)).toBeTruthy();
-    });
-
-    it("does not post restart when the confirmation is cancelled", () => {
-      const started = stubRowFetch([app()]);
-      mount([app()]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
-      const dialog = screen.getByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-      expect(started).not.toContain("restart");
       expect(screen.queryByRole("dialog")).toBeNull();
-    });
-
-    it("posts restart once confirmed", async () => {
-      const started = stubRowFetch([app()]);
-      mount([app()]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
-      const dialog = screen.getByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("button", { name: "Restart" }));
-
       await waitFor(() => expect(started).toContain("restart"));
     });
 
@@ -328,7 +432,7 @@ describe("AdminApps", () => {
       mount([runningApp]);
 
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+        expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true),
       );
       expect(screen.getByRole("button", { name: "Restart" }).hasAttribute("disabled")).toBe(true);
     });
@@ -346,9 +450,7 @@ describe("AdminApps", () => {
       stubRowFetch(seed);
       mount(seed);
 
-      await waitFor(() =>
-        expect(screen.getAllByRole("button", { name: "Deploy" })).toHaveLength(3),
-      );
+      await waitFor(() => expect(screen.getAllByRole("button", { name: "Stop" })).toHaveLength(3));
       // Give any errant per-row `useJobs` fetch a chance to fire before asserting its
       // absence.
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -360,26 +462,27 @@ describe("AdminApps", () => {
     });
 
     it("disables a row's actions once one is started, until the job finishes", async () => {
-      stubRowFetch([app()], { up: [{ status: 202, body: { jobId: "j1" } }] });
+      stubRowFetch([app()], { restart: [{ status: 202, body: { jobId: "j1" } }] });
       mount([app()]);
 
-      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
 
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+        expect(screen.getByRole("button", { name: "Restart" }).hasAttribute("disabled")).toBe(true),
       );
     });
 
     it("invalidates only that app's key when a row action's job finishes, never the whole list", async () => {
       // The mistake 1E already made once: `adminAppsKey` is the Docker-touching endpoint
-      // (`GET /api/apps`, up to four `docker compose config` spawns). A row action must
-      // invalidate `adminAppKey(app.id)` — the same cache `ActionBar`'s own job-completion
-      // handler refreshes — and never the whole inventory list.
-      stubRowFetch([app()], { up: [{ status: 202, body: { jobId: "j1" } }] });
+      // (`GET /api/apps`, up to four `docker compose config` spawns plus a bounded batch
+      // of container inspects). A row action must invalidate `adminAppKey(app.id)` — the
+      // same cache `ActionBar`'s own job-completion handler refreshes — and never the
+      // whole inventory list.
+      stubRowFetch([app()], { restart: [{ status: 202, body: { jobId: "j1" } }] });
       const { client } = mount([app()]);
       const invalidateSpy = vi.spyOn(client, "invalidateQueries");
 
-      fireEvent.click(screen.getByRole("button", { name: "Deploy" }));
+      fireEvent.click(screen.getByRole("button", { name: "Restart" }));
 
       await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
 
@@ -397,15 +500,15 @@ describe("AdminApps", () => {
       // Since Task 2, `adminAppsKey` is the only cache holding `runningJobId` — nothing
       // else writes to it once a job finishes. Before this fix, a finished job's id
       // lingered in that cache: a remount inside the list's 15s `staleTime` re-read the
-      // dead id, re-disabled Deploy/Restart and re-opened a second `JobOutput` stream for
-      // a job that had already completed. This pins the fix without invalidating the
+      // dead id, re-disabled the row's actions and re-opened a second `JobOutput` stream
+      // for a job that had already completed. This pins the fix without invalidating the
       // whole-inventory rollup (the sibling test above already pins that it must not).
       const seeded = app({ runningJobId: "existing-job" });
       stubRowFetch([seeded]);
       const { client, unmount } = mount([seeded]);
 
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(true),
+        expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(true),
       );
 
       act(() => {
@@ -413,7 +516,7 @@ describe("AdminApps", () => {
       });
 
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(false),
+        expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(false),
       );
       expect(client.getQueryData<AdminApp[]>(adminAppsKey)?.[0]?.runningJobId).toBeNull();
 
@@ -427,7 +530,7 @@ describe("AdminApps", () => {
       );
 
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Deploy" }).hasAttribute("disabled")).toBe(false),
+        expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(false),
       );
       expect(FakeEventSource.instances).toHaveLength(1);
     });

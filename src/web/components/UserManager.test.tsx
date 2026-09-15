@@ -44,6 +44,9 @@ function app(over: Partial<AdminApp> = {}): AdminApp {
     archivedAt: null,
     lastDeployAt: null,
     runningJobId: null,
+    exposureHostname: null,
+    uptimeSince: null,
+    ports: [],
     ...over,
   };
 }

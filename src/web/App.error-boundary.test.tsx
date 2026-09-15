@@ -62,6 +62,9 @@ const jellyfin: AdminApp = {
   archivedAt: null,
   lastDeployAt: null,
   runningJobId: null,
+  exposureHostname: null,
+  uptimeSince: null,
+  ports: [],
 };
 
 function stubMe() {

@@ -110,6 +110,10 @@ function AppMetadata({ app, now }: { app: AdminApp; now: number }) {
         label="Last deploy"
         value={app.lastDeployAt === null ? "Never" : `${relativeTime(app.lastDeployAt, now)} ago`}
       />
+      <MetaRow
+        label="Uptime"
+        value={app.uptimeSince === null ? "Not running" : relativeTime(app.uptimeSince, now)}
+      />
     </div>
   );
 }

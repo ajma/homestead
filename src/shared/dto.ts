@@ -32,4 +32,11 @@ export type AdminApp = ViewerApp & {
   archivedAt: number | null;
   lastDeployAt: number | null;
   runningJobId: string | null;
+  /** The hostname this app is exposed at via Cloudflare, or `null` when it has none. */
+  exposureHostname: string | null;
+  /** Epoch seconds the oldest of this app's currently-running containers started at, or
+   *  `null` when the app is not running. */
+  uptimeSince: number | null;
+  /** Every port published across every service of this app, deduplicated, ascending. */
+  ports: number[];
 };

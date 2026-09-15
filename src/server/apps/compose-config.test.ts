@@ -1,4 +1,4 @@
-import { ComposeConfigCache } from "@server/apps/compose-config";
+import { ComposeConfigCache, collectPorts } from "@server/apps/compose-config";
 import { FakeHost } from "@server/test-helpers";
 import { describe, expect, it } from "vitest";
 
@@ -173,5 +173,33 @@ describe("ComposeConfigCache", () => {
     await cache.resolve(target);
     // The base compose.yaml is untouched, but the override changed.
     expect(host.composeCalls).toHaveLength(2);
+  });
+});
+
+function service(name: string, publishedPorts: number[]) {
+  return { name, image: null, restart: null, publishedPorts };
+}
+
+describe("collectPorts", () => {
+  it("collects ports from every service", () => {
+    expect(collectPorts([service("web", [8080]), service("db", [5432])])).toEqual([5432, 8080]);
+  });
+
+  it("deduplicates a port two services both publish", () => {
+    expect(collectPorts([service("web", [443]), service("sidecar", [443])])).toEqual([443]);
+  });
+
+  it("sorts ascending regardless of service order", () => {
+    expect(collectPorts([service("web", [9000, 80]), service("db", [443])])).toEqual([
+      80, 443, 9000,
+    ]);
+  });
+
+  it("returns an empty array for no services", () => {
+    expect(collectPorts([])).toEqual([]);
+  });
+
+  it("returns an empty array when no service publishes a port", () => {
+    expect(collectPorts([service("web", [])])).toEqual([]);
   });
 });

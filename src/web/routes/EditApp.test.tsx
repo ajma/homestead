@@ -31,6 +31,9 @@ const app: AdminApp = {
   archivedAt: null,
   lastDeployAt: null,
   runningJobId: null,
+  exposureHostname: null,
+  uptimeSince: null,
+  ports: [],
 };
 
 /**
@@ -341,6 +344,23 @@ describe("EditApp", () => {
       stubFetch(seedApp);
       mount("/apps/jellyfin/overview", seedApp);
       expect(within(screen.getByTestId("app-metadata")).getByText(/1m ago/)).toBeTruthy();
+    });
+
+    it("says 'Not running' for uptime when the app has no running container", () => {
+      const seedApp = { ...app, uptimeSince: null };
+      stubFetch(seedApp);
+      mount("/apps/jellyfin/overview", seedApp);
+      expect(within(screen.getByTestId("app-metadata")).getByText("Not running")).toBeTruthy();
+    });
+
+    it("shows how long the app has been up when it is running", () => {
+      const now = Math.floor(Date.now() / 1000);
+      const seedApp = { ...app, uptimeSince: now - 3600 };
+      stubFetch(seedApp);
+      mount("/apps/jellyfin/overview", seedApp);
+      // `relativeTime` returns a bare duration ("1h"), not a "... ago" phrase — this is
+      // "how long has it been up", not "how long ago did something happen".
+      expect(within(screen.getByTestId("app-metadata")).getByText("1h")).toBeTruthy();
     });
 
     it("is absent on mobile widths, where the action bar takes that space", () => {
