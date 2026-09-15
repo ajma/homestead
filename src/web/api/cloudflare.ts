@@ -310,11 +310,14 @@ export function useComposeServices(appId: string, enabled: boolean) {
 export type ExposeAppBody = {
   hostname: string;
   zoneId: string;
-  /** The compose service to route to, and the port it publishes — Task 4: the server
-   * constructs `http://localhost:<port>` itself and validates both against the app's own
-   * resolved compose file, rather than accepting a free-text URL (`routes/cloudflare-
-   * expose.ts`'s own comment on `exposeBody`). */
-  serviceName: string;
+  /** The port `cloudflared` should route to on `localhost` — no `serviceName` alongside
+   * it: the server builds `http://localhost:<port>` itself and no longer validates the
+   * port against any one compose service (see `exposeBody`'s own comment in
+   * `routes/cloudflare-expose.ts` for why — a `network_mode: host` app publishes no port
+   * a service-scoped check could ever pass against). The compose service is still shown
+   * in the port picker's own labels (`ExposureTab.tsx`), purely so the admin can tell
+   * which service is publishing which port; it is never sent here.
+   */
   port: number;
   /** Only sent for the app marked `systemKind: "self"` — see `exposeBody`'s own comment
    * in `routes/cloudflare-expose.ts` for why the server requires it only there. */
