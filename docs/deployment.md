@@ -272,8 +272,10 @@ container so the entrypoint reruns `pnpm install` into the `node_modules` volume
 ### Opening it
 
 `http://homestead-test.hippo-ule.ts.net:5173` — Vite's port, not the API's. The browser talks
-to Vite, which proxies `/api` to the server on port 3000 in the same network namespace (both
-share the host's, per `network_mode: host`). This is also why `HOMESTEAD_BASE_URL` in
+to Vite, which proxies `/api` to the server on its configured `PORT` (default `3000`; see §5)
+in the same network namespace (both share the host's, per `network_mode: host`). Vite reads
+the same `PORT` variable for its proxy target (`vite.config.ts`), so the two never disagree.
+This is also why `HOMESTEAD_BASE_URL` in
 `compose.dev.yaml` is set to that same Vite URL rather than the API's: Better-Auth compares
 the browser's `Origin` header against it and derives cookie security from its scheme, and the
 browser's address bar only ever shows the Vite URL in this deployment.
