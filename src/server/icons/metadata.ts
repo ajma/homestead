@@ -7,7 +7,7 @@ const METADATA_URL = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@ma
 
 const FETCH_TIMEOUT_MS = 10_000;
 
-// The real file is 1.15 MB. Anything past this is not the catalogue — a hostile or
+// The real file is 1.15 MB. Anything past this is not the catalog — a hostile or
 // broken CDN response — and buffering it is how an index becomes a memory-exhaustion
 // vector on a NAS. Checked on the bytes actually received, not a spoofable header.
 const MAX_METADATA_BYTES = 4 * 1024 * 1024;
@@ -155,7 +155,7 @@ export class IconMetadata {
 
   search(q: string, limit = 20): IconMeta[] {
     // A negative or fractional limit must never widen the result set. `slice(0, -1)`
-    // means "all but the last element" — on the full 3,238-entry catalogue that is
+    // means "all but the last element" — on the full 3,238-entry catalog that is
     // almost everything. Clamp before either return path.
     const boundedLimit = Math.max(0, Math.floor(limit));
     const needle = q.trim().toLowerCase();

@@ -15,7 +15,7 @@ describe("icon routes", () => {
     expect(res.json().icons[0].slug).toBe("jellyfin");
   });
 
-  it("requires authentication, so the catalogue is not an open endpoint", async () => {
+  it("requires authentication, so the catalog is not an open endpoint", async () => {
     const app = await buildTestApp();
     expect((await app.inject({ method: "GET", url: "/api/icons/search?q=a" })).statusCode).toBe(
       401,

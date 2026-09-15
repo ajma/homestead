@@ -97,7 +97,7 @@ await startServer({
 
     const iconMetadata = new IconMetadata({ cacheDir: config.iconCacheDir });
     const iconStore = new IconStore({ cacheDir: config.iconCacheDir, metadata: iconMetadata });
-    // Started, not awaited. The launcher needs the catalogue only for search and for
+    // Started, not awaited. The launcher needs the catalog only for search and for
     // resolving a slug — never to render a tile — so there is nothing to gain from holding
     // `listen` behind it. Measured against a black-holed network: awaiting this here left
     // the port closed for the full ten-second fetch timeout on every boot. `load()` already

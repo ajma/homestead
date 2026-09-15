@@ -1,8 +1,9 @@
 import type { AdminApp } from "@shared/dto";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { adminAppsKey } from "@web/api/admin";
-import { type CatalogueEntry, useCatalogue } from "@web/api/catalogue";
+import { type CatalogEntry, useCatalog } from "@web/api/catalog";
 import { ApiError, ApiTimeoutError, apiFetch } from "@web/api/client";
+import { AppIcon } from "@web/components/AppIcon";
 import { DialogShell } from "@web/components/DialogShell";
 import { IconPicker } from "@web/components/IconPicker";
 import { useState } from "react";
@@ -80,10 +81,10 @@ type CreatePayload = {
  * Keyword search over the three fields a browsing admin actually reads: name,
  * description, categories. Client-side, deliberately — the task brief is explicit that
  * fifty entries is small enough to filter in the browser, and building a server-side
- * search endpoint for this would be a second thing to keep in sync with the catalogue's
+ * search endpoint for this would be a second thing to keep in sync with the catalog's
  * own shape for no benefit anyone would notice.
  */
-function matchesQuery(entry: CatalogueEntry, query: string): boolean {
+function matchesQuery(entry: CatalogEntry, query: string): boolean {
   const needle = query.trim().toLowerCase();
   if (needle === "") return true;
   return (
@@ -115,20 +116,27 @@ function matchesQuery(entry: CatalogueEntry, query: string): boolean {
  * `setTimeout(fn, 0)`, so a `waitFor` whose first synchronous check lands in that window
  * would see the still-enabled button and report success before the request even started.
  *
- * Task 4 adds the other way in: browsing and keyword-searching the 50-entry app catalogue
- * (`GET /api/catalogue`, admin-only — see `src/server/routes/catalogue.ts`) and filling
+ * Task 4 adds the other way in: browsing and keyword-searching the 50-entry app catalog
+ * (`GET /api/catalog`, admin-only — see `src/server/routes/catalog.ts`) and filling
  * this SAME form from a chosen entry, rather than opening a second dialog or a second
  * create path. `iconRef` and `compose` start `null` and stay `null` for the blank flow —
  * the fields they gate (`Icon`, `Compose file`) render only once something has actually
  * set them, so starting blank looks and behaves exactly as it did before this task. Once
  * an entry is chosen, both fields are ordinary controlled state: nothing about the choice
- * is re-read from the catalogue at submit time, so editing them afterward is not a special
+ * is re-read from the catalog at submit time, so editing them afterward is not a special
  * case to preserve, it falls out of the same `useState`/`onChange` wiring every other
  * field already has.
  *
- * The catalogue itself is fetched only while the browse panel is open (`useCatalogue`'s
+ * The catalog itself is fetched only while the browse panel is open (`useCatalog`'s
  * `enabled` flag) — never imported, so its 50 compose bodies never enter this bundle. See
- * `src/web/api/catalogue.ts` and `src/shared/catalogue/index.ts`'s own doc comment.
+ * `src/web/api/catalog.ts` and `src/shared/catalog/index.ts`'s own doc comment.
+ *
+ * Each row renders its entry's icon through the same `AppIcon` every other screen uses
+ * (never a second path to `/api/icons/:file`), so a missing or unresolvable icon degrades
+ * to `AppIcon`'s own letter tile rather than a broken image. Opening the browse panel asks
+ * for up to 50 icons at once; `AppIcon`'s `<img loading="lazy">` already limits that to
+ * whatever is actually scrolled into view, which is why nothing here adds its own
+ * throttling or a virtualised list for fifty rows.
  */
 export function CreateAppDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -144,11 +152,9 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
   const [submitting, setSubmitting] = useState(false);
 
   const [browsing, setBrowsing] = useState(false);
-  const [catalogueQuery, setCatalogueQuery] = useState("");
-  const catalogue = useCatalogue(browsing);
-  const filteredCatalogue = (catalogue.data ?? []).filter((entry) =>
-    matchesQuery(entry, catalogueQuery),
-  );
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const catalog = useCatalog(browsing);
+  const filteredCatalog = (catalog.data ?? []).filter((entry) => matchesQuery(entry, catalogQuery));
 
   const mutation = useMutation({
     mutationFn: (payload: CreatePayload) =>
@@ -175,17 +181,17 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
    * `handleDirectoryChange` already enforces for the display-name mirror, extended to a
    * second source that can also set it.
    */
-  function handleSelectCatalogueEntry(entry: CatalogueEntry) {
+  function handleSelectCatalogEntry(entry: CatalogEntry) {
     setDisplayName(entry.name);
     setDescription(entry.description);
     setIconRef(entry.iconRef);
     setCompose(entry.compose);
     if (!directoryTouched) setDirectory(entry.slug);
     setBrowsing(false);
-    setCatalogueQuery("");
+    setCatalogQuery("");
   }
 
-  /** Discards a catalogue choice's icon and compose — the two fields that only exist
+  /** Discards a catalog choice's icon and compose — the two fields that only exist
    * once something has set them — without touching the rest of the form, which the user
    * may have already edited by hand. */
   function handleStartBlank() {
@@ -239,45 +245,46 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
           <div className="flex flex-col gap-3">
             <label className="flex flex-col gap-1 text-sm">
               <span className="font-medium text-slate-900 dark:text-slate-100">
-                Search the catalogue
+                Search the catalog
               </span>
               <input
                 type="search"
-                value={catalogueQuery}
-                onChange={(event) => setCatalogueQuery(event.target.value)}
+                value={catalogQuery}
+                onChange={(event) => setCatalogQuery(event.target.value)}
                 placeholder="Search by name, description or category…"
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
               />
             </label>
 
-            {catalogue.isPending && (
-              <p className="text-sm text-slate-500">Loading the catalogue…</p>
-            )}
-            {catalogue.isError && (
+            {catalog.isPending && <p className="text-sm text-slate-500">Loading the catalog…</p>}
+            {catalog.isError && (
               <p className="text-sm text-rose-600 dark:text-rose-400">
-                Could not load the catalogue.
+                Could not load the catalog.
               </p>
             )}
             {/* A search that matches nothing says so — an empty `<ul>` reads as broken,
              * not as "no results", to anyone who did not just read this component's
              * source. */}
-            {!catalogue.isPending && !catalogue.isError && filteredCatalogue.length === 0 && (
-              <p className="text-sm text-slate-500">No apps match “{catalogueQuery.trim()}”.</p>
+            {!catalog.isPending && !catalog.isError && filteredCatalog.length === 0 && (
+              <p className="text-sm text-slate-500">No apps match “{catalogQuery.trim()}”.</p>
             )}
 
             <ul className="flex flex-col gap-2">
-              {filteredCatalogue.map((entry) => (
+              {filteredCatalog.map((entry) => (
                 <li key={entry.slug}>
                   <button
                     type="button"
-                    onClick={() => handleSelectCatalogueEntry(entry)}
-                    className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm dark:border-slate-800"
+                    onClick={() => handleSelectCatalogEntry(entry)}
+                    className="flex w-full items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 text-left text-sm dark:border-slate-800"
                   >
-                    <span className="font-medium text-slate-900 dark:text-slate-100">
-                      {entry.name}
-                    </span>
-                    <span className="text-xs text-slate-500 dark:text-slate-400">
-                      {entry.description}
+                    <AppIcon iconRef={entry.iconRef} displayName={entry.name} size="sm" />
+                    <span className="flex min-w-0 flex-col items-start gap-0.5">
+                      <span className="font-medium text-slate-900 dark:text-slate-100">
+                        {entry.name}
+                      </span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {entry.description}
+                      </span>
                     </span>
                   </button>
                 </li>
@@ -300,7 +307,7 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
                 onClick={() => setBrowsing(true)}
                 className="text-left text-sm font-medium text-slate-600 underline dark:text-slate-300"
               >
-                Browse the catalogue…
+                Browse the catalog…
               </button>
               {compose !== null && (
                 <button
@@ -357,7 +364,7 @@ export function CreateAppDialog({ onClose }: { onClose: () => void }) {
               />
             </label>
 
-            {/* Icon and Compose file only appear once a catalogue entry has set them —
+            {/* Icon and Compose file only appear once a catalog entry has set them —
              * the blank flow never renders either, so it looks and behaves exactly as it
              * did before this task. Both remain ordinary controlled fields afterward. */}
             {compose !== null && (

@@ -13,7 +13,7 @@ async function loaded(cacheDir: string) {
     fetchImpl: (async () =>
       new Response(
         JSON.stringify({
-          // Most of the catalogue offers only the default rendering — no light/dark
+          // Most of the catalog offers only the default rendering — no light/dark
           // art — which is the majority case the variant check exists to reject.
           jellyfin: { base: ["svg"], aliases: [] },
           // A second icon that genuinely offers both, for the tests that exercise a

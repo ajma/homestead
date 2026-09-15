@@ -15,13 +15,13 @@ type IconResult = { slug: string; aliases: string[] };
 const DEBOUNCE_MS = 250;
 
 /**
- * A search over the 3,238-entry dashboard-icons catalogue, proxied through
+ * A search over the 3,238-entry dashboard-icons catalog, proxied through
  * `GET /api/icons/search` so the browser never talks to the CDN directly (see
  * `AppIcon`'s own comment on why). Built for `OverviewTab`'s icon field, but the
  * `{ value, onChange }` shape has no dependency on `AdminApp` — a plain controlled input
  * over a nullable icon slug.
  *
- * The query is only sent once the field is non-empty. The catalogue is too large to page
+ * The query is only sent once the field is non-empty. The catalog is too large to page
  * through usefully, and most edits never touch this control at all, so a default page
  * fetched on mount would be a request paid by every visit for a result almost nobody
  * looks at.

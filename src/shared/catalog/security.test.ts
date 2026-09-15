@@ -1,21 +1,21 @@
 /**
- * Guards the catalogue against the class of defect found in the app-catalogue security
+ * Guards the catalog against the class of defect found in the app-catalog security
  * review: a literal, invented value in `compose` that is credential-shaped (a password,
  * secret, token, API key, or app-encryption key) or is a placeholder word like
  * `changeme` — either way, something a real deployer would ship unchanged, because
- * shipping a catalogue entry as-is is the entire point of a catalogue. Also guards
+ * shipping a catalog entry as-is is the entire point of a catalog. Also guards
  * against a `SIGNUPS_ALLOWED`-style open-registration flag defaulting to on, and against
  * a security-relevant flag (secure-cookie, TLS-required, certificate-verification —
  * `N8N_SECURE_COOKIE`-shaped) shipped disabled by default. Homestead's whole purpose is
  * putting apps on the internet through a tunnel, so an insecure flag someone never
  * revisits is a real, ongoing cost — the fix for a first-run friction problem like "no
  * HTTPS on my LAN" belongs in the entry's description, told to the person who hits the
- * failure, not in a value the catalogue ships pre-weakened.
+ * failure, not in a value the catalog ships pre-weakened.
  *
  * What this does NOT catch, by design of a regex-shaped "reasonable core" rather than a
  * real compose/URL parser: a credential embedded inside a connection-string VALUE under
  * an innocuous key (e.g. `DATABASE_URL=postgres://user:secret@host/db` or
- * `PHOTOVIEW_MYSQL_URL=user:pass@tcp(host)/db`). Two entries in the catalogue today
+ * `PHOTOVIEW_MYSQL_URL=user:pass@tcp(host)/db`). Two entries in the catalog today
  * (`miniflux`, `photoview`) have exactly this shape — see `ACKNOWLEDGED_LITERALS` below,
  * where the same value is caught under its sibling `POSTGRES_PASSWORD` /
  * `MARIADB_PASSWORD` key instead. A future entry that embeds a *new* secret only inside
@@ -30,7 +30,7 @@
 
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
-import { CATALOGUE } from "./index.js";
+import { CATALOG } from "./index.js";
 
 type ComposeDoc = { services?: Record<string, { environment?: unknown }> };
 
@@ -42,7 +42,7 @@ interface EnvEntry {
 
 /** Every `KEY=VALUE` environment entry across every service in a compose document.
  * Handles both compose's list form (`environment: ["KEY=VALUE"]`, what every entry in
- * this catalogue uses today) and its map form (`environment: {KEY: VALUE}`), since
+ * this catalog uses today) and its map form (`environment: {KEY: VALUE}`), since
  * either is valid compose and a future entry is free to use the other. A list item with
  * no `=` (`"KEY"`, meaning "inherit from the host shell") carries no value to check and
  * is skipped. */
@@ -92,12 +92,12 @@ const TRUTHY_VALUE = /^(?:true|yes|1|on)$/i;
 
 /** A key naming a flag that governs whether the app requires HTTPS/TLS for something
  * security-relevant: a secure-cookie flag, a "TLS required" toggle, a certificate
- * verification flag. Checked against all 50 entries in the catalogue as of this writing
+ * verification flag. Checked against all 50 entries in the catalog as of this writing
  * (see the n8n fix this guard was added for) — `N8N_SECURE_COOKIE` is the only key in
- * the whole catalogue this pattern, or even the broader `SECURE|COOKIE|TLS|SSL|HTTPS|
+ * the whole catalog this pattern, or even the broader `SECURE|COOKIE|TLS|SSL|HTTPS|
  * VERIFY` superset, matches. Bare `SECURE` is intentionally in the core (not just
  * `SECURE_COOKIE`) so a same-shaped flag under another app's own naming still gets
- * caught; re-run the same check against the full catalogue before loosening it further,
+ * caught; re-run the same check against the full catalog before loosening it further,
  * since a broader net over 50 free-form compose blocks risks catching an unrelated key. */
 const INSECURE_FLAG_KEY_PATTERN =
   /SECURE_COOKIE|COOKIE_SECURE|SECURE|TLS_REQUIRED|REQUIRE_HTTPS|VERIFY_SSL/i;
@@ -125,7 +125,7 @@ interface AcknowledgedLiteral {
  * (neither publishes a port), and identical to no other entry's password by accident —
  * it's simply the same fixed value on both sides of one entry's own link. Blanking it,
  * the way `APP_KEY`-style entries were fixed, would break `docker compose up` outright,
- * which the catalogue's own rules treat as worse than shipping the entry at all. Giving
+ * which the catalog's own rules treat as worse than shipping the entry at all. Giving
  * every install a genuinely unique value needs per-install secret generation at create
  * time — real machinery, not a JSON edit — and is tracked as follow-up work, not fixed
  * here. Remove a row the day its entry gets that treatment.
@@ -247,14 +247,14 @@ function violationsFor(entry: EnvEntry): string[] {
   return reasons;
 }
 
-describe("catalogue security guard", () => {
+describe("catalog security guard", () => {
   it("has no un-acknowledged credential-shaped literal in any entry's compose", () => {
     const failures: string[] = [];
-    for (const catalogueEntry of CATALOGUE) {
-      for (const envEntry of envEntriesOf(catalogueEntry.compose)) {
-        if (isAcknowledged(catalogueEntry.slug, envEntry.key)) continue;
+    for (const catalogEntry of CATALOG) {
+      for (const envEntry of envEntriesOf(catalogEntry.compose)) {
+        if (isAcknowledged(catalogEntry.slug, envEntry.key)) continue;
         for (const reason of violationsFor(envEntry)) {
-          failures.push(`${catalogueEntry.slug} [${envEntry.service}]: ${reason}`);
+          failures.push(`${catalogEntry.slug} [${envEntry.service}]: ${reason}`);
         }
       }
     }
@@ -263,7 +263,7 @@ describe("catalogue security guard", () => {
 
   it("every acknowledged literal still points at something real, so the list can't rot", () => {
     for (const acknowledged of ACKNOWLEDGED_LITERALS) {
-      const entry = CATALOGUE.find((candidate) => candidate.slug === acknowledged.slug);
+      const entry = CATALOG.find((candidate) => candidate.slug === acknowledged.slug);
       expect(entry, `acknowledged slug "${acknowledged.slug}" no longer exists`).toBeTruthy();
       if (!entry) continue;
       const stillPresent = envEntriesOf(entry.compose).some((e) => e.key === acknowledged.key);
@@ -277,11 +277,11 @@ describe("catalogue security guard", () => {
 
   it("has no un-acknowledged insecure security-flag default in any entry's compose", () => {
     const failures: string[] = [];
-    for (const catalogueEntry of CATALOGUE) {
-      for (const envEntry of envEntriesOf(catalogueEntry.compose)) {
-        if (isInsecureFlagAcknowledged(catalogueEntry.slug, envEntry.key)) continue;
+    for (const catalogEntry of CATALOG) {
+      for (const envEntry of envEntriesOf(catalogEntry.compose)) {
+        if (isInsecureFlagAcknowledged(catalogEntry.slug, envEntry.key)) continue;
         for (const reason of insecureFlagViolationsFor(envEntry)) {
-          failures.push(`${catalogueEntry.slug} [${envEntry.service}]: ${reason}`);
+          failures.push(`${catalogEntry.slug} [${envEntry.service}]: ${reason}`);
         }
       }
     }
@@ -290,7 +290,7 @@ describe("catalogue security guard", () => {
 
   it("every acknowledged insecure flag still points at something real, so the list can't rot", () => {
     for (const acknowledged of ACKNOWLEDGED_INSECURE_FLAGS) {
-      const entry = CATALOGUE.find((candidate) => candidate.slug === acknowledged.slug);
+      const entry = CATALOG.find((candidate) => candidate.slug === acknowledged.slug);
       expect(entry, `acknowledged slug "${acknowledged.slug}" no longer exists`).toBeTruthy();
       if (!entry) continue;
       const stillPresent = envEntriesOf(entry.compose).some((e) => e.key === acknowledged.key);

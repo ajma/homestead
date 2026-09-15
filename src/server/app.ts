@@ -24,7 +24,7 @@ import type { IconMetadata } from "./icons/metadata.js";
 import type { IconStore } from "./icons/store.js";
 import type { Scheduler } from "./monitoring/scheduler.js";
 import { appRoutes } from "./routes/apps.js";
-import { catalogueRoutes } from "./routes/catalogue.js";
+import { catalogRoutes } from "./routes/catalog.js";
 import { cloudflareRoutes } from "./routes/cloudflare.js";
 import { cloudflareExposeRoutes } from "./routes/cloudflare-expose.js";
 import { cloudflareTunnelRoutes } from "./routes/cloudflare-tunnel.js";
@@ -416,7 +416,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   await app.register(healthRoutes);
   await app.register(userRoutes);
   await app.register(appRoutes);
-  await app.register(catalogueRoutes);
+  await app.register(catalogRoutes);
   await app.register(jobRoutes);
   await app.register(logRoutes);
   await app.register(containerRoutes);
