@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { apps, jobs } from "@server/db/schema";
+import { apps, exposures, jobs } from "@server/db/schema";
 import { buildTestApp, createViewer, fakeSelfMountinfo, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
@@ -1404,5 +1404,192 @@ describe("app inventory API", () => {
     expect(listApp.status).toBe("up");
     expect(listApp.statusDetail).toBe("1/1 services up");
     await app.close();
+  });
+
+  describe("ports on GET /api/apps", () => {
+    it("collects every published port across every service, deduplicated and sorted", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      app.deps.host.files.set("media/compose.yaml", "services: {}\n");
+      app.deps.host.composeResults.set("config --format json", {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          name: "media",
+          services: {
+            web: { image: "nginx", ports: [{ published: 8080 }, { published: 443 }] },
+            db: { image: "postgres", ports: [{ published: 443 }, { published: 22 }] },
+          },
+        }),
+        stderr: "",
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/apps/adopt",
+        headers: { cookie },
+        payload: { directories: ["media"] },
+      });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].ports).toEqual([22, 443, 8080]);
+      await app.close();
+    });
+
+    it("is empty for an app whose services publish no ports", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      const found = res.json().find((a: { id: string }) => a.id === id);
+      expect(found.ports).toEqual([]);
+    });
+
+    it("is absent from the viewer DTO", async () => {
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.json()[0]).not.toHaveProperty("ports");
+      await app.close();
+    });
+  });
+
+  describe("exposureHostname on GET /api/apps", () => {
+    it("reports the hostname for an app that is exposed", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      await app.deps.db.insert(exposures).values({
+        id: ulid(),
+        appId: id,
+        hostname: "media.example.com",
+        ingressService: "http://web:80",
+      });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].exposureHostname).toBe("media.example.com");
+      await app.close();
+    });
+
+    it("is null for an app with no exposure", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      await adoptOne(app, cookie);
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      expect(res.json()[0].exposureHostname).toBeNull();
+      await app.close();
+    });
+
+    it("is absent from the viewer DTO even while the app is exposed", async () => {
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, adminCookie);
+      await app.deps.db.insert(exposures).values({
+        id: ulid(),
+        appId: id,
+        hostname: "media.example.com",
+        ingressService: "http://web:80",
+      });
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.json()[0]).not.toHaveProperty("exposureHostname");
+      await app.close();
+    });
+
+    it("never issues its query for a viewer", async () => {
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const selectSpy = vi.spyOn(app.deps.db, "select");
+      await app.inject({ method: "GET", url: "/api/apps", headers: { cookie: viewer.cookie } });
+      const ranExposureQuery = selectSpy.mock.calls.some(
+        (call) => call[0] !== undefined && "appId" in call[0] && "hostname" in call[0],
+      );
+      selectSpy.mockRestore();
+
+      expect(ranExposureQuery).toBe(false);
+      await app.close();
+    });
+  });
+
+  describe("uptimeSince on GET /api/apps", () => {
+    it("reports the oldest running container's start time", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      app.deps.host.containers = [
+        {
+          id: "c1",
+          names: ["a-web-1"],
+          image: "nginx",
+          state: "running",
+          status: "Up",
+          project: "a",
+          service: "web",
+          labels: {},
+        },
+      ];
+      app.deps.host.inspected.set("c1", {
+        id: "c1",
+        name: "a-web-1",
+        image: "nginx",
+        imageDigest: null,
+        state: "running",
+        exitCode: null,
+        oomKilled: false,
+        startedAt: "2024-01-01T00:00:00.000Z",
+        finishedAt: null,
+        restartPolicy: "no",
+        restartCount: 0,
+        tty: false,
+        env: [],
+        mounts: [],
+        ports: [],
+        networks: [],
+        health: null,
+      });
+
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      const found = res.json().find((a: { id: string }) => a.id === id);
+      expect(found.uptimeSince).toBe(Math.floor(Date.parse("2024-01-01T00:00:00.000Z") / 1000));
+      await app.close();
+    });
+
+    it("is null for an app that is not running", async () => {
+      const app = await buildTestApp();
+      const { cookie } = await signUpAdmin(app);
+      const id = await adoptOne(app, cookie);
+      const res = await app.inject({ method: "GET", url: "/api/apps", headers: { cookie } });
+      const found = res.json().find((a: { id: string }) => a.id === id);
+      expect(found.uptimeSince).toBeNull();
+      await app.close();
+    });
+
+    it("is absent from the viewer DTO", async () => {
+      const app = await buildTestApp();
+      const { cookie: adminCookie } = await signUpAdmin(app);
+      await adoptOne(app, adminCookie);
+      const viewer = await createViewer(app, adminCookie);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/apps",
+        headers: { cookie: viewer.cookie },
+      });
+      expect(res.json()[0]).not.toHaveProperty("uptimeSince");
+      await app.close();
+    });
   });
 });

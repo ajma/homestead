@@ -409,6 +409,9 @@ describe("SetupWizard", () => {
         archivedAt: null,
         lastDeployAt: null,
         runningJobId: null,
+        exposureHostname: null,
+        uptimeSince: null,
+        ports: [],
         ...over,
       };
     }

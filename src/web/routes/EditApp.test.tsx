@@ -31,6 +31,9 @@ const app: AdminApp = {
   archivedAt: null,
   lastDeployAt: null,
   runningJobId: null,
+  exposureHostname: null,
+  uptimeSince: null,
+  ports: [],
 };
 
 /**

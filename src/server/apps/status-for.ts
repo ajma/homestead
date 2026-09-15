@@ -67,9 +67,9 @@ export async function statusFor(
     // configuration problem grace has nothing to do with.
     const stillFailing = rolled.status !== "up" && rolled.status !== "unknown";
     if (stillFailing && inGraceWindow(row.graceUntil, Math.floor(Date.now() / 1000))) {
-      return { status: "starting", detail: rolled.detail };
+      return { status: "starting", detail: rolled.detail, services: resolved.resolved.services };
     }
-    return rolled;
+    return { ...rolled, services: resolved.resolved.services };
   } catch (error) {
     // The compose root is an SMB share the user edits over SSH, so a renamed or moved
     // file is ordinary operation, not an exception worth a 500.

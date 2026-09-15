@@ -9,6 +9,17 @@ export type ResolvedService = {
 
 export type ResolvedCompose = { projectName: string; services: ResolvedService[] };
 
+/**
+ * Every port published across every service of one app, deduplicated, in a stable
+ * (ascending numeric) order. Built for the inventory's Ports column, which shows one
+ * app's exposure surface as a whole rather than per-service — a compose file's own
+ * service ordering is not a meaningful order to a human scanning a ports column, and
+ * two services publishing the same port (a shared sidecar pattern) must not repeat it.
+ */
+export function collectPorts(services: ResolvedService[]): number[] {
+  return [...new Set(services.flatMap((service) => service.publishedPorts))].sort((a, b) => a - b);
+}
+
 export type ComposeValidation =
   | { valid: true; resolved: ResolvedCompose }
   | { valid: false; message: string };

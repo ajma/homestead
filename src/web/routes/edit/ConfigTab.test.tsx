@@ -38,6 +38,9 @@ const app: AdminApp = {
   archivedAt: null,
   lastDeployAt: null,
   runningJobId: null,
+  exposureHostname: null,
+  uptimeSince: null,
+  ports: [],
 };
 
 const ORIGINAL = "services:\n  web:\n    image: nginx\n";
