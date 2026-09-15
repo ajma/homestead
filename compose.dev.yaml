@@ -59,6 +59,12 @@ services:
 
       HOMESTEAD_COMPOSE_ROOT: "${HOMESTEAD_COMPOSE_ROOT:-/opt/stacks}"
 
+      # The API's own listen port (src/server/config.ts). Vite's dev server reads the same
+      # variable for its proxy target (vite.config.ts), so the two can never disagree.
+      # Unset here in ordinary local development; set on the host/`.env` to move the API off
+      # 3000 without touching this file.
+      PORT: "${PORT:-3000}"
+
       # The URL actually typed into the browser's address bar — Vite's port, not the API's.
       # Better-Auth compares the browser's Origin header against this and derives cookie
       # security (the Secure flag) from its scheme. In this deployment the browser only ever
