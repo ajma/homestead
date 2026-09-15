@@ -118,6 +118,19 @@ const app = (over: Partial<AdminApp> = {}): AdminApp => ({
   ...over,
 });
 
+/**
+ * Row order as rendered — read off each row's own `<p>` (the name, plus any System/
+ * Hidden badge), not off `seed`, so a test can tell the rendered DOM apart from the
+ * data it started from. Deliberately not the whole `<a>`: `AppIcon`'s icon-less fallback
+ * renders the name's first letter as a sibling `aria-hidden` div inside that same link,
+ * which would double up as "NNine" for an app named "Nine".
+ */
+function rowNames(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll("tbody tr")).map(
+    (row) => row.querySelector("a p")?.textContent?.trim() ?? "",
+  );
+}
+
 function mount(seed?: AdminApp[]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (seed) client.setQueryData(adminAppsKey, seed);
@@ -533,6 +546,159 @@ describe("AdminApps", () => {
         expect(screen.getByRole("button", { name: "Stop" }).hasAttribute("disabled")).toBe(false),
       );
       expect(FakeEventSource.instances).toHaveLength(1);
+    });
+  });
+
+  describe("sorting", () => {
+    it("shows apps in the order the API returned them until a header is clicked", () => {
+      const { container } = mount([
+        app({ id: "a1", displayName: "Zeta" }),
+        app({ id: "a2", displayName: "Alpha" }),
+        app({ id: "a3", displayName: "Mimas" }),
+      ]);
+      expect(rowNames(container)).toEqual(["Zeta", "Alpha", "Mimas"]);
+    });
+
+    it("sorts ascending on the first click, reverses on the second, and a different column starts ascending again", () => {
+      // Severity order (Alpha=down, Gamma=degraded, Beta=up) deliberately disagrees with
+      // alphabetical order past the first entry, so a stuck sort key — still comparing
+      // by name after Status is clicked — could not produce the expected result by luck.
+      const { container } = mount([
+        app({ id: "a1", displayName: "Beta", status: "up" }),
+        app({ id: "a2", displayName: "Alpha", status: "down" }),
+        app({ id: "a3", displayName: "Gamma", status: "degraded" }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "App" }));
+      expect(rowNames(container)).toEqual(["Alpha", "Beta", "Gamma"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "App" }));
+      expect(rowNames(container)).toEqual(["Gamma", "Beta", "Alpha"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Status" }));
+      expect(rowNames(container)).toEqual(["Alpha", "Gamma", "Beta"]);
+    });
+
+    it("orders the App column alphabetically, not by raw character code", () => {
+      // Naive `<` comparison sorts by UTF-16 code unit, putting every uppercase letter
+      // before every lowercase one — "Banana" before "apple". `localeCompare` doesn't.
+      const { container } = mount([
+        app({ id: "a1", displayName: "cherry" }),
+        app({ id: "a2", displayName: "Banana" }),
+        app({ id: "a3", displayName: "apple" }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "App" }));
+      expect(rowNames(container)).toEqual(["apple", "Banana", "cherry"]);
+    });
+
+    it("orders Status by severity, not alphabetically, surfacing what needs attention first", () => {
+      // Alphabetical order over the status strings themselves would read "degraded,
+      // down, starting, unknown, up" — differing from the expected order only in the
+      // first two entries, so this is the minimal data that tells the two apart.
+      const { container } = mount([
+        app({ id: "a1", displayName: "Healthy", status: "up" }),
+        app({ id: "a2", displayName: "Unknown", status: "unknown" }),
+        app({ id: "a3", displayName: "Starting", status: "starting" }),
+        app({ id: "a4", displayName: "Degraded", status: "degraded" }),
+        app({ id: "a5", displayName: "Down", status: "down" }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Status" }));
+      expect(rowNames(container)).toEqual(["Down", "Degraded", "Starting", "Unknown", "Healthy"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Status" }));
+      expect(rowNames(container)).toEqual(["Healthy", "Unknown", "Starting", "Degraded", "Down"]);
+    });
+
+    it("orders Uptime numerically, not as strings, and puts stopped apps last in both directions", () => {
+      // [9, 10, 80] as strings sorts "10", "80", "9" — the classic trap.
+      const { container } = mount([
+        app({ id: "a1", displayName: "Eighty", uptimeSince: 80 }),
+        app({ id: "a2", displayName: "Nine", uptimeSince: 9 }),
+        app({ id: "a3", displayName: "Ten", uptimeSince: 10 }),
+        app({ id: "a4", displayName: "Stopped", uptimeSince: null }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Uptime" }));
+      expect(rowNames(container)).toEqual(["Nine", "Ten", "Eighty", "Stopped"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Uptime" }));
+      expect(rowNames(container)).toEqual(["Eighty", "Ten", "Nine", "Stopped"]);
+    });
+
+    it("orders Exposure alphabetically by hostname, and puts unexposed apps last in both directions", () => {
+      const { container } = mount([
+        app({ id: "a1", displayName: "Zulu", exposureHostname: "zulu.example.com" }),
+        app({ id: "a2", displayName: "Alpha", exposureHostname: "alpha.example.com" }),
+        app({ id: "a3", displayName: "NotExposed", exposureHostname: null }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Exposure" }));
+      expect(rowNames(container)).toEqual(["Alpha", "Zulu", "NotExposed"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Exposure" }));
+      expect(rowNames(container)).toEqual(["Zulu", "Alpha", "NotExposed"]);
+    });
+
+    it("orders Ports by an app's lowest published port, numerically, and puts port-less apps last in both directions", () => {
+      // Each app has several ports; the lowest of each set is 9, 10 and 80 — the same
+      // [9, 10, 80] trap, now behind a `Math.min` over an array instead of a bare field.
+      const { container } = mount([
+        app({ id: "a1", displayName: "Eighty", ports: [80, 8080] }),
+        app({ id: "a2", displayName: "Nine", ports: [9000, 9] }),
+        app({ id: "a3", displayName: "Ten", ports: [10] }),
+        app({ id: "a4", displayName: "NoPorts", ports: [] }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Ports" }));
+      expect(rowNames(container)).toEqual(["Nine", "Ten", "Eighty", "NoPorts"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Ports" }));
+      expect(rowNames(container)).toEqual(["Eighty", "Ten", "Nine", "NoPorts"]);
+    });
+
+    it("orders Last deploy numerically, not as strings, and puts never-deployed apps last in both directions", () => {
+      const { container } = mount([
+        app({ id: "a1", displayName: "Eighty", lastDeployAt: 80 }),
+        app({ id: "a2", displayName: "Nine", lastDeployAt: 9 }),
+        app({ id: "a3", displayName: "Ten", lastDeployAt: 10 }),
+        app({ id: "a4", displayName: "Never", lastDeployAt: null }),
+      ]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Last deploy" }));
+      expect(rowNames(container)).toEqual(["Nine", "Ten", "Eighty", "Never"]);
+
+      fireEvent.click(screen.getByRole("button", { name: "Last deploy" }));
+      expect(rowNames(container)).toEqual(["Eighty", "Ten", "Nine", "Never"]);
+    });
+
+    it("reflects sort state in aria-sort on the sorted header, and 'none' on the rest", () => {
+      mount([app({ id: "a1" }), app({ id: "a2", displayName: "Other" })]);
+
+      const appHeader = screen.getByRole("columnheader", { name: "App" });
+      const statusHeader = screen.getByRole("columnheader", { name: "Status" });
+      expect(appHeader.getAttribute("aria-sort")).toBe("none");
+      expect(statusHeader.getAttribute("aria-sort")).toBe("none");
+
+      fireEvent.click(screen.getByRole("button", { name: "App" }));
+      expect(appHeader.getAttribute("aria-sort")).toBe("ascending");
+      expect(statusHeader.getAttribute("aria-sort")).toBe("none");
+
+      fireEvent.click(screen.getByRole("button", { name: "App" }));
+      expect(appHeader.getAttribute("aria-sort")).toBe("descending");
+    });
+
+    it("puts a real <button> in every sortable header, keyboard-reachable, and none in Actions", () => {
+      mount([app()]);
+
+      for (const label of ["App", "Status", "Uptime", "Exposure", "Ports", "Last deploy"]) {
+        const header = screen.getByRole("columnheader", { name: label });
+        expect(within(header).getByRole("button", { name: label }).tagName).toBe("BUTTON");
+      }
+
+      const actionsHeader = screen.getByRole("columnheader", { name: "Actions" });
+      expect(within(actionsHeader).queryByRole("button")).toBeNull();
     });
   });
 });

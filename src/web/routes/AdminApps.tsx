@@ -1,4 +1,5 @@
 import type { AdminApp } from "@shared/dto";
+import { SEVERITY } from "@shared/status-phrase";
 import type { AppStatus } from "@shared/types";
 import { useAdminApps } from "@web/api/admin";
 import { AppIcon } from "@web/components/AppIcon";
@@ -234,10 +235,151 @@ function RowActions({ app }: { app: AdminApp }) {
   );
 }
 
+/** Every sortable column. `actions` is deliberately excluded — a row's buttons have no
+ *  natural order. */
+type SortKey = "app" | "status" | "uptime" | "exposure" | "ports" | "lastDeploy";
+
+type SortState = { key: SortKey; direction: "asc" | "desc" };
+
+/**
+ * Nulls always sort last, in both directions — an app that is stopped has no uptime, one
+ * that is not exposed has no hostname, one with no published ports has no ports, and one
+ * never deployed has no deploy date. Sorting those naturally would open "sort by uptime"
+ * on a screen of dashes, the opposite of useful. `ascending` only ever flips the
+ * *non-null* comparison; the null placement itself is direction-invariant, which is why
+ * this doesn't just sort ascending and `.reverse()` the whole array (that would carry
+ * nulls back to the front on the way down).
+ */
+function compareWithNullsLast<T>(
+  a: T | null,
+  b: T | null,
+  ascending: boolean,
+  compareValues: (x: T, y: T) => number,
+): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  const result = compareValues(a, b);
+  return ascending ? result : -result;
+}
+
+/** An app publishes several ports; the lowest is the one a person scans for. `ports` is
+ *  already deduplicated ascending (see `AdminApp`'s own doc comment), so `[0]` would do,
+ *  but `Math.min` doesn't depend on that upstream guarantee holding forever. */
+function lowestPort(ports: number[]): number | null {
+  return ports.length === 0 ? null : Math.min(...ports);
+}
+
+/**
+ * One comparator per sortable column, each already encoding what "ascending" means for
+ * its own domain — not always "the raw value, low to high, first" (see `status` below).
+ * `ascending` is passed in rather than applied by the caller afterwards, so nulls-last
+ * placement (`compareWithNullsLast`) stays direction-invariant while everything else
+ * about the comparison still flips.
+ */
+const SORT_COMPARATORS: Record<SortKey, (a: AdminApp, b: AdminApp, ascending: boolean) => number> =
+  {
+    app: (a, b, ascending) => {
+      const result = a.displayName.localeCompare(b.displayName);
+      return ascending ? result : -result;
+    },
+    // Worst-wins severity (`SEVERITY`, from `status-phrase.ts` — the same ranking
+    // `rollUpProbes` uses to pick which probe names an app's status), not alphabetical:
+    // alphabetical order ("degraded, down, starting, unknown, up") is meaningless.
+    // Ascending is defined as *most* severe first, so the very first click on this
+    // column surfaces what needs attention, matching every other column's "click once,
+    // see something useful" contract.
+    status: (a, b, ascending) => {
+      const result = SEVERITY[b.status] - SEVERITY[a.status];
+      return ascending ? result : -result;
+    },
+    uptime: (a, b, ascending) =>
+      compareWithNullsLast(a.uptimeSince, b.uptimeSince, ascending, (x, y) => x - y),
+    exposure: (a, b, ascending) =>
+      compareWithNullsLast(a.exposureHostname, b.exposureHostname, ascending, (x, y) =>
+        x.localeCompare(y),
+      ),
+    ports: (a, b, ascending) =>
+      compareWithNullsLast(lowestPort(a.ports), lowestPort(b.ports), ascending, (x, y) => x - y),
+    lastDeploy: (a, b, ascending) =>
+      compareWithNullsLast(a.lastDeployAt, b.lastDeployAt, ascending, (x, y) => x - y),
+  };
+
+/**
+ * The chevron `OverviewTab` added for its Advanced section — the one other inline SVG in
+ * the codebase — repurposed as a sort direction cue: pointing down for descending
+ * (unrotated, same as that chevron's collapsed state), rotated to point up for ascending.
+ * Purely visual, kept out of the accessibility tree the same way: `aria-sort` on the
+ * `<th>` is what assistive tech reads, this is a redundant cue for sighted users only.
+ */
+function SortIndicator({ direction }: { direction: "asc" | "desc" }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`h-3.5 w-3.5 shrink-0 transition-transform duration-200 ${
+        direction === "asc" ? "rotate-180" : ""
+      }`}
+    >
+      <path d="M5 7.5 10 12.5 15 7.5" />
+    </svg>
+  );
+}
+
+/**
+ * A sortable column header. The clickable surface is a real `<button>`, not a `<th>`
+ * with an `onClick` — the latter is invisible to keyboard and screen-reader users, since
+ * a table cell isn't a focusable, operable control on its own. `aria-sort` goes on the
+ * `<th>` itself (where assistive tech looks for it), not the button.
+ */
+function SortableHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  label: string;
+  sortKey: SortKey;
+  sort: SortState | null;
+  onSort: (key: SortKey) => void;
+}) {
+  const direction = sort?.key === sortKey ? sort.direction : null;
+  return (
+    <th
+      className="px-4 py-2 font-medium"
+      aria-sort={direction === null ? "none" : direction === "asc" ? "ascending" : "descending"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className="flex items-center gap-1 font-medium uppercase tracking-wide hover:text-slate-700 dark:hover:text-slate-200"
+      >
+        {label}
+        {direction !== null && <SortIndicator direction={direction} />}
+      </button>
+    </th>
+  );
+}
+
+/** A fresh, sorted copy of `apps` — never mutates the query cache's own array. Dozens of
+ *  rows, recomputed on demand rather than memoized: sorting a home NAS's app list costs
+ *  nothing worth guarding against a re-render for. */
+function sortApps(apps: AdminApp[], sort: SortState): AdminApp[] {
+  const comparator = SORT_COMPARATORS[sort.key];
+  const ascending = sort.direction === "asc";
+  return [...apps].sort((a, b) => comparator(a, b, ascending));
+}
+
 export function AdminApps() {
   const { data, isError } = useAdminApps();
   const [adopting, setAdopting] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [sort, setSort] = useState<SortState | null>(null);
   const now = useNow();
 
   // `isError` alone throws away rows that are still in hand. The launcher shipped
@@ -247,6 +389,22 @@ export function AdminApps() {
     return <p className="p-6 text-sm text-rose-600">Could not load your apps.</p>;
 
   const apps = data ?? [];
+
+  // Client-side only: the list is already fully loaded (`useAdminApps` has no paging),
+  // and a home NAS has dozens of apps, not thousands — nothing here justifies a server
+  // round-trip. `sort === null` is "whatever today's default order is", i.e. exactly
+  // `apps` — nothing has been clicked yet, so nothing should reorder.
+  const sortedApps = sort === null ? apps : sortApps(apps, sort);
+
+  function toggleSort(key: SortKey) {
+    // A new column always starts ascending; the already-active one flips. No third
+    // "unsorted" state to cycle back through — fiddly, and nobody asked for it.
+    setSort((prev) =>
+      prev?.key === key
+        ? { key, direction: prev.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "asc" },
+    );
+  }
 
   return (
     <div className={PAGE_SHELL}>
@@ -277,17 +435,27 @@ export function AdminApps() {
           <table className="w-full text-sm">
             <thead className="hidden bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500 md:table-header-group dark:bg-slate-900 dark:text-slate-400">
               <tr>
-                <th className="px-4 py-2 font-medium">App</th>
-                <th className="px-4 py-2 font-medium">Status</th>
-                <th className="px-4 py-2 font-medium">Uptime</th>
-                <th className="px-4 py-2 font-medium">Exposure</th>
-                <th className="px-4 py-2 font-medium">Ports</th>
-                <th className="px-4 py-2 font-medium">Last deploy</th>
+                <SortableHeader label="App" sortKey="app" sort={sort} onSort={toggleSort} />
+                <SortableHeader label="Status" sortKey="status" sort={sort} onSort={toggleSort} />
+                <SortableHeader label="Uptime" sortKey="uptime" sort={sort} onSort={toggleSort} />
+                <SortableHeader
+                  label="Exposure"
+                  sortKey="exposure"
+                  sort={sort}
+                  onSort={toggleSort}
+                />
+                <SortableHeader label="Ports" sortKey="ports" sort={sort} onSort={toggleSort} />
+                <SortableHeader
+                  label="Last deploy"
+                  sortKey="lastDeploy"
+                  sort={sort}
+                  onSort={toggleSort}
+                />
                 <th className="px-4 py-2 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="block md:table-row-group">
-              {apps.map((app) => (
+              {sortedApps.map((app) => (
                 <tr
                   key={app.id}
                   className="block border-t border-slate-200 p-3 first:border-t-0 md:table-row md:border-t md:p-0 dark:border-slate-800"
