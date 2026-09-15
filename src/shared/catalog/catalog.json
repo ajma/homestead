@@ -448,5 +448,14 @@
     "homepage": "https://snipeitapp.com",
     "categories": ["utilities"],
     "compose": "services:\n  snipe-it:\n    image: snipe/snipe-it:latest\n    restart: unless-stopped\n    ports:\n      - \"8072:80\"\n    environment:\n      - APP_KEY=\n      - APP_URL=http://localhost:8072\n      - DB_CONNECTION=mariadb\n      - DB_HOST=db\n      - DB_DATABASE=snipeit\n      - DB_USERNAME=snipeit\n      - DB_PASSWORD=changeme1234\n    volumes:\n      - ./storage:/var/lib/snipeit\n    depends_on:\n      - db\n  db:\n    image: mariadb:latest\n    restart: unless-stopped\n    environment:\n      - MYSQL_DATABASE=snipeit\n      - MYSQL_USER=snipeit\n      - MYSQL_PASSWORD=changeme1234\n      - MYSQL_RANDOM_ROOT_PASSWORD=yes\n    volumes:\n      - ./db:/var/lib/mysql\n"
+  },
+  {
+    "slug": "bookorbit",
+    "name": "BookOrbit",
+    "description": "A self-hosted ebook reading space; won't start until POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, JWT_SECRET, SETUP_BOOTSTRAP_TOKEN, and APP_URL are set.",
+    "iconRef": "bookorbit",
+    "homepage": "https://bookorbit.app",
+    "categories": ["documents"],
+    "compose": "services:\n  app:\n    image: ghcr.io/bookorbit/bookorbit:latest\n    restart: unless-stopped\n    init: true\n    env_file:\n      - path: .env\n        required: false\n    environment:\n      - NODE_ENV=production\n      - TZ=UTC\n      - PUID=1000\n      - PGID=1000\n    ports:\n      - \"8093:3000\"\n    depends_on:\n      postgres:\n        condition: service_healthy\n    volumes:\n      - ./books:/books\n      - ./data/app:/data\n    read_only: true\n    tmpfs:\n      - /tmp\n    cap_drop:\n      - ALL\n    cap_add:\n      - CHOWN\n      - DAC_OVERRIDE\n      - FOWNER\n      - SETGID\n      - SETUID\n    security_opt:\n      - no-new-privileges:true\n    stop_grace_period: 30s\n  postgres:\n    image: pgvector/pgvector:pg18\n    restart: unless-stopped\n    env_file:\n      - path: .env\n        required: false\n    environment:\n      - PGDATA=/var/lib/postgresql/data/pgdata\n    volumes:\n      - ./data/postgres:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", 'pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"']\n      interval: 10s\n      timeout: 5s\n      retries: 10\n      start_period: 20s\n"
   }
 ]
