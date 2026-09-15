@@ -81,8 +81,11 @@ export const FORM_LABEL =
 
 /**
  * Two short, unrelated panels (a fact-and-action block, not a table) placed side by
- * side once there's room, stacked below it. For `Settings`' Host check/Cloudflare pair —
- * a table-shaped section (like `Settings`' own `UserManager`) should stay full width
- * rather than opt into this.
+ * side once there's room, stacked below it. `Settings` used this for its Host
+ * check/Cloudflare pair before that page grew a left nav (Phase 1C) — the nav column
+ * eats into the content column's own width, and two panels squeezed into what's left
+ * read as cramped rather than efficient, so both stack full width there now, same as
+ * `Settings`' own table-shaped `UserManager` section always did. Kept here, unused for
+ * now, for the next page with a genuine two-panel, full-width-column pair.
  */
 export const TWO_UP_GRID = "grid grid-cols-1 gap-6 lg:grid-cols-2";
