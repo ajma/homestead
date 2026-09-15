@@ -134,20 +134,16 @@ function stubFetch(opts: {
   return fetchMock;
 }
 
-/** Fills the hostname and zone, then waits for the compose service/port pickers to
- * preselect — the default stub (`ONE_SERVICE_ONE_PORT`) is exactly the "one click" case
- * `ExposureTab.tsx`'s own doc comment describes, so nothing here has to drive those two
- * fields by hand. */
+/** Fills the hostname and zone, then waits for the port picker to preselect — the default
+ * stub (`ONE_SERVICE_ONE_PORT`) is exactly the "one click" case `ExposureTab.tsx`'s own
+ * doc comment describes, so nothing here has to drive that field by hand. */
 async function fillExposeForm() {
   fireEvent.change(screen.getByLabelText(/Hostname/), {
     target: { value: "jellyfin.example.com" },
   });
   fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
   await waitFor(() =>
-    expect((screen.getByLabelText(/Compose service/) as HTMLSelectElement).value).toBe("app"),
-  );
-  await waitFor(() =>
-    expect((screen.getByLabelText(/Published port/) as HTMLSelectElement).value).toBe("8096"),
+    expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("8096"),
   );
 }
 
@@ -208,84 +204,116 @@ describe("ExposurePanel", () => {
     expect(screen.queryByLabelText(/Access policy/i)).toBeNull();
   });
 
-  describe("compose service and port picker", () => {
-    it("preselects the service and port when the compose file has exactly one of each", async () => {
+  describe("port picker", () => {
+    it("preselects the port when exactly one is published across every service", async () => {
       stubFetch({ tunnel: PROVISIONED, composeServices: ONE_SERVICE_ONE_PORT });
       mount();
 
       await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
       await waitFor(() =>
-        expect((screen.getByLabelText(/Compose service/) as HTMLSelectElement).value).toBe("app"),
+        expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("8096"),
       );
-      expect((screen.getByLabelText(/Published port/) as HTMLSelectElement).value).toBe("8096");
     });
 
-    it("offers every service but leaves the choice to the admin when there is more than one", async () => {
+    it("lists every published port across every service, each labelled with its service, leaving the choice to the admin", async () => {
       stubFetch({
         tunnel: PROVISIONED,
         composeServices: {
           valid: true,
           services: [
-            { name: "app", publishedPorts: [8096] },
+            { name: "web", publishedPorts: [8080] },
             { name: "sonarr", publishedPorts: [8989] },
           ],
         },
       });
       mount();
 
-      await waitFor(() => expect(screen.getByLabelText(/Compose service/)).toBeTruthy());
-      const select = screen.getByLabelText(/Compose service/) as HTMLSelectElement;
+      await waitFor(() => expect(screen.getByLabelText(/Port/)).toBeTruthy());
+      const select = screen.getByLabelText(/Port/) as HTMLSelectElement;
       expect(select.value).toBe("");
+      const options = Array.from(select.options).map((o) => ({
+        value: o.value,
+        text: o.textContent,
+      }));
+      expect(options).toContainEqual({ value: "8080", text: "8080 — web" });
+      expect(options).toContainEqual({ value: "8989", text: "8989 — sonarr" });
+    });
+
+    it("flattens every published port from every service into the one list, including a service that publishes more than one", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: {
+          valid: true,
+          services: [{ name: "web", publishedPorts: [8080, 8443] }],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Port/)).toBeTruthy());
+      const select = screen.getByLabelText(/Port/) as HTMLSelectElement;
       const options = Array.from(select.options).map((o) => o.value);
-      expect(options).toEqual(["", "app", "sonarr"]);
+      expect(options).toEqual(expect.arrayContaining(["8080", "8443"]));
     });
 
-    it("shows a service with no published ports as not exposable, with the reason, rather than offering it", async () => {
+    it("goes straight to manual entry, with no dropdown at all, when the app publishes no ports (host networking)", async () => {
+      // The case this whole feature exists for: `network_mode: host` (Homestead's own
+      // shape, `systemKind: "self"`) declares no `ports:` at all, so every service comes
+      // back with `publishedPorts: []` and there is nothing to list.
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: { valid: true, services: [{ name: "homestead", publishedPorts: [] }] },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Port/)).toBeTruthy());
+      const port = screen.getByLabelText(/Port/);
+      expect(port.tagName).toBe("INPUT");
+      // Nothing to switch back to — the "choose from the list" escape hatch only makes
+      // sense once a list actually exists.
+      expect(screen.queryByRole("button", { name: /Choose from the list/ })).toBeNull();
+    });
+
+    it("switches to manual entry from the dropdown's own 'Type a port…' option, and back again", async () => {
       stubFetch({
         tunnel: PROVISIONED,
         composeServices: {
           valid: true,
-          services: [
-            { name: "app", publishedPorts: [8096] },
-            { name: "worker", publishedPorts: [] },
-          ],
+          services: [{ name: "web", publishedPorts: [8080] }],
         },
       });
       mount();
-
-      await waitFor(() => expect(screen.getByLabelText(/Compose service/)).toBeTruthy());
-      const select = screen.getByLabelText(/Compose service/) as HTMLSelectElement;
-      const workerOption = Array.from(select.options).find((o) => o.value === "worker");
-      expect(workerOption).toBeTruthy();
-      expect(workerOption?.disabled).toBe(true);
-      expect(workerOption?.textContent).toMatch(/not exposable/);
-      expect(workerOption?.textContent).toMatch(/no ports/);
-    });
-
-    it("picks the port automatically when the admin's chosen service publishes only one", async () => {
-      stubFetch({
-        tunnel: PROVISIONED,
-        composeServices: {
-          valid: true,
-          services: [
-            { name: "app", publishedPorts: [8096] },
-            { name: "sonarr", publishedPorts: [8989] },
-          ],
-        },
-      });
-      mount();
-
-      await waitFor(() => expect(screen.getByLabelText(/Compose service/)).toBeTruthy());
-      fireEvent.change(screen.getByLabelText(/Compose service/), {
-        target: { value: "sonarr" },
-      });
 
       await waitFor(() =>
-        expect((screen.getByLabelText(/Published port/) as HTMLSelectElement).value).toBe("8989"),
+        expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("8080"),
       );
+      fireEvent.change(screen.getByLabelText(/Port/), { target: { value: "__type_a_port__" } });
+
+      await waitFor(() => expect(screen.getByLabelText(/Port/).tagName).toBe("INPUT"));
+      // Switching to manual entry clears the preselected value — no stale port left behind
+      // for the two controls to disagree about.
+      expect((screen.getByLabelText(/Port/) as HTMLInputElement).value).toBe("");
+
+      fireEvent.click(screen.getByRole("button", { name: /Choose from the list/ }));
+      await waitFor(() => expect(screen.getByLabelText(/Port/).tagName).toBe("SELECT"));
+      expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("");
     });
 
-    it("shows the invalid-compose message instead of a picker when the compose file cannot be resolved", async () => {
+    it("accepts a typed port that is not published, and shows a non-blocking note rather than a refusal", async () => {
+      stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: { valid: true, services: [{ name: "homestead", publishedPorts: [] }] },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Port/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Port/), { target: { value: "9090" } });
+
+      await waitFor(() => expect(screen.getByText(/No service publishes port 9090/)).toBeTruthy());
+      // A note, not an error: nothing here uses `role="alert"`.
+      expect(screen.getByText(/No service publishes port 9090/).getAttribute("role")).toBeNull();
+    });
+
+    it("shows the invalid-compose message, but still offers manual entry rather than blocking the form entirely", async () => {
       stubFetch({
         tunnel: PROVISIONED,
         composeServices: { valid: false, message: "compose file is invalid" },
@@ -293,7 +321,68 @@ describe("ExposurePanel", () => {
       mount();
 
       await waitFor(() => expect(screen.getByText(/compose file is invalid/)).toBeTruthy());
-      expect(screen.queryByLabelText(/Compose service/)).toBeNull();
+      expect(screen.getByLabelText(/Port/).tagName).toBe("INPUT");
+    });
+  });
+
+  describe("submission carries whichever port is actually shown as selected", () => {
+    it("submits the port chosen from the dropdown, and no serviceName field at all", async () => {
+      const fetchMock = stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: {
+          valid: true,
+          services: [
+            { name: "web", publishedPorts: [8080] },
+            { name: "sonarr", publishedPorts: [8989] },
+          ],
+        },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Hostname/), {
+        target: { value: "jellyfin.example.com" },
+      });
+      await waitFor(() => expect(screen.getByLabelText(/Zone/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
+      await waitFor(() => expect(screen.getByLabelText(/Port/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Port/), { target: { value: "8989" } });
+
+      fireEvent.click(screen.getByRole("button", { name: "Expose" }));
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+      const call = fetchMock.mock.calls.find(
+        (c) => c[0] === `/api/apps/${APP.id}/expose` && (c[1] as RequestInit)?.method === "POST",
+      );
+      const body = JSON.parse(String((call?.[1] as RequestInit)?.body));
+      expect(body).toEqual({ hostname: "jellyfin.example.com", zoneId: "z1", port: 8989 });
+      expect(body.serviceName).toBeUndefined();
+    });
+
+    it("submits the manually typed port for a host-networked app, still with no serviceName field", async () => {
+      const fetchMock = stubFetch({
+        tunnel: PROVISIONED,
+        composeServices: { valid: true, services: [{ name: "homestead", publishedPorts: [] }] },
+      });
+      mount();
+
+      await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Hostname/), {
+        target: { value: "homestead.example.com" },
+      });
+      await waitFor(() => expect(screen.getByLabelText(/Zone/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
+      await waitFor(() => expect(screen.getByLabelText(/Port/)).toBeTruthy());
+      fireEvent.change(screen.getByLabelText(/Port/), { target: { value: "3000" } });
+
+      fireEvent.click(screen.getByRole("button", { name: "Expose" }));
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+      const call = fetchMock.mock.calls.find(
+        (c) => c[0] === `/api/apps/${APP.id}/expose` && (c[1] as RequestInit)?.method === "POST",
+      );
+      const body = JSON.parse(String((call?.[1] as RequestInit)?.body));
+      expect(body).toEqual({ hostname: "homestead.example.com", zoneId: "z1", port: 3000 });
     });
   });
 

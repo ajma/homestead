@@ -25,15 +25,20 @@ export const EXPOSE_KIND = "cloudflare_expose";
 const exposeBody = z.object({
   hostname: z.string().trim().min(1),
   zoneId: z.string().trim().min(1),
-  /** The compose service `cloudflared` should route to — Task 4: this route no longer
-   * accepts a raw URL from the admin (an `ingressService` string, free to typo into a port
-   * nothing serves). Both this and `port` below are validated against the app's OWN
-   * resolved compose config before anything is provisioned — see the route body. */
-  serviceName: z.string().trim().min(1),
-  /** The published port on `serviceName` — validated to be one `serviceName` actually
-   * publishes (`ResolvedService.publishedPorts`, `compose-config.ts`) before this route
-   * constructs `http://localhost:<port>` (`internalServiceUrl`) and hands it to
-   * `exposeSteps`. */
+  /**
+   * The port `cloudflared` should route to on `localhost` — no longer paired with a
+   * `serviceName`. `internalServiceUrl(port)` (`cloudflare/expose.ts`) builds
+   * `http://localhost:${port}` and never reads which compose service publishes it — the
+   * service was only ever carried in the request body so Task 4's validation could check
+   * the port against it, never to build the URL itself. That validation is gone: it made
+   * exposing a `network_mode: host` app (Homestead itself, `systemKind: "self"`) flatly
+   * impossible, since such a service publishes no port at all, and `port_not_published`
+   * had no way to say "that's expected here." Any positive port is accepted; the client
+   * (`GET /api/apps/:id/expose/services`, already returning every service's
+   * `publishedPorts`) is where a port that matches nothing published is surfaced, as a
+   * note rather than a refusal — for a host-networked app that's the normal case, and for
+   * anything else it's a likely typo the admin should see without being blocked by it.
+   */
   port: z.number().int().positive(),
   /**
    * Required ONLY when the app being exposed is `systemKind: "self"` — checked below,
@@ -201,32 +206,12 @@ export async function cloudflareExposeRoutes(app: FastifyInstance): Promise<void
       return reply.code(409).send({ error: "not_configured" });
     }
 
-    // Task 4: validate `serviceName`/`port` against the app's OWN resolved compose file —
-    // checked here, after every state prerequisite above (tunnel, monitor, credentials)
-    // but before anything is provisioned, so a typo'd service or port never gets as far as
-    // constructing a URL and splicing it into the tunnel's ingress config. Placed last
-    // among the checks (rather than first) so the routes' many existing state-prerequisite
-    // tests never need a working compose fixture just to reach an unrelated 409 — this is
-    // the one check specific to the request BODY's own content, not to whether exposing is
-    // possible at all right now.
-    const composeTarget = { directory: appRow.directory, composeFile: appRow.composeFile };
-    const resolved = await composeConfig.resolve(composeTarget);
-    if (!resolved.valid) {
-      return reply.code(422).send({ error: "compose_invalid", message: resolved.message });
-    }
-    const service = resolved.resolved.services.find((s) => s.name === body.serviceName);
-    if (!service) {
-      return reply.code(422).send({ error: "service_not_found" });
-    }
-    if (service.publishedPorts.length === 0) {
-      // Say so clearly rather than constructing a URL to nowhere — a service that
-      // publishes no ports cannot be exposed, whatever port number the request asked for.
-      return reply.code(422).send({ error: "service_publishes_no_ports" });
-    }
-    if (!service.publishedPorts.includes(body.port)) {
-      return reply.code(422).send({ error: "port_not_published" });
-    }
-
+    // Task 4 used to validate `serviceName`/`port` against the app's OWN resolved compose
+    // file here — removed along with `serviceName` (see `exposeBody`'s own comment): a
+    // `network_mode: host` app publishes no port at all, so that check could never pass
+    // for exactly the app the `systemKind: "self"` work exists to let through. Any
+    // positive port is now accepted unchecked; the client surfaces a mismatch against
+    // published ports as a note, not a refusal.
     const client = createCloudflareClient({
       token: credentials.token,
       accountId: credentials.accountId,

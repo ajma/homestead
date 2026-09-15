@@ -14,6 +14,7 @@ import {
 } from "@web/api/cloudflare";
 import { ConfirmDialog } from "@web/components/ConfirmDialog";
 import { JobOutput } from "@web/components/JobOutput";
+import { FORM_CONTROL_MAX_WIDTH } from "@web/lib/density";
 import type { EditAppContext } from "@web/routes/EditApp";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
@@ -21,7 +22,6 @@ import { Link, useOutletContext } from "react-router-dom";
 type FormState = {
   hostname: string;
   zoneId: string;
-  serviceName: string;
   port: string;
   teamDomain: string;
 };
@@ -29,10 +29,19 @@ type FormState = {
 const EMPTY_FORM: FormState = {
   hostname: "",
   zoneId: "",
-  serviceName: "",
   port: "",
   teamDomain: "",
 };
+
+/** One flattened row of the port picker: a published port paired with the ONE service
+ * name that publishes it, sourced from `GET /api/apps/:id/expose/services`'s per-service
+ * `publishedPorts` — flattened client-side, per the brief, rather than the endpoint
+ * changing shape. */
+type PortOption = { port: number; serviceName: string };
+
+/** The port `<select>`'s own escape hatch — never written into `form.port` itself (see
+ * `handlePortOptionChange`'s own comment on why), only compared against on change. */
+const TYPE_PORT_OPTION = "__type_a_port__";
 
 type ExposureApp = Pick<AdminApp, "id" | "displayName" | "systemKind">;
 
@@ -153,41 +162,67 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
     }
   }, [knownRunningJobId]);
 
-  // A service publishing no ports is shown as not exposable rather than offered and then
-  // refused server-side (Task 4's own `service_publishes_no_ports` 422) — split here once,
-  // rather than filtering inline at each render site below.
+  // Every published port across every service, flattened client-side (the brief: the
+  // endpoint keeps returning services with their own `publishedPorts`, only the picker
+  // above it changes shape) rather than one dropdown per service. A service publishing no
+  // ports contributes nothing here — that is exactly how an app entirely on the host
+  // network (`network_mode: host`, no `ports:` at all — e.g. Homestead itself,
+  // `systemKind: "self"`) ends up with an empty list and goes straight to manual entry
+  // below, rather than a dropdown with nothing in it.
   const resolvedServices =
     composeServices.data?.valid === true ? composeServices.data.services : [];
-  const exposableServices = resolvedServices.filter((s) => s.publishedPorts.length > 0);
-  const nonExposableServices = resolvedServices.filter((s) => s.publishedPorts.length === 0);
-  const selectedService = resolvedServices.find((s) => s.name === form.serviceName);
+  const portOptions: PortOption[] = resolvedServices.flatMap((service) =>
+    service.publishedPorts.map((port) => ({ port, serviceName: service.name })),
+  );
+  const publishedPortNumbers = new Set(portOptions.map((option) => option.port));
 
-  /** The common case is one click: with exactly one exposable service, it (and, if it
-   * publishes exactly one port, that port too) is preselected the moment the resolved
-   * compose file loads. Guarded on `prev.serviceName === ""` so this never overwrites a
-   * choice the admin already made — including choosing something else back out of a
-   * single-service compose file, which this effect must not immediately re-apply. */
+  /** Forces manual entry — never merely "defaults to it" — the instant there is nothing to
+   * list: an app with zero published ports (host networking, or a compose file that failed
+   * to resolve at all) must never show an empty dropdown, whatever this flag last held from
+   * before the data arrived. Otherwise this is the admin's own choice to type instead of
+   * pick, made with "Type a port…" or "Choose from the list instead" below. */
+  const [manualPortEntry, setManualPortEntry] = useState(false);
+  const showManualPortInput = manualPortEntry || portOptions.length === 0;
+
+  /** The common case is one click: with exactly one published port across every service,
+   * it is preselected the moment the resolved compose file loads. Guarded on
+   * `prev.port === ""` so this never overwrites a choice the admin already made. */
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally keyed on the resolved service list only
   useEffect(() => {
-    if (exposableServices.length !== 1) return;
-    const [only] = exposableServices;
+    if (portOptions.length !== 1) return;
+    const [only] = portOptions;
     if (!only) return;
-    setForm((prev) => {
-      if (prev.serviceName !== "") return prev;
-      const port = only.publishedPorts.length === 1 ? String(only.publishedPorts[0]) : "";
-      return { ...prev, serviceName: only.name, port };
-    });
+    setForm((prev) => (prev.port !== "" ? prev : { ...prev, port: String(only.port) }));
   }, [composeServices.data]);
 
-  /** Choosing a service resets the port rather than leaving a stale selection from a
-   * previous service in place — unless the newly chosen service itself publishes exactly
-   * one port, in which case that one click also picks the port. */
-  function handleServiceChange(name: string) {
-    const service = resolvedServices.find((s) => s.name === name);
-    const port =
-      service && service.publishedPorts.length === 1 ? String(service.publishedPorts[0]) : "";
-    setForm((prev) => ({ ...prev, serviceName: name, port }));
+  /** The dropdown's own "choose or type" switch (over a second, always-visible text field:
+   * see this component's own doc comment on why). `TYPE_PORT_OPTION` is a sentinel the
+   * `<select>` briefly passes through `onChange` and NEVER becomes `form.port` itself — the
+   * one and only field this form ever submits — so there is exactly one place "which port
+   * is selected" can be read from, whichever way it was chosen. Switching either direction
+   * clears `form.port`: a stale value from the other mode is exactly what would let the two
+   * controls quietly disagree about the answer if either kept it. */
+  function handlePortOptionChange(value: string) {
+    if (value === TYPE_PORT_OPTION) {
+      setManualPortEntry(true);
+      setForm((prev) => ({ ...prev, port: "" }));
+      return;
+    }
+    setForm((prev) => ({ ...prev, port: value }));
   }
+
+  function handleBackToPortList() {
+    setManualPortEntry(false);
+    setForm((prev) => ({ ...prev, port: "" }));
+  }
+
+  const numericPort = Number(form.port);
+  const portEntered = form.port.trim() !== "" && Number.isInteger(numericPort) && numericPort > 0;
+  /** Task's own instruction, held as a note rather than a refusal: unsatisfiable for a
+   * host-networked app (it publishes nothing, ever), and everywhere else a likely typo the
+   * admin should still be free to submit — the server no longer blocks on this either (see
+   * `cloudflare-expose.ts`'s own comment on `exposeBody`). */
+  const portNotPublished = portEntered && !publishedPortNumbers.has(numericPort);
 
   function handleExposeSubmit(event: FormEvent) {
     event.preventDefault();
@@ -203,14 +238,8 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
       setFormError("Choose a zone.");
       return;
     }
-    const serviceName = form.serviceName;
-    if (serviceName === "") {
-      setFormError("Choose the compose service to route to.");
-      return;
-    }
-    const port = Number(form.port);
-    if (!Number.isInteger(port) || port <= 0) {
-      setFormError("Choose the published port to route to.");
+    if (!portEntered) {
+      setFormError("Choose or enter the port to route to.");
       return;
     }
     const teamDomain = form.teamDomain.trim();
@@ -219,7 +248,7 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
       return;
     }
 
-    const body: ExposeAppBody = { hostname, zoneId: form.zoneId, serviceName, port };
+    const body: ExposeAppBody = { hostname, zoneId: form.zoneId, port: numericPort };
     if (isSelf) body.teamDomain = teamDomain;
 
     // Drops the previous attempt's transcript, if any — a retry's own output should not
@@ -457,15 +486,15 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
             </select>
           )}
 
-          <label htmlFor="expose-service" className="flex flex-col gap-1 text-sm">
-            <span className="font-medium text-slate-900 dark:text-slate-100">Compose service</span>
+          <label htmlFor="expose-port" className="flex flex-col gap-1 text-sm">
+            <span className="font-medium text-slate-900 dark:text-slate-100">Port</span>
           </label>
           {composeServices.isPending && (
-            <p className="text-sm text-slate-500">Loading compose services…</p>
+            <p className="text-sm text-slate-500">Loading published ports…</p>
           )}
           {composeServices.isError && (
             <p role="alert" className="text-sm text-red-600">
-              Could not load this app's compose services.
+              Could not load this app's published ports.
             </p>
           )}
           {composeServices.data && !composeServices.data.valid && (
@@ -473,44 +502,58 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
               This app's compose file is invalid: {composeServices.data.message}
             </p>
           )}
-          {composeServices.data?.valid === true && (
+          {/* Every published port across every service, one dropdown, each option labelled
+              with the service publishing it — "8080 — web" — plus a "Type a port…" escape
+              hatch, rather than a second field alongside this one: see this component's own
+              doc comment on `handlePortOptionChange` for why only one control is ever live
+              at a time. An app with nothing published (host networking — `network_mode:
+              host` declares no `ports:` at all, Homestead's own case as `systemKind: "self"`)
+              skips this and goes straight to the manual input below instead of showing a
+              dropdown with nothing in it. */}
+          {composeServices.data !== undefined && !showManualPortInput && portOptions.length > 0 && (
             <select
-              id="expose-service"
-              value={form.serviceName}
-              onChange={(event) => handleServiceChange(event.target.value)}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+              id="expose-port"
+              value={form.port}
+              onChange={(event) => handlePortOptionChange(event.target.value)}
+              className={`${FORM_CONTROL_MAX_WIDTH} rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950`}
             >
-              <option value="">Choose a service…</option>
-              {exposableServices.map((service) => (
-                <option key={service.name} value={service.name}>
-                  {service.name}
+              <option value="">Choose a port…</option>
+              {portOptions.map((option) => (
+                <option key={`${option.serviceName}-${option.port}`} value={String(option.port)}>
+                  {option.port} — {option.serviceName}
                 </option>
               ))}
-              {nonExposableServices.map((service) => (
-                <option key={service.name} value={service.name} disabled>
-                  {service.name} — not exposable (publishes no ports)
-                </option>
-              ))}
+              <option value={TYPE_PORT_OPTION}>Type a port…</option>
             </select>
           )}
-
-          <label htmlFor="expose-port" className="flex flex-col gap-1 text-sm">
-            <span className="font-medium text-slate-900 dark:text-slate-100">Published port</span>
-          </label>
-          <select
-            id="expose-port"
-            value={form.port}
-            onChange={(event) => setForm((prev) => ({ ...prev, port: event.target.value }))}
-            disabled={selectedService === undefined}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:opacity-50 dark:border-slate-800 dark:bg-slate-950"
-          >
-            <option value="">Choose a port…</option>
-            {(selectedService?.publishedPorts ?? []).map((port) => (
-              <option key={port} value={String(port)}>
-                {port}
-              </option>
-            ))}
-          </select>
+          {composeServices.data !== undefined && showManualPortInput && (
+            <div className="flex flex-col gap-1">
+              <input
+                id="expose-port"
+                type="number"
+                min={1}
+                value={form.port}
+                onChange={(event) => setForm((prev) => ({ ...prev, port: event.target.value }))}
+                placeholder="8080"
+                className={`${FORM_CONTROL_MAX_WIDTH} rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950`}
+              />
+              {portOptions.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleBackToPortList}
+                  className="self-start text-xs text-slate-500 underline decoration-slate-400 underline-offset-2 dark:text-slate-400"
+                >
+                  Choose from the list instead
+                </button>
+              )}
+            </div>
+          )}
+          {portNotPublished && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              No service publishes port {numericPort} — expected for an app on the host network,
+              otherwise check for a typo.
+            </p>
+          )}
 
           {/* The sentence that matters most in this form (§6's shared-policy scope,
               stated where the admin is making the decision, not only in a doc): the

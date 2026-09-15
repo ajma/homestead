@@ -187,9 +187,10 @@ async function withFullSetup(opts: { systemKind?: "self" } = {}) {
     systemKind: opts.systemKind ?? null,
   });
 
-  // Task 4: the route now validates `serviceName`/`port` against the app's OWN resolved
-  // compose file, so every test that reaches that point needs a real (fake) compose
-  // resolution to succeed against — same fixture shape `apps-compose.test.ts` uses.
+  // The POST route no longer resolves or validates against this at all (see `exposeBody`'s
+  // own comment in `cloudflare-expose.ts`) — this fixture exists for `GET
+  // /api/apps/:id/expose/services`'s own tests below, same fixture shape
+  // `apps-compose.test.ts` uses.
   app.deps.host.files.set(
     "jellyfin/compose.yaml",
     "services:\n  app:\n    ports:\n      - 8096:8096\n",
@@ -209,7 +210,6 @@ async function withFullSetup(opts: { systemKind?: "self" } = {}) {
 const exposeBody = {
   hostname: "jellyfin.example.com",
   zoneId: ZONE_ID,
-  serviceName: "app",
   port: 8096,
 };
 
@@ -258,25 +258,14 @@ describe("POST /api/apps/:id/expose", () => {
     await app.close();
   });
 
-  it("rejects a service name the app's compose file does not have", async () => {
-    // Task 4: a typo'd service name must not reach `exposeSteps` at all — the route
-    // validates against the app's OWN resolved compose config, not a free-text URL.
+  it("accepts a port no service publishes (binding check: the route no longer validates port against compose at all)", async () => {
+    // The whole point of dropping `serviceName`: a `network_mode: host` app publishes no
+    // port a service-scoped check could ever pass against, so this route now accepts any
+    // positive port unchecked. `withFullSetup`'s fixture only ever publishes 8096, so 9999
+    // proves there is no server-side rejection left, not merely a lenient one.
     const { app, cookie, appId } = await withFullSetup();
-
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/apps/${appId}/expose`,
-      headers: { cookie },
-      payload: { ...exposeBody, serviceName: "does-not-exist" },
-    });
-
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("service_not_found");
-    await app.close();
-  });
-
-  it("rejects a port the chosen service does not publish (binding check: an unvalidated port must not reach the URL)", async () => {
-    const { app, cookie, appId } = await withFullSetup();
+    const { fetch: exposed, ingress } = exposeFetch();
+    app.deps.fetch = exposed;
 
     const res = await app.inject({
       method: "POST",
@@ -285,51 +274,49 @@ describe("POST /api/apps/:id/expose", () => {
       payload: { ...exposeBody, port: 9999 },
     });
 
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("port_not_published");
+    expect(res.statusCode).toBe(202);
+    const { jobId } = res.json() as { jobId: string };
+    const jobRow = await waitForJobTerminal(app.deps.db, jobId);
+    expect(jobRow?.status).toBe("succeeded");
+    expect(ingress()).toEqual([
+      { hostname: "jellyfin.example.com", service: "http://localhost:9999" },
+      { service: "http_status:404" },
+    ]);
     await app.close();
   });
 
-  it("says so clearly, rather than constructing a URL to nowhere, when the chosen service publishes no ports", async () => {
+  it("exposes an app that publishes no ports at all, host-networking's own shape (binding check: this was the dead end the manual port entry exists to close)", async () => {
+    // Homestead's own case (`systemKind: "self"`, `network_mode: host`): the compose file
+    // declares no `ports:` at all, so `publishedPorts` resolves to `[]` for every service
+    // — exactly the shape that used to make this route reject with `port_not_published`
+    // no matter what port the admin supplied. There is no such check left to trip.
     const { app, cookie, appId } = await withFullSetup();
     app.deps.host.composeResults.set("config --format json", {
       exitCode: 0,
       stdout: JSON.stringify({
         name: "jellyfin",
-        services: { app: { image: "jellyfin/jellyfin", ports: [] } },
+        services: { app: { image: "jellyfin/jellyfin" } },
       }),
       stderr: "",
     });
+    const { fetch: exposed, ingress } = exposeFetch();
+    app.deps.fetch = exposed;
 
     const res = await app.inject({
       method: "POST",
       url: `/api/apps/${appId}/expose`,
       headers: { cookie },
-      payload: exposeBody,
+      payload: { ...exposeBody, port: 8096 },
     });
 
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("service_publishes_no_ports");
-    await app.close();
-  });
-
-  it("rejects an invalid compose file rather than guessing at a service inside it", async () => {
-    const { app, cookie, appId } = await withFullSetup();
-    app.deps.host.composeResults.set("config --format json", {
-      exitCode: 1,
-      stdout: "",
-      stderr: "compose file is invalid",
-    });
-
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/apps/${appId}/expose`,
-      headers: { cookie },
-      payload: exposeBody,
-    });
-
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("compose_invalid");
+    expect(res.statusCode).toBe(202);
+    const { jobId } = res.json() as { jobId: string };
+    const jobRow = await waitForJobTerminal(app.deps.db, jobId);
+    expect(jobRow?.status).toBe("succeeded");
+    expect(ingress()).toEqual([
+      { hostname: "jellyfin.example.com", service: "http://localhost:8096" },
+      { service: "http_status:404" },
+    ]);
     await app.close();
   });
 
