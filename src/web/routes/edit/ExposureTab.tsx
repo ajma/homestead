@@ -20,18 +20,59 @@ import { type FormEvent, useEffect, useState } from "react";
 import { Link, useOutletContext } from "react-router-dom";
 
 type FormState = {
-  hostname: string;
+  subdomain: string;
   zoneId: string;
   port: string;
   teamDomain: string;
 };
 
 const EMPTY_FORM: FormState = {
-  hostname: "",
+  subdomain: "",
   zoneId: "",
   port: "",
   teamDomain: "",
 };
+
+/**
+ * Combines the admin's subdomain with the SELECTED zone's own domain, rather than
+ * sending whatever the admin typed as the final hostname unchanged. Measured defect: the
+ * "Hostname" field and the "Zone" dropdown used to be two independent inputs with no
+ * connection between them at all — an admin picking "example.com" from the zone dropdown
+ * and typing "homestead" in the hostname field (a completely reasonable subdomain +
+ * domain mental model) got exactly "homestead" sent to Cloudflare as the literal
+ * hostname. `create-dns-record` (`expose.ts`) tolerated that silently, because
+ * Cloudflare's DNS API is zone-scoped and accepts a bare relative name — but
+ * `create-access-app` sends `domain` to an ACCOUNT-scoped endpoint with no zone context
+ * at all, which correctly rejected "homestead" as not belonging to any zone. The failure
+ * surfaced three steps deep, after a real (if pointless) DNS record had already been
+ * created and rolled back.
+ *
+ * Trimmed input equal to the zone's own name, or already ending in `.${zoneName}`, is
+ * used as-is rather than double-appended — an admin who already knows (or pastes) the
+ * full hostname must not end up with "jellyfin.example.com.example.com". Blank input
+ * composes to the zone's own root domain, for exposing at the apex rather than a
+ * subdomain.
+ */
+export function composeHostname(subdomain: string, zoneName: string): string {
+  const trimmed = subdomain.trim();
+  if (trimmed === "") return zoneName;
+  if (trimmed === zoneName || trimmed.endsWith(`.${zoneName}`)) return trimmed;
+  return `${trimmed}.${zoneName}`;
+}
+
+/**
+ * Keeps the subdomain box to characters a single DNS label can actually contain —
+ * letters, digits and hyphens, lowercased. Applied on every keystroke (so an invalid
+ * character never lands in the field at all, rather than being caught at submit time)
+ * and once at mount to derive the prefill from the app's directory name, which may
+ * itself contain characters (`.`, `_`) `POST /api/apps`'s own `DIRECTORY_PATTERN`
+ * allows but a hostname label cannot. A dot is deliberately not in this set: the box is
+ * only ever the single label in front of the zone, never the full hostname — the literal
+ * "." rendered between the two fields is where that character belongs.
+ */
+function sanitizeHostnameLabel(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+}
 
 /** One flattened row of the port picker: a published port paired with the ONE service
  * name that publishes it, sourced from `GET /api/apps/:id/expose/services`'s per-service
@@ -43,7 +84,7 @@ type PortOption = { port: number; serviceName: string };
  * `handlePortOptionChange`'s own comment on why), only compared against on change. */
 const TYPE_PORT_OPTION = "__type_a_port__";
 
-type ExposureApp = Pick<AdminApp, "id" | "displayName" | "systemKind">;
+type ExposureApp = Pick<AdminApp, "id" | "displayName" | "systemKind" | "directory">;
 
 /**
  * §6's drift findings (2F Task 6), rendered — never auto-corrected; there is no button
@@ -130,7 +171,10 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
 
   const isSelf = app.systemKind === "self";
 
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [form, setForm] = useState<FormState>(() => ({
+    ...EMPTY_FORM,
+    subdomain: sanitizeHostnameLabel(app.directory),
+  }));
   const [formError, setFormError] = useState<string | null>(null);
   const [exposeError, setExposeError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -229,15 +273,16 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
     setFormError(null);
     setExposeError(null);
 
-    const hostname = form.hostname.trim();
-    if (hostname === "") {
-      setFormError("Enter a hostname.");
-      return;
-    }
     if (form.zoneId === "") {
       setFormError("Choose a zone.");
       return;
     }
+    const zone = zones.data?.find((z) => z.id === form.zoneId);
+    if (!zone) {
+      setFormError("Choose a zone.");
+      return;
+    }
+    const hostname = composeHostname(form.subdomain, zone.name);
     if (!portEntered) {
       setFormError("Choose or enter the port to route to.");
       return;
@@ -452,38 +497,42 @@ export function ExposurePanel({ app }: { app: ExposureApp }) {
         <form onSubmit={handleExposeSubmit} className="max-w-sm space-y-3">
           <label className="flex flex-col gap-1 text-sm">
             <span className="font-medium text-slate-900 dark:text-slate-100">Hostname</span>
-            <input
-              type="text"
-              value={form.hostname}
-              onChange={(event) => setForm((prev) => ({ ...prev, hostname: event.target.value }))}
-              placeholder="jellyfin.example.com"
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
-            />
-          </label>
-
-          <label htmlFor="expose-zone" className="flex flex-col gap-1 text-sm">
-            <span className="font-medium text-slate-900 dark:text-slate-100">Zone</span>
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={form.subdomain}
+                onChange={(event) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    subdomain: sanitizeHostnameLabel(event.target.value),
+                  }))
+                }
+                placeholder="jellyfin"
+                className="w-28 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+              />
+              <span className="text-slate-400 dark:text-slate-600">.</span>
+              {zones.data && (
+                <select
+                  aria-label="Zone"
+                  value={form.zoneId}
+                  onChange={(event) => setForm((prev) => ({ ...prev, zoneId: event.target.value }))}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+                >
+                  <option value="">Choose a zone…</option>
+                  {zones.data.map((zone) => (
+                    <option key={zone.id} value={zone.id}>
+                      {zone.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           </label>
           {zones.isPending && <p className="text-sm text-slate-500">Loading zones…</p>}
           {zones.isError && (
             <p role="alert" className="text-sm text-red-600">
               Could not load zones.
             </p>
-          )}
-          {zones.data && (
-            <select
-              id="expose-zone"
-              value={form.zoneId}
-              onChange={(event) => setForm((prev) => ({ ...prev, zoneId: event.target.value }))}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
-            >
-              <option value="">Choose a zone…</option>
-              {zones.data.map((zone) => (
-                <option key={zone.id} value={zone.id}>
-                  {zone.name}
-                </option>
-              ))}
-            </select>
           )}
 
           <label htmlFor="expose-port" className="flex flex-col gap-1 text-sm">

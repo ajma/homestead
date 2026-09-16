@@ -43,7 +43,12 @@ const SECRET_KEY = Buffer.alloc(32, 9);
  */
 function fakeClient() {
   const tunnels: Array<{ id: string; name: string; deletedAt: number | null }> = [];
-  const calls = { created: [] as string[], deleted: [] as string[], tokenRequests: [] as string[] };
+  const calls = {
+    created: [] as string[],
+    deleted: [] as string[],
+    tokenRequests: [] as string[],
+    putConfig: [] as Array<{ tunnelId: string; ingress: unknown[] }>,
+  };
   let nextId = 1;
 
   const client: CloudflareClient = {
@@ -74,8 +79,10 @@ function fakeClient() {
     async getTunnelConfig() {
       throw new Error("not used by provisioning");
     },
-    async putTunnelConfig() {
-      throw new Error("not used by provisioning");
+    // Used by `seed-ingress-config` (only on the tunnel-created branch) — see that
+    // step's own doc comment in provision-tunnel.ts for why.
+    async putTunnelConfig(tunnelId, config) {
+      calls.putConfig.push({ tunnelId, ingress: config.ingress });
     },
     async createDnsRecord() {
       throw new Error("not used by provisioning");
@@ -185,6 +192,14 @@ describe("tunnelProvisionSteps — happy path", () => {
     expect(calls.created).toHaveLength(1);
     const tunnelId = calls.created[0] as string;
 
+    // The new tunnel's ingress config was seeded with just a catch-all — without this,
+    // `expose.ts`'s `splice-ingress` would hit Cloudflare's "no ingress key" shape on the
+    // very first app exposed against it. `[]` alone would not do: Cloudflare's API
+    // rejects a `PUT` with zero ingress rules (measured live, code 1056).
+    expect(calls.putConfig).toEqual([
+      { tunnelId, ingress: [{ service: "http_status:404" }] },
+    ]);
+
     const record = await tunnelStore.get();
     expect(record?.tunnelId).toBe(tunnelId);
     expect(record?.name).toBe(CLOUDFLARED_TUNNEL_NAME);
@@ -230,6 +245,10 @@ describe("tunnelProvisionSteps — happy path", () => {
     expect(outcome.ok).toBe(true);
     expect(calls.created).toHaveLength(0);
     expect(await client.listTunnels()).toHaveLength(1);
+    // Never seeded for an adopted tunnel — it may already carry a human's own remote
+    // config, or be managed through a local config file instead, and this must not
+    // overwrite either.
+    expect(calls.putConfig).toEqual([]);
   });
 
   it("does not adopt a soft-deleted tunnel of the same name", async () => {
@@ -255,7 +274,7 @@ describe("tunnelProvisionSteps — happy path", () => {
 });
 
 describe("tunnelProvisionSteps — failure and rollback", () => {
-  it("step 4 (register-app) failing undoes 3, 2, 1 in that order, and does not undo step 4", async () => {
+  it("step 5 (register-app) failing undoes 4, 3, 2, 1 in that order, and does not undo step 5", async () => {
     const { db, tunnelStore } = await seedDb();
     const host = new FakeHost();
     const { client, calls } = fakeClient();
@@ -285,6 +304,9 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) throw new Error("unreachable");
     expect(outcome.failed).toBe("register-app");
+    // `seed-ingress-config` never appears here — it has no `undo` (see its own doc
+    // comment), so `rollback` (step-sequence.ts) skips it entirely rather than counting
+    // a no-op as "undone".
     expect(outcome.undone).toEqual(["write-files", "fetch-token", "create-tunnel"]);
 
     // The Cloudflare tunnel was actually deleted, not merely "an undo ran".
@@ -300,7 +322,7 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     expect(rows[0]?.displayName).toBe("pre-existing");
   });
 
-  it("step 5 (compose-up) failing deletes the app row, removes the files, deletes the tunnel", async () => {
+  it("step 6 (compose-up) failing deletes the app row, removes the files, deletes the tunnel", async () => {
     const { db, tunnelStore } = await seedDb();
     const host = new FakeHost();
     host.composeResults.set("up -d", { exitCode: 1, stdout: "", stderr: "pull access denied" });
@@ -318,7 +340,14 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) throw new Error("unreachable");
     expect(outcome.failed).toBe("compose-up");
-    expect(outcome.undone).toEqual(["register-app", "write-files", "fetch-token", "create-tunnel"]);
+    // Same as above: `seed-ingress-config` has no `undo`, so it is skipped rather than
+    // listed.
+    expect(outcome.undone).toEqual([
+      "register-app",
+      "write-files",
+      "fetch-token",
+      "create-tunnel",
+    ]);
 
     expect(calls.deleted).toEqual(calls.created);
     expect(host.files.has(`${CLOUDFLARED_DIRECTORY}/compose.yaml`)).toBe(false);
@@ -357,6 +386,8 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     // Adopted, never created — and, with the fix, never deleted either.
     expect(calls.created).toEqual([]);
     expect(calls.deleted).toEqual([]);
+    // Adopted, so `seed-ingress-config` must never have touched its remote config.
+    expect(calls.putConfig).toEqual([]);
     const stillLive = (await client.listTunnels()).find((t) => t.id === "users-own-tunnel");
     expect(stillLive?.deletedAt).toBeNull();
   });

@@ -1,4 +1,4 @@
-import { apps, probes } from "@server/db/schema";
+import { apps, exposures, probes } from "@server/db/schema";
 import { buildTestApp, createViewer, signUpAdmin } from "@server/test-helpers";
 import { eq } from "drizzle-orm";
 import { ulid } from "ulid";
@@ -113,6 +113,57 @@ describe("GET /api/launcher", () => {
       await app.inject({ method: "GET", url: "/api/launcher", headers: { cookie } })
     ).json().apps;
     expect(tile).toMatchObject({ status: "unknown", reason: "Not checked yet" });
+  });
+});
+
+describe("GET /api/launcher — launchUrl prefers a live exposure over the internal URL", () => {
+  it("opens the exposure hostname when the app is exposed and ready, ignoring launchInternalUrl", async () => {
+    const { app, cookie, id } = await seeded();
+    await app.deps.db
+      .update(apps)
+      .set({ launchInternalUrl: "http://192.168.1.5:8989" })
+      .where(eq(apps.id, id));
+    await app.deps.db.insert(exposures).values({
+      id: ulid(),
+      appId: id,
+      hostname: "jellyfin.example.com",
+      ingressService: "http://web:80",
+      state: "ready",
+    });
+
+    const [tile] = (
+      await app.inject({ method: "GET", url: "/api/launcher", headers: { cookie } })
+    ).json().apps;
+    expect(tile.launchUrl).toBe("https://jellyfin.example.com");
+  });
+
+  it("falls back to the internal URL when the exposure is still provisioning", async () => {
+    const { app, cookie, id } = await seeded();
+    await app.deps.db
+      .update(apps)
+      .set({ launchInternalUrl: "http://192.168.1.5:8989" })
+      .where(eq(apps.id, id));
+    await app.deps.db.insert(exposures).values({
+      id: ulid(),
+      appId: id,
+      hostname: "jellyfin.example.com",
+      ingressService: "http://web:80",
+      state: "provisioning",
+    });
+
+    const [tile] = (
+      await app.inject({ method: "GET", url: "/api/launcher", headers: { cookie } })
+    ).json().apps;
+    expect(tile.launchUrl).toBe("http://192.168.1.5:8989");
+  });
+
+  it("is unclickable (null launchUrl) when there is neither a live exposure nor an internal URL", async () => {
+    const { app, cookie } = await seeded();
+
+    const [tile] = (
+      await app.inject({ method: "GET", url: "/api/launcher", headers: { cookie } })
+    ).json().apps;
+    expect(tile.launchUrl).toBeNull();
   });
 });
 

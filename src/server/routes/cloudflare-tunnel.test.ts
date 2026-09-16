@@ -71,6 +71,16 @@ function tunnelFetch(accountId: string): typeof fetch {
     if (tokenMatch && method === "GET") {
       return envelope(`test-tunnel-token-${tokenMatch[1]}`);
     }
+    // `seed-ingress-config` (provision-tunnel.ts) PUTs a catch-all-only config onto every
+    // newly created tunnel — see that step's own doc comment for why. This route-level
+    // suite drives the real `createCloudflareClient` over a mocked `fetch`, not the
+    // `fakeClient()` double `provision-tunnel.test.ts` uses, so it needs its own handler
+    // for the same endpoint or the provisioning sequence fails at this step for every
+    // test in this file that provisions a tunnel.
+    const configMatch = suffix.match(/^\/cfd_tunnel\/([^/]+)\/configurations$/);
+    if (configMatch && method === "PUT") {
+      return envelope({ config: JSON.parse(String(init?.body ?? "{}")).config });
+    }
     const deleteMatch = suffix.match(/^\/cfd_tunnel\/([^/]+)$/);
     if (deleteMatch && method === "DELETE") {
       const tunnel = tunnels.find((t) => t.id === deleteMatch[1]);

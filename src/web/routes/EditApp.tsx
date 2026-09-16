@@ -10,7 +10,7 @@ import { PAGE_MAX_WIDTH } from "@web/lib/density";
 import { relativeTime } from "@web/lib/relative-time";
 import { useNow } from "@web/lib/use-now";
 import { useLayoutEffect, useState } from "react";
-import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useOutletContext, useParams } from "react-router-dom";
 
 /**
  * Same fallback wording as `AdminApps.tsx`'s `STATUS_FALLBACK`, kept as its own small
@@ -32,15 +32,29 @@ const STATUS_FALLBACK: Record<AppStatus, string> = {
  * one `config` tab (`ConfigTab`, which renders `ComposeTab` and `EnvTab` side by side; see
  * that file). A list rather than literals scattered across the nav markup, so a later tab
  * is one entry here plus one child `<Route>` in `App.tsx` — not a hunt through JSX.
+ *
+ * `config` is second, right after `overview` — the two most-visited tabs for an app an
+ * admin is actively working on, ahead of the operational ones (`containers`, `logs`,
+ * `probes`) and `exposure`, which is checked far less often.
  */
 const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "overview", label: "Overview" },
+  { to: "config", label: "Config" },
   { to: "containers", label: "Containers" },
   { to: "logs", label: "Logs" },
   { to: "probes", label: "Probes" },
-  { to: "config", label: "Config" },
   { to: "exposure", label: "Exposure" },
 ];
+
+/**
+ * The only tabs `ActionBar` (deploy/restart/pull) actually applies to — the three that
+ * touch or reflect the running compose project. `overview` is identity metadata,
+ * `probes` is health-check configuration, and `exposure` is Cloudflare configuration:
+ * none of the three ever needs a deploy/restart/pull action mid-task, and showing the
+ * bar there anyway suggested those actions apply to whatever the admin is currently
+ * looking at rather than to the app's containers specifically.
+ */
+const ACTION_BAR_TABS: ReadonlySet<string> = new Set(["containers", "logs", "config"]);
 
 /**
  * What `<Outlet context>` hands each tab. Tasks 7-9 read this with `useOutletContext`
@@ -170,6 +184,12 @@ function tabLinkClass({ isActive }: { isActive: boolean }): string {
 export function EditApp() {
   const { slug = "" } = useParams<{ slug: string }>();
   const now = useNow();
+  // The active tab is always the URL's last path segment — every tab route under
+  // `/apps/:slug` is one flat segment (`App.tsx`'s own child routes), none nests a
+  // further `:param` or splat — so this needs no route matching, just the plain
+  // pathname react-router already re-renders this component for on every navigation.
+  const location = useLocation();
+  const activeTab = location.pathname.split("/").filter(Boolean).at(-1);
   // Defaults to capped/centred at `PAGE_MAX_WIDTH` — every tab except `ConfigTab` wants
   // that, and a new tab added later gets it for free without `EditApp` having to know it
   // exists. Only `useWideEditLayout` (called from inside a tab, via the outlet context
@@ -258,7 +278,7 @@ export function EditApp() {
           <Outlet context={{ app, setWideTab } satisfies EditAppContext} />
         </main>
         <aside className="fixed inset-x-0 bottom-0 z-10 flex flex-col gap-4 border-t border-slate-200 bg-white p-3 lg:static lg:z-auto lg:w-72 lg:shrink-0 lg:border-t-0 lg:bg-transparent lg:p-0 dark:border-slate-800 dark:bg-slate-950 lg:dark:bg-transparent">
-          <ActionBar app={app} />
+          {activeTab !== undefined && ACTION_BAR_TABS.has(activeTab) && <ActionBar app={app} />}
           <ExposureSummary app={app} />
           <ImageUpdates appId={app.id} />
           <AppMetadata app={app} now={now} />

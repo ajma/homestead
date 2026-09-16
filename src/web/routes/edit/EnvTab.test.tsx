@@ -198,6 +198,26 @@ describe("EnvTab", () => {
     expect(revealCalls()).toHaveLength(0);
   });
 
+  it("wraps a long, unbroken key instead of forcing the table wider than the page", async () => {
+    // Measured defect: an unbroken `.env` key (no spaces, so nothing about it wraps by
+    // default) inside a `<table>` with the default `table-layout: auto` forces that
+    // column — and the whole table — wider than its container, past the viewport, no
+    // matter what the table's own `width: 100%` says. `break-all` on the key cell is
+    // what lets the browser wrap it instead; `overflow-x-auto` on the wrapping div is
+    // the fallback for whatever still doesn't. jsdom has no layout engine to measure an
+    // actual overflow against, so this reads the classes that encode the fix.
+    const longKey = "A_VERY_LONG_ENVIRONMENT_VARIABLE_KEY_WITH_NO_SPACES_AT_ALL_WHATSOEVER";
+    mockApi({
+      env: { status: 200, body: { entries: [{ key: longKey, masked: MASK }], exists: true } },
+    });
+    mount();
+
+    const keyCell = await screen.findByText(longKey);
+    expect(keyCell.className).toContain("break-all");
+    const scrollWrapper = keyCell.closest("table")?.parentElement;
+    expect(scrollWrapper?.className).toContain("overflow-x-auto");
+  });
+
   it("revealing one row calls reveal with that key and shows only that value", async () => {
     mockApi({
       env: {

@@ -1,4 +1,4 @@
-import { exposureHostnames } from "@server/apps/exposure-hostnames";
+import { exposureHostnames, exposureLaunchTargets } from "@server/apps/exposure-hostnames";
 import { createDb, runMigrations } from "@server/db/client";
 import { apps, exposures, hosts } from "@server/db/schema";
 import { ulid } from "ulid";
@@ -83,6 +83,58 @@ describe("exposureHostnames", () => {
   it("returns an empty map without querying when given no app ids", async () => {
     const db = await seed();
     const result = await exposureHostnames(db, []);
+    expect(result.size).toBe(0);
+  });
+});
+
+describe("exposureLaunchTargets", () => {
+  it("includes a ready exposure", async () => {
+    const db = await seed();
+    const appId = await addApp(db, "jellyfin");
+    await addExposure(db, appId, { hostname: "jellyfin.example.com", state: "ready" });
+
+    const result = await exposureLaunchTargets(db, [appId]);
+    expect(result.get(appId)).toBe("jellyfin.example.com");
+  });
+
+  it("includes a drifted exposure — the hostname is still live, only some recorded fact about it is stale", async () => {
+    const db = await seed();
+    const appId = await addApp(db, "jellyfin");
+    await addExposure(db, appId, { hostname: "jellyfin.example.com", state: "drifted" });
+
+    const result = await exposureLaunchTargets(db, [appId]);
+    expect(result.get(appId)).toBe("jellyfin.example.com");
+  });
+
+  it("excludes a still-provisioning exposure — there is nothing live to open yet", async () => {
+    const db = await seed();
+    const appId = await addApp(db, "jellyfin");
+    await addExposure(db, appId, { hostname: "jellyfin.example.com", state: "provisioning" });
+
+    const result = await exposureLaunchTargets(db, [appId]);
+    expect(result.has(appId)).toBe(false);
+  });
+
+  it("excludes an errored exposure — the last attempt failed", async () => {
+    const db = await seed();
+    const appId = await addApp(db, "jellyfin");
+    await addExposure(db, appId, { hostname: "jellyfin.example.com", state: "error" });
+
+    const result = await exposureLaunchTargets(db, [appId]);
+    expect(result.has(appId)).toBe(false);
+  });
+
+  it("has no entry for an app with no exposure", async () => {
+    const db = await seed();
+    const appId = await addApp(db, "jellyfin");
+
+    const result = await exposureLaunchTargets(db, [appId]);
+    expect(result.has(appId)).toBe(false);
+  });
+
+  it("returns an empty map without querying when given no app ids", async () => {
+    const db = await seed();
+    const result = await exposureLaunchTargets(db, []);
     expect(result.size).toBe(0);
   });
 });

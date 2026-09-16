@@ -1,6 +1,7 @@
 import type { LauncherApp, ProbeSnapshot } from "@shared/launcher.js";
 import { rollUpProbes } from "@shared/status-phrase.js";
 import { and, eq, isNull } from "drizzle-orm";
+import { exposureLaunchTargets } from "../apps/exposure-hostnames.js";
 import type { AuthContext } from "../auth/context.js";
 import { visibleAppsWhere } from "../auth/context.js";
 import type { Db } from "../db/client.js";
@@ -59,10 +60,20 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
     byApp.set(probe.appId, list);
   }
 
+  // A live public hostname wins over the admin's own hand-set internal URL — the whole
+  // point of exposing an app is to reach it this way, and an internal-only address is
+  // frequently unreachable from wherever the tile was actually tapped. See
+  // `exposureLaunchTargets`'s own doc comment for exactly which exposure states count.
+  const exposureMap = await exposureLaunchTargets(
+    db,
+    rows.map((row) => row.id),
+  );
+
   return rows
     .map((row) => {
       const appProbes = byApp.get(row.id) ?? [];
       const { status, reason, since } = rollUpProbes(appProbes);
+      const exposureHostname = exposureMap.get(row.id);
       // Every property explicit. Do not rewrite as a spread — that inverts the failure
       // mode so a new column leaks until someone remembers to exclude it.
       return {
@@ -72,7 +83,7 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
         description: row.description,
         iconRef: row.iconRef,
         category: row.category,
-        launchUrl: row.launchInternalUrl,
+        launchUrl: exposureHostname !== undefined ? `https://${exposureHostname}` : row.launchInternalUrl,
         sortOrder: row.sortOrder,
         status,
         reason,

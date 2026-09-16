@@ -54,7 +54,12 @@ function json(status: number, body: unknown): Response {
   });
 }
 
-const APP = { id: "app-1", displayName: "Jellyfin", systemKind: null as "self" | null };
+const APP = {
+  id: "app-1",
+  displayName: "Jellyfin",
+  systemKind: null as "self" | null,
+  directory: "jellyfin",
+};
 const ZONES: CloudflareZone[] = [{ id: "z1", name: "example.com" }];
 const NOT_PROVISIONED: TunnelStatus = { provisioned: false, runningJobId: null };
 const PROVISIONED: TunnelStatus = {
@@ -139,8 +144,12 @@ function stubFetch(opts: {
  * doc comment describes, so nothing here has to drive that field by hand. */
 async function fillExposeForm() {
   fireEvent.change(screen.getByLabelText(/Hostname/), {
-    target: { value: "jellyfin.example.com" },
+    target: { value: "jellyfin" },
   });
+  // The zone `<select>` only renders once `zones.data` resolves — the same "always await
+  // before interacting" rule the other tests in this file already follow for it. Without
+  // this, firing straight to the next line races the mocked fetch's own microtasks.
+  await waitFor(() => expect(screen.getByLabelText(/Zone/)).toBeTruthy());
   fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
   await waitFor(() =>
     expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("8096"),
@@ -341,7 +350,7 @@ describe("ExposurePanel", () => {
 
       await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
       fireEvent.change(screen.getByLabelText(/Hostname/), {
-        target: { value: "jellyfin.example.com" },
+        target: { value: "jellyfin" },
       });
       await waitFor(() => expect(screen.getByLabelText(/Zone/)).toBeTruthy());
       fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
@@ -368,7 +377,7 @@ describe("ExposurePanel", () => {
 
       await waitFor(() => expect(screen.getByLabelText(/Hostname/)).toBeTruthy());
       fireEvent.change(screen.getByLabelText(/Hostname/), {
-        target: { value: "homestead.example.com" },
+        target: { value: "homestead" },
       });
       await waitFor(() => expect(screen.getByLabelText(/Zone/)).toBeTruthy());
       fireEvent.change(screen.getByLabelText(/Zone/), { target: { value: "z1" } });
@@ -383,6 +392,76 @@ describe("ExposurePanel", () => {
       );
       const body = JSON.parse(String((call?.[1] as RequestInit)?.body));
       expect(body).toEqual({ hostname: "homestead.example.com", zoneId: "z1", port: 3000 });
+    });
+  });
+
+  describe("the hostname field composes with the selected zone (measured defect)", () => {
+    // The actual bug this locks in: a bare subdomain typed with no dot used to be sent to
+    // Cloudflare completely unqualified, because the "Hostname" field and the "Zone"
+    // dropdown had no connection to each other at all. `create-dns-record` tolerated it
+    // silently (Cloudflare's DNS API accepts a relative name within a zone); the very
+    // next step, `create-access-app`, does not, and rejected it as not belonging to any
+    // zone — several steps into a job that had already created (and had to roll back) a
+    // real DNS record. See `composeHostname`'s own doc comment in ExposureTab.tsx.
+    it("composes a bare subdomain with the selected zone's domain, not the raw input", async () => {
+      const fetchMock = stubFetch({ tunnel: PROVISIONED });
+      mount();
+      fireEvent.change(await screen.findByLabelText(/Hostname/), {
+        target: { value: "homestead" },
+      });
+      fireEvent.change(await screen.findByLabelText(/Zone/), { target: { value: "z1" } });
+      await waitFor(() =>
+        expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("8096"),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Expose" }));
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+      const call = fetchMock.mock.calls.find(
+        (c) => c[0] === `/api/apps/${APP.id}/expose` && (c[1] as RequestInit)?.method === "POST",
+      );
+      const body = JSON.parse(String((call?.[1] as RequestInit)?.body));
+      expect(body).toEqual({ hostname: "homestead.example.com", zoneId: "z1", port: 8096 });
+    });
+
+    it("exposes at the zone's own root domain when the subdomain is left blank", async () => {
+      const fetchMock = stubFetch({ tunnel: PROVISIONED });
+      mount();
+      // Cleared explicitly — the field prefills from the app's directory (below), so
+      // "left blank" means the admin emptied it, not that it started that way.
+      fireEvent.change(await screen.findByLabelText(/Hostname/), { target: { value: "" } });
+      fireEvent.change(await screen.findByLabelText(/Zone/), { target: { value: "z1" } });
+      await waitFor(() =>
+        expect((screen.getByLabelText(/Port/) as HTMLSelectElement).value).toBe("8096"),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Expose" }));
+      await waitFor(() => expect(FakeEventSource.instances.length).toBe(1));
+
+      const call = fetchMock.mock.calls.find(
+        (c) => c[0] === `/api/apps/${APP.id}/expose` && (c[1] as RequestInit)?.method === "POST",
+      );
+      const body = JSON.parse(String((call?.[1] as RequestInit)?.body));
+      expect(body).toEqual({ hostname: "example.com", zoneId: "z1", port: 8096 });
+    });
+  });
+
+  describe("the hostname box only ever holds one DNS label", () => {
+    it("prefills the hostname from the app's own directory name", async () => {
+      stubFetch({ tunnel: PROVISIONED });
+      mount();
+
+      const input = (await screen.findByLabelText(/Hostname/)) as HTMLInputElement;
+      expect(input.value).toBe(APP.directory);
+    });
+
+    it("strips characters a DNS label cannot contain as the admin types, rather than at submit time", async () => {
+      stubFetch({ tunnel: PROVISIONED });
+      mount();
+
+      const input = (await screen.findByLabelText(/Hostname/)) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "My App! 01.example.com" } });
+      expect(input.value).toBe("myapp01examplecom");
     });
   });
 

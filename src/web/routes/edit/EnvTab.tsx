@@ -1029,8 +1029,18 @@ export function EnvTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => 
                 : "This app has no .env file yet — switch to Raw to create one."}
             </p>
           ) : (
-            <table className="w-full border-collapse text-sm">
-              <tbody>
+            // `overflow-x-auto`, not just `w-full` on the table: a `<table>` with
+            // `table-layout: auto` (the default) still grows past its container to fit
+            // any cell's content that cannot shrink below its own min-content width — an
+            // unbroken `.env` key with no spaces is exactly that content, and this is the
+            // one place on the edit page a value the admin doesn't control (an existing
+            // key, not something typed into this form) reaches the DOM unconstrained.
+            // `break-all` on the key cell below fixes the common case (the key wraps
+            // instead of forcing the column wider); this scrolls the table itself, not
+            // the whole page, for whatever still doesn't.
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-sm">
+                <tbody>
                 {entries.map((entry, index) => {
                   const shadowed = lastIndexForKey.get(entry.key) !== index;
                   const isDeleted = deletedKeys.has(entry.key);
@@ -1042,7 +1052,7 @@ export function EnvTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => 
                       key={index}
                       className="border-t border-slate-200 dark:border-slate-800"
                     >
-                      <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
+                      <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100 break-all">
                         {entry.key}
                         {shadowed && !isDeleted && (
                           <p className="mt-1 max-w-[16rem] text-xs font-normal italic text-amber-600 dark:text-amber-400">
@@ -1117,7 +1127,7 @@ export function EnvTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => 
                     key={`new-${key}`}
                     className="border-t border-slate-200 dark:border-slate-800"
                   >
-                    <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100">
+                    <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100 break-all">
                       {key}
                       <p className="mt-1 text-xs font-normal italic text-emerald-600 dark:text-emerald-400">
                         New — will be added on save.
@@ -1146,7 +1156,8 @@ export function EnvTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => 
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
 
           <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-slate-200 p-3 dark:border-slate-800">

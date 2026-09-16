@@ -74,7 +74,7 @@ export type ProvisionTunnelDeps = {
 };
 
 /**
- * Builds the five-step provision sequence (spec §6), for `runSteps`/`StepJobRunner` to
+ * Builds the six-step provision sequence (spec §6), for `runSteps`/`StepJobRunner` to
  * run. Pure with respect to Cloudflare and the database in the sense that matters here:
  * every side effect is reached through `deps`, so a test can substitute a fake
  * `CloudflareClient` and either `FakeHost` or a real `LocalHost` without this function
@@ -132,6 +132,47 @@ export function tunnelProvisionSteps(deps: ProvisionTunnelDeps): Array<Step<Prov
         if (!ctx.created) return;
         await deps.client.deleteTunnel(ctx.tunnelId);
       },
+    },
+    {
+      // Measured defect: a tunnel Cloudflare just created via `createTunnel` has never
+      // had a configuration `PUT` to it, so its `GET .../configurations` response comes
+      // back as `{ config: {} }` — no `ingress` key at all. `client.ts`'s
+      // `getTunnelConfig` treats that shape as malformed and throws ("Cloudflare's
+      // tunnel configuration response did not match the expected shape"), on purpose
+      // (`client.test.ts`'s "raises when the response does not carry a usable
+      // config.ingress"), because an established tunnel that lost its `ingress` key
+      // would be a real problem worth failing loudly on. But nothing before this step
+      // ever put a first `ingress` array on a brand-new tunnel, so `expose.ts`'s
+      // `splice-ingress` — the very first Cloudflare call any exposure makes — hit
+      // exactly that "malformed" shape on every app's first-ever expose, with nothing to
+      // roll back (it is that sequence's first step). Establishing the baseline here,
+      // once, for a tunnel THIS run created, is what makes that read succeed from then on.
+      //
+      // The seeded array is `[{ service: "http_status:404" }]` — a catch-all only, not
+      // `[]` — because Cloudflare's API rejects a `PUT` with zero ingress rules outright
+      // (measured live: "Bad Configuration: Validation failed: The config file doesn't
+      // contain any ingress rules", code 1056). A bare catch-all is also exactly the
+      // shape `ingress.ts`'s `spliceIngress` already expects to find and splice new
+      // hostnames in front of — see its own doc comment on `catchAllIndex`.
+      name: "seed-ingress-config",
+      async run(ctx) {
+        if (ctx.tunnelId === undefined) {
+          throw new Error("seed-ingress-config ran before create-tunnel produced a tunnel id");
+        }
+        // Never for an adopted tunnel — same gate as `create-tunnel`'s own `undo`, and
+        // the same reasoning: an adopted tunnel may already carry a human's own remote
+        // config (or be managed entirely through a local `cloudflared` config file
+        // instead), and overwriting either with a fresh catch-all is exactly the "assume
+        // it's fine to change" mistake `expose.ts`'s doc comments warn against for every
+        // other adopted resource in this codebase.
+        if (!ctx.created) return;
+        await deps.client.putTunnelConfig(ctx.tunnelId, {
+          ingress: [{ service: "http_status:404" }],
+        });
+      },
+      // No `undo`: this step never writes anything `create-tunnel`'s own `undo` does not
+      // already erase by deleting the tunnel it created, and it never runs for an
+      // adopted tunnel in the first place.
     },
     {
       name: "fetch-token",

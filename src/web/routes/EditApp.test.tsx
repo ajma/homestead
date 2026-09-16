@@ -169,18 +169,17 @@ describe("EditApp", () => {
     }
   });
 
-  it("orders the tabs Overview, Containers, Logs, Probes, Config, then Exposure", () => {
-    // Not just presence — the brief calls for "a sensible order" and this is the one a
-    // reader would expect: status/inspection tabs first, the combined Config tab (the
-    // heaviest, least-often-needed one) after that, and 2F Task 3's exposure tab — the
-    // newest, and the one most apps will never touch — last of all.
+  it("orders the tabs Overview, Config, Containers, Logs, Probes, then Exposure", () => {
+    // Config sits right after Overview — the two tabs an admin actively working on an
+    // app reaches for most, ahead of the operational tabs (Containers, Logs, Probes) and
+    // Exposure, the one most apps will never touch.
     stubFetch(app);
     mount();
     const nav = screen.getByRole("navigation", { name: "App sections" });
     const labels = within(nav)
       .getAllByRole("link")
       .map((link) => link.textContent);
-    expect(labels).toEqual(["Overview", "Containers", "Logs", "Probes", "Config", "Exposure"]);
+    expect(labels).toEqual(["Overview", "Config", "Containers", "Logs", "Probes", "Exposure"]);
   });
 
   describe("moving between tabs by clicking, not just visiting a tab's URL directly", () => {
@@ -315,6 +314,60 @@ describe("EditApp", () => {
     });
   });
 
+  describe("right-rail action bar", () => {
+    // Deploy/restart/pull act on the app's containers, so the bar only makes sense
+    // alongside the tabs that are actually about the running compose project —
+    // Containers, Logs and Config. It has no business showing up next to identity
+    // metadata (Overview), health-check configuration (Probes), or Cloudflare
+    // configuration (Exposure), where "deploy" answers a question nobody asked there.
+    function stubFetchForActionBar(seedApp: AdminApp) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/jobs") || url.endsWith("/images")) {
+            return new Response("[]", {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.endsWith("/expose")) {
+            return new Response(JSON.stringify({ exposed: false, runningJobId: null }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify(seedApp), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }),
+      );
+    }
+
+    for (const tab of ["containers", "logs", "config"]) {
+      it(`shows Deploy/Restart/Pull on the ${tab} tab`, async () => {
+        stubFetchForActionBar(app);
+        mount(`/apps/jellyfin/${tab}`);
+        expect(await screen.findByRole("button", { name: "Deploy" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Restart" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Pull" })).toBeTruthy();
+      });
+    }
+
+    for (const tab of ["overview", "probes", "exposure"]) {
+      it(`hides the action bar on the ${tab} tab`, async () => {
+        stubFetchForActionBar(app);
+        mount(`/apps/jellyfin/${tab}`);
+        // Something from this tab (or the always-present rail) has to actually render
+        // first, or a query for the absent button would trivially pass before the page
+        // finished mounting at all.
+        await screen.findByRole("heading", { name: /Jellyfin/ });
+        expect(screen.queryByRole("button", { name: "Deploy" })).toBeNull();
+      });
+    }
+  });
+
   describe("right-rail metadata", () => {
     // Spec §8's right rail: "actions, exposure, image updates, and metadata" — the
     // metadata part, wrongly claimed as delivered by 1E's Self-Review (Task 11).
@@ -380,10 +433,12 @@ describe("EditApp", () => {
     // updates, metadata — and the survey found exposure was the one missing: it existed
     // only inside the Exposure tab itself, one click away.
 
-    // `ActionBar` (also in the rail) reads `GET .../jobs` for real whenever it isn't
-    // given `knownRunningJobId` — `EditApp` doesn't pass it — so every stub in this
-    // block must answer that endpoint with an array, not fall through to a shape
-    // `jobs?.find` cannot call.
+    // `mount()` here defaults to the Overview tab, where `ActionBar` no longer renders
+    // at all (it's scoped to Containers/Logs/Config — see `ACTION_BAR_TABS`), but this
+    // stub still answers `/jobs` and `/images` defensively: `ImageUpdates` (also always
+    // in the rail) reads `/images` for real regardless of tab, and a future test in this
+    // block that mounts on a tab where `ActionBar` DOES render must not have to
+    // rediscover this requirement.
     function stubExposure(body: unknown) {
       vi.stubGlobal(
         "fetch",
