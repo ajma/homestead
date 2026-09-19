@@ -196,9 +196,7 @@ describe("tunnelProvisionSteps — happy path", () => {
     // `expose.ts`'s `splice-ingress` would hit Cloudflare's "no ingress key" shape on the
     // very first app exposed against it. `[]` alone would not do: Cloudflare's API
     // rejects a `PUT` with zero ingress rules (measured live, code 1056).
-    expect(calls.putConfig).toEqual([
-      { tunnelId, ingress: [{ service: "http_status:404" }] },
-    ]);
+    expect(calls.putConfig).toEqual([{ tunnelId, ingress: [{ service: "http_status:404" }] }]);
 
     const record = await tunnelStore.get();
     expect(record?.tunnelId).toBe(tunnelId);
@@ -342,12 +340,7 @@ describe("tunnelProvisionSteps — failure and rollback", () => {
     expect(outcome.failed).toBe("compose-up");
     // Same as above: `seed-ingress-config` has no `undo`, so it is skipped rather than
     // listed.
-    expect(outcome.undone).toEqual([
-      "register-app",
-      "write-files",
-      "fetch-token",
-      "create-tunnel",
-    ]);
+    expect(outcome.undone).toEqual(["register-app", "write-files", "fetch-token", "create-tunnel"]);
 
     expect(calls.deleted).toEqual(calls.created);
     expect(host.files.has(`${CLOUDFLARED_DIRECTORY}/compose.yaml`)).toBe(false);

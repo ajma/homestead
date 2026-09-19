@@ -83,7 +83,8 @@ export async function launcherApps(db: Db, ctx: AuthContext): Promise<LauncherAp
         description: row.description,
         iconRef: row.iconRef,
         category: row.category,
-        launchUrl: exposureHostname !== undefined ? `https://${exposureHostname}` : row.launchInternalUrl,
+        launchUrl:
+          exposureHostname !== undefined ? `https://${exposureHostname}` : row.launchInternalUrl,
         sortOrder: row.sortOrder,
         status,
         reason,

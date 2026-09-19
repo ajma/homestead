@@ -40,7 +40,10 @@ export async function exposureHostnames(db: Db, appIds: string[]): Promise<Map<s
  * public hostname: a tile that opens a 404 for a still-provisioning app is worse than one
  * that falls back to the app's own internal URL, or stays unclickable.
  */
-export async function exposureLaunchTargets(db: Db, appIds: string[]): Promise<Map<string, string>> {
+export async function exposureLaunchTargets(
+  db: Db,
+  appIds: string[],
+): Promise<Map<string, string>> {
   if (appIds.length === 0) return new Map();
 
   const rows = await db

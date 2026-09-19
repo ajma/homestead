@@ -1041,121 +1041,121 @@ export function EnvTab({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => 
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-sm">
                 <tbody>
-                {entries.map((entry, index) => {
-                  const shadowed = lastIndexForKey.get(entry.key) !== index;
-                  const isDeleted = deletedKeys.has(entry.key);
-                  const value = edits[entry.key] ?? revealed[index];
-                  const revealPending = revealingIndices.has(index);
-                  return (
+                  {entries.map((entry, index) => {
+                    const shadowed = lastIndexForKey.get(entry.key) !== index;
+                    const isDeleted = deletedKeys.has(entry.key);
+                    const value = edits[entry.key] ?? revealed[index];
+                    const revealPending = revealingIndices.has(index);
+                    return (
+                      <tr
+                        // biome-ignore lint/suspicious/noArrayIndexKey: rows are keyed by position on purpose — a duplicated key is two distinct rows here.
+                        key={index}
+                        className="border-t border-slate-200 dark:border-slate-800"
+                      >
+                        <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100 break-all">
+                          {entry.key}
+                          {shadowed && !isDeleted && (
+                            <p className="mt-1 max-w-[16rem] text-xs font-normal italic text-amber-600 dark:text-amber-400">
+                              Set again below — that later line is the one compose reads.
+                            </p>
+                          )}
+                        </td>
+                        <td className="py-2 align-top">
+                          {isDeleted ? (
+                            <p className="text-xs italic text-rose-600 dark:text-rose-400">
+                              Will be removed on save.
+                            </p>
+                          ) : value !== undefined ? (
+                            <input
+                              type="text"
+                              value={value}
+                              onChange={(event) =>
+                                setEdits((prev) => ({ ...prev, [entry.key]: event.target.value }))
+                              }
+                              aria-label={`${entry.key} value`}
+                              className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
+                            />
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                readOnly
+                                value={entry.masked}
+                                aria-label={`${entry.key} value`}
+                                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleReveal(index, entry.key)}
+                                disabled={revealPending}
+                                className="shrink-0 rounded-lg border border-slate-200 px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-800"
+                              >
+                                {revealPending ? "Revealing…" : "Reveal"}
+                              </button>
+                            </div>
+                          )}
+                          {!isDeleted && revealErrors[index] && (
+                            <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">
+                              {revealErrors[index]}
+                            </p>
+                          )}
+                        </td>
+                        <td className="py-2 pl-3 align-top">
+                          {isDeleted ? (
+                            <button
+                              type="button"
+                              onClick={() => handleUndoDelete(entry.key)}
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs dark:border-slate-800"
+                            >
+                              Undo delete
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteKey(entry.key)}
+                              className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-rose-700 dark:border-slate-800 dark:text-rose-300"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {pendingNewKeys.map((key) => (
                     <tr
-                      // biome-ignore lint/suspicious/noArrayIndexKey: rows are keyed by position on purpose — a duplicated key is two distinct rows here.
-                      key={index}
+                      key={`new-${key}`}
                       className="border-t border-slate-200 dark:border-slate-800"
                     >
                       <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100 break-all">
-                        {entry.key}
-                        {shadowed && !isDeleted && (
-                          <p className="mt-1 max-w-[16rem] text-xs font-normal italic text-amber-600 dark:text-amber-400">
-                            Set again below — that later line is the one compose reads.
-                          </p>
-                        )}
+                        {key}
+                        <p className="mt-1 text-xs font-normal italic text-emerald-600 dark:text-emerald-400">
+                          New — will be added on save.
+                        </p>
                       </td>
                       <td className="py-2 align-top">
-                        {isDeleted ? (
-                          <p className="text-xs italic text-rose-600 dark:text-rose-400">
-                            Will be removed on save.
-                          </p>
-                        ) : value !== undefined ? (
-                          <input
-                            type="text"
-                            value={value}
-                            onChange={(event) =>
-                              setEdits((prev) => ({ ...prev, [entry.key]: event.target.value }))
-                            }
-                            aria-label={`${entry.key} value`}
-                            className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
-                          />
-                        ) : (
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              readOnly
-                              value={entry.masked}
-                              aria-label={`${entry.key} value`}
-                              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => handleReveal(index, entry.key)}
-                              disabled={revealPending}
-                              className="shrink-0 rounded-lg border border-slate-200 px-2 py-1 text-xs disabled:opacity-50 dark:border-slate-800"
-                            >
-                              {revealPending ? "Revealing…" : "Reveal"}
-                            </button>
-                          </div>
-                        )}
-                        {!isDeleted && revealErrors[index] && (
-                          <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">
-                            {revealErrors[index]}
-                          </p>
-                        )}
+                        <input
+                          type="text"
+                          value={edits[key] ?? ""}
+                          onChange={(event) =>
+                            setEdits((prev) => ({ ...prev, [key]: event.target.value }))
+                          }
+                          aria-label={`${key} value`}
+                          className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
+                        />
                       </td>
                       <td className="py-2 pl-3 align-top">
-                        {isDeleted ? (
-                          <button
-                            type="button"
-                            onClick={() => handleUndoDelete(entry.key)}
-                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs dark:border-slate-800"
-                          >
-                            Undo delete
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteKey(entry.key)}
-                            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-rose-700 dark:border-slate-800 dark:text-rose-300"
-                          >
-                            Delete
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteKey(key)}
+                          className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-rose-700 dark:border-slate-800 dark:text-rose-300"
+                        >
+                          Remove
+                        </button>
                       </td>
                     </tr>
-                  );
-                })}
-                {pendingNewKeys.map((key) => (
-                  <tr
-                    key={`new-${key}`}
-                    className="border-t border-slate-200 dark:border-slate-800"
-                  >
-                    <td className="py-2 pr-3 align-top font-mono text-xs text-slate-900 dark:text-slate-100 break-all">
-                      {key}
-                      <p className="mt-1 text-xs font-normal italic text-emerald-600 dark:text-emerald-400">
-                        New — will be added on save.
-                      </p>
-                    </td>
-                    <td className="py-2 align-top">
-                      <input
-                        type="text"
-                        value={edits[key] ?? ""}
-                        onChange={(event) =>
-                          setEdits((prev) => ({ ...prev, [key]: event.target.value }))
-                        }
-                        aria-label={`${key} value`}
-                        className="w-full rounded-lg border border-slate-200 px-2 py-1 font-mono text-xs dark:border-slate-800 dark:bg-slate-950"
-                      />
-                    </td>
-                    <td className="py-2 pl-3 align-top">
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteKey(key)}
-                        className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-rose-700 dark:border-slate-800 dark:text-rose-300"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
+                  ))}
+                </tbody>
               </table>
             </div>
           )}
